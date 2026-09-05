@@ -91,7 +91,7 @@ fn types() {
                     Value::Float(0.1),
                     Value::Float(1e20),
                     Value::Float(1e-7),
-                    Value::Float(-0.0),
+                    Value::Float(-1.25),
                     Value::Float(1234567.0),
                 ]),
             )
@@ -276,4 +276,22 @@ fn binding() {
     ));
 
     assert_eq!(document.to_rdla(), oracle("binding"));
+}
+
+/// Negative zero prints as `-0`.
+///
+/// Captured on its own because rdl2's reader turns `-0` back into `0`,
+/// so this is the one scene that does not survive a round-trip through
+/// rdl2 itself. The emitter still has to match the writer.
+#[test]
+fn signed_zero() {
+    let mut document = Document::default();
+    document.push(Object::scene_variables());
+    document.push(
+        Object::new("ExtensiveObject", "/oracle/signed_zero")
+            .set("float", Value::Float(-0.0))
+            .set("double", Value::Double(-0.0)),
+    );
+
+    assert_eq!(document.to_rdla(), oracle("signed_zero"));
 }

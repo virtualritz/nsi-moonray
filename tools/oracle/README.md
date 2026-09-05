@@ -21,7 +21,21 @@ The four scenes:
 | `scene` | geometry, a `Layer` assignment, sets, `RenderOutput`, `SceneVariables` |
 | `blur` | `blur(a, b)` — rdl2 takes exactly two motion samples |
 | `binding` | `bind(...)`, where ɴsɪ's named shader ports land |
+| `signed_zero` | `-0`, which rdl2 writes and does not read back |
 
 Values are chosen to differ from each class's declared defaults, because
 the writer runs with `setSkipDefaults(true)` and would otherwise omit
 the very attribute being captured.
+
+Two modes:
+
+```bash
+oracle capture <rdl2-dso-path> <output-directory>
+oracle verify  <rdl2-dso-path> <file.rdla>...
+```
+
+`verify` reads a file back through rdl2's `AsciiReader` and writes it
+out again, then diffs. Byte equality against a captured file proves the
+syntax; only the round-trip proves rdl2 *accepts* it. All four scenes
+round-trip; `signed_zero` deliberately does not, because rdl2's reader
+turns `-0` into `0`.

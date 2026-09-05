@@ -25,7 +25,7 @@ ExtensiveObject("/oracle/types") {
     ["bool_vector"] = { false, true, false},
     ["int_vector"] = { 1, 2, 3},
     ["long_vector"] = { 4, 5},
-    ["float_vector"] = { 0.100000001, 1.00000002e+20, 1.00000001e-07, -0, 1234567},
+    ["float_vector"] = { 0.100000001, 1.00000002e+20, 1.00000001e-07, -1.25, 1234567},
     ["double_vector"] = { 0.10000000000000001, 1.0000000000000001e+300, 9.9999999999999995e-08, -2.5, 1234567890123},
     ["string_vector"] = { "one", "two"},
     ["rgb_vector"] = { Rgb(1, 0, 0), Rgb(0, 1, 0)},

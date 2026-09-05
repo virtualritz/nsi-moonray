@@ -25,10 +25,10 @@ be built at all, and has.
 - [x] T0.4 Confirm the `scene_rdl2` type names in `data-model.md`
       against its `Types.h`. Done, and the `Vec`/`Mat` suffix rule
       corrected with them.
-- [ ] T0.5 Round-trip the emitted `.rdla` back through rdl2's
-      `AsciiReader` and out through `AsciiWriter`, and diff. Byte
-      equality against a captured file proves the syntax; only a
-      round-trip proves rdl2 *accepts* what we write.
+- [x] T0.5 Round-trip the emitted `.rdla` back through rdl2's
+      `AsciiReader` and out through `AsciiWriter`, and diff. Done:
+      `oracle verify`. All four scenes round-trip; negative zero does
+      not, which is upstream's asymmetry and is captured separately.
 - [ ] T0.6 An authoring twin of `RdlMeshGeometry`: a DSO built from
       moonray's own `attributes.cc` with a stub implementation, so a
       real mesh scene can be built and read back without the renderer.

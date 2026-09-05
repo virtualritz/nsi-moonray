@@ -32,7 +32,7 @@ interactive work; `TN.1`.
 | `.rdla` oracle captured via `AsciiWriter` | no | **yes** |
 | Binding strategy chosen by experiment | no | **yes** |
 | Emitter matches the oracle byte for byte | no | **yes** |
-| rdl2 reads back what the emitter writes | no | no |
+| rdl2 reads back what the emitter writes | no | **yes** |
 | A scene flushes from `nsi_intermediate::Scene` | no | no, `T0.7` |
 | Full MoonRay builds | **yes** | no |
 | A triangle renders | **yes** | no |

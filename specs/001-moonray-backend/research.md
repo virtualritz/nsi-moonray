@@ -186,6 +186,14 @@ have survived a plausible guess:
 bare references, and a vector is `{ a, b}` -- a space after the brace,
 none before the close.
 
+**rdl2 reads back what it writes, with one exception.** Feeding each
+captured scene to `AsciiReader` and writing it out again reproduces the
+file byte for byte -- except negative zero, which the writer prints as
+`-0` and the reader turns back into `0`. The emitter follows the
+writer; `oracle/signed_zero.rdla` records the asymmetry rather than
+rounding it away, and is the one capture excluded from the round-trip
+check.
+
 ## Settled Questions
 
 - **Binding strategy: generate `.rdla` first.** The format is small,

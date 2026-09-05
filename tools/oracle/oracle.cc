@@ -15,7 +15,9 @@
 #include <scene_rdl2/scene/rdl2/rdl2.h>
 
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 using namespace scene_rdl2;
@@ -84,7 +86,7 @@ types(const std::string& dsoPath, const std::string& outDirectory)
         // Awkward values on purpose: this is where the number
         // formatting rdl2 uses gets pinned down, rather than
         // guessed at from the round ones.
-        object->set("float_vector", FloatVector{0.1f, 1e20f, 1e-7f, -0.0f, 1234567.0f});
+        object->set("float_vector", FloatVector{0.1f, 1e20f, 1e-7f, -1.25f, 1234567.0f});
         object->set("double_vector", DoubleVector{0.1, 1e300, 1e-7, -2.5, 1234567890123.0});
         object->set("string_vector", StringVector{"one", "two"});
         object->set("rgb_vector", RgbVector{Rgb(1.0f, 0.0f, 0.0f), Rgb(0.0f, 1.0f, 0.0f)});
@@ -213,6 +215,31 @@ blur(const std::string& dsoPath, const std::string& outDirectory)
     capture(context, outDirectory, "blur");
 }
 
+/// Negative zero, on its own.
+///
+/// rdl2's writer prints `-0`, and its reader turns that back into `0` —
+/// so this one scene does not survive `verify`. It is captured
+/// separately for exactly that reason: the emitter has to match the
+/// writer, and the asymmetry is upstream's, not something to paper over
+/// by rounding it away here.
+void
+signedZero(const std::string& dsoPath, const std::string& outDirectory)
+{
+    SceneContext context;
+    context.setDsoPath(dsoPath);
+
+    SceneObject* object =
+        context.createSceneObject("ExtensiveObject", "/oracle/signed_zero");
+
+    {
+        SceneObject::UpdateGuard guard(object);
+        object->set("float", -0.0f);
+        object->set("double", -0.0);
+    }
+
+    capture(context, outDirectory, "signed_zero");
+}
+
 /// An attribute bound to another object. ɴsɪ's named shader ports land
 /// here, so the emitted syntax matters.
 void
@@ -232,28 +259,99 @@ binding(const std::string& dsoPath, const std::string& outDirectory)
     capture(context, outDirectory, "binding");
 }
 
+/// Read a `.rdla` file back through rdl2's own `AsciiReader` and write
+/// it out again with `AsciiWriter`, then compare.
+///
+/// Byte equality against a captured file proves this backend spells the
+/// format the way rdl2 does. Only this proves rdl2 *accepts* what it
+/// spells -- a file can be written correctly enough to diff clean and
+/// still be rejected, and one that rdl2 refuses renders nothing at all.
+bool
+verify(const std::string& dsoPath, const std::string& path)
+{
+    std::ifstream input(path);
+    if (!input) {
+        std::cerr << "cannot read " << path << '\n';
+        return false;
+    }
+
+    std::ostringstream original;
+    original << input.rdbuf();
+
+    SceneContext context;
+    context.setDsoPath(dsoPath);
+
+    AsciiReader reader(context);
+    reader.fromString(original.str(), "@" + path);
+
+    AsciiWriter writer(context);
+    writer.setSkipDefaults(true);
+    const std::string round = writer.toString();
+
+    if (round != original.str()) {
+        std::cerr << path << ": round-trip differs\n--- read back ---\n"
+                  << round << "--- original ---\n"
+                  << original.str();
+        return false;
+    }
+
+    std::cout << "round-trips " << path << '\n';
+    return true;
+}
+
+void
+usage()
+{
+    std::cerr << "usage: oracle capture <rdl2-dso-path> <output-directory>\n"
+              << "       oracle verify  <rdl2-dso-path> <file.rdla>...\n";
+}
+
 } // namespace
 
 int
 main(int argc, char** argv)
 {
-    if (argc != 3) {
-        std::cerr << "usage: oracle <rdl2-dso-path> <output-directory>\n";
+    if (argc < 3) {
+        usage();
         return EXIT_FAILURE;
     }
 
-    const std::string dsoPath = argv[1];
-    const std::string outDirectory = argv[2];
+    const std::string mode = argv[1];
+    const std::string dsoPath = argv[2];
 
     try {
-        types(dsoPath, outDirectory);
-        scene(dsoPath, outDirectory);
-        blur(dsoPath, outDirectory);
-        binding(dsoPath, outDirectory);
+        if (mode == "capture") {
+            if (argc != 4) {
+                usage();
+                return EXIT_FAILURE;
+            }
+
+            const std::string outDirectory = argv[3];
+            types(dsoPath, outDirectory);
+            scene(dsoPath, outDirectory);
+            blur(dsoPath, outDirectory);
+            binding(dsoPath, outDirectory);
+            signedZero(dsoPath, outDirectory);
+            return EXIT_SUCCESS;
+        }
+
+        if (mode == "verify") {
+            if (argc < 4) {
+                usage();
+                return EXIT_FAILURE;
+            }
+
+            bool ok = true;
+            for (int index = 3; index < argc; ++index) {
+                ok = verify(dsoPath, argv[index]) && ok;
+            }
+            return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
+
+        usage();
+        return EXIT_FAILURE;
     } catch (const std::exception& error) {
         std::cerr << "oracle failed: " << error.what() << '\n';
         return EXIT_FAILURE;
     }
-
-    return EXIT_SUCCESS;
 }

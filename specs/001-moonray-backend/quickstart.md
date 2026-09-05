@@ -109,10 +109,23 @@ cmake --build build-oracle -j"$(nproc)"
 # The scene classes come from rdl2's own test DSOs, which stay in the
 # build tree rather than being installed.
 LD_LIBRARY_PATH=/path/to/install/lib \
-    ./build-oracle/oracle \
+    ./build-oracle/oracle capture \
     /path/to/build/tests/lib/scene/rdl2 \
     specs/001-moonray-backend/oracle
 ```
+
+And to check that rdl2 reads back what it wrote — and, since the
+emitter produces the same bytes, what this crate writes:
+
+```bash
+LD_LIBRARY_PATH=/path/to/install/lib \
+    ./build-oracle/oracle verify \
+    /path/to/build/tests/lib/scene/rdl2 \
+    specs/001-moonray-backend/oracle/{types,scene,blur,binding}.rdla
+```
+
+`signed_zero.rdla` is left out on purpose: rdl2's writer prints `-0`
+and its reader returns `0`.
 
 ## What Still Needs A Heavy Host
 
