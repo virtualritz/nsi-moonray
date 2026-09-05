@@ -1,0 +1,31 @@
+[package]
+name = "nsi-moonray"
+version = "0.1.0"
+authors = ["Moritz Moeller <virtualritz@protonmail.com>"]
+edition = "2024"
+# Matches the `nsi` workspace upstream.
+rust-version = "1.88"
+keywords = ["graphics", "rendering", "3d", "ray-tracing", "moonray"]
+categories = ["graphics", "multimedia::images", "rendering::graphics-api"]
+license = "MIT OR Apache-2.0 OR Zlib"
+description = "An ɴsɪ backend on MoonRay, DreamWorks Animation's production renderer."
+repository = "https://github.com/virtualritz/nsi-moonray/"
+# Whitelist rather than blacklist, as upstream does: an `exclude` list
+# silently ships `.specify/`, `specs/` and the handoff notes.
+include = [
+    "src/**/*",
+    "/Cargo.toml",
+    "/README.md",
+]
+
+# No dependencies, deliberately.
+#
+# The flush consumes `nsi_intermediate::Scene`, and that crate is not
+# reachable from a clean checkout: it is unpublished, and a git
+# dependency on the `nsi` workspace makes Cargo fetch that repository's
+# private `.blueprints` submodule, which fails for anyone without
+# access to it -- Cargo resolves every dependency whether or not the
+# feature gating it is enabled, so declaring it optional does not help.
+# Until that is settled upstream, this crate is the `.rdla` format
+# layer, which is what the oracle tests and what the flush is built on.
+[dependencies]
