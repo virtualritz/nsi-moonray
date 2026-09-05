@@ -20,6 +20,7 @@ use crate::{
     value::{Reference, Value},
 };
 use nsi_intermediate::{IDENTITY, OwnedData, Scene};
+use nsi_trait::Type;
 
 /// MoonRay's mesh geometry, whose DSO is `moonray/dso/geometry/RdlMesh`.
 const MESH: &str = "RdlMeshGeometry";
@@ -122,14 +123,7 @@ pub fn flush(scene: &Scene) -> Flushed {
             "outputdriver" | "outputlayer" => {}
 
             "shader" => {
-                // Substituted at its defaults, not translated: an ɴsɪ
-                // shader is an OSL shader, and MoonRay runs none.
-                objects.push(Object::new(MATERIAL, handle));
-                flushed.limitations.push(format!(
-                    "shader {handle:?} is an OSL shader, which MoonRay \
-                     cannot run; a default {MATERIAL} stands in and none \
-                     of the shader's parameters are carried over"
-                ));
+                objects.push(shader(scene, handle, &mut flushed));
             }
 
             other => flushed.limitations.push(format!(
@@ -153,6 +147,20 @@ pub fn flush(scene: &Scene) -> Flushed {
     for output in scene.render_outputs() {
         for layer in &output.layers {
             objects.push(render_output(scene, &layer.handle, &layer.drivers));
+        }
+
+        // `SceneVariables`' own output file defaults to `scene.exr` in
+        // the working directory, and MoonRay writes it whether or not a
+        // `RenderOutput` names a file. Pointing it at the ɴsɪ output
+        // driver's file is what keeps a stray `scene.exr` from
+        // appearing next to whatever ran the render.
+        if let Some(file) = output
+            .layers
+            .iter()
+            .flat_map(|layer| layer.drivers.iter())
+            .find_map(|driver| image_file(scene, driver))
+        {
+            variables = variables.set("output_file", Value::String(file));
         }
 
         variables = variables
@@ -310,6 +318,86 @@ fn material(scene: &Scene, handle: &str) -> Option<Reference> {
         .map(|shader| Reference::new(MATERIAL, shader))
 }
 
+/// The parameters carried from an ɴsɪ shader into the substitute
+/// surface, paired with the `UsdPreviewSurface` attribute each feeds.
+///
+/// Matched by **exact name only**. An ɴsɪ shader is an OSL shader and
+/// its parameter names are whatever its author chose, so anything
+/// cleverer than this is guesswork -- and a guessed name table that
+/// silently maps the wrong parameter is worse than carrying nothing,
+/// because the render looks plausible. Everything not on this list is
+/// reported by name rather than dropped quietly.
+const CARRIED: [(&str, &str); 6] = [
+    ("diffuseColor", "diffuseColor"),
+    ("emissiveColor", "emissiveColor"),
+    ("roughness", "roughness"),
+    ("metallic", "metallic"),
+    ("ior", "ior"),
+    ("opacity", "opacity"),
+];
+
+/// One ɴsɪ shader, as MoonRay's stock PBR surface.
+///
+/// MoonRay runs no OSL (`research.md` F6), so the shader itself cannot
+/// cross. What crosses is a `UsdPreviewSurface` carrying the handful of
+/// parameters that share a name with one of its attributes.
+fn shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
+    let mut object = Object::new(MATERIAL, handle);
+    let Some(node) = scene.nodes.get(handle) else {
+        return object;
+    };
+
+    let mut carried = Vec::new();
+    for (from, to) in CARRIED {
+        let Some(arg) = node.attrs.get(from) else {
+            continue;
+        };
+
+        let value = match &arg.data {
+            OwnedData::F32(values)
+                if arg.type_tag == Type::Color && values.len() >= 3 =>
+            {
+                Some(Value::Rgb([values[0], values[1], values[2]]))
+            }
+            OwnedData::F32(values) if values.len() == 1 => {
+                Some(Value::Float(values[0]))
+            }
+            OwnedData::F64(values) if values.len() == 1 => {
+                Some(Value::Float(values[0] as f32))
+            }
+            _ => None,
+        };
+
+        if let Some(value) = value {
+            object = object.set(to, value);
+            carried.push(from);
+        }
+    }
+
+    let dropped: Vec<&str> = node
+        .attrs
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !carried.contains(name))
+        .collect();
+
+    if dropped.is_empty() {
+        flushed.limitations.push(format!(
+            "shader {handle:?} is an OSL shader, which MoonRay cannot \
+             run; a {MATERIAL} stands in for it"
+        ));
+    } else {
+        flushed.limitations.push(format!(
+            "shader {handle:?} is an OSL shader, which MoonRay cannot \
+             run; a {MATERIAL} stands in for it and these parameters are \
+             not carried: {}",
+            dropped.join(", ")
+        ));
+    }
+
+    object
+}
+
 /// One `EnvLight`.
 ///
 /// ɴsɪ puts the environment's *look* in an OSL shader hanging off an
@@ -420,6 +508,14 @@ fn render_output(scene: &Scene, layer: &str, drivers: &[String]) -> Object {
     }
 
     object
+}
+
+/// The file an ɴsɪ output driver writes to.
+fn image_file(scene: &Scene, driver: &str) -> Option<String> {
+    match &scene.nodes.get(driver)?.attrs.get("imagefilename")?.data {
+        OwnedData::String(files) => files.first().cloned(),
+        _ => None,
+    }
 }
 
 /// The image resolution, from the first screen that carries one.
@@ -656,7 +752,7 @@ mod tests {
             flushed
                 .limitations
                 .iter()
-                .any(|line| line.contains("none of the shader's parameters")),
+                .any(|line| line.contains("stands in for it")),
             "{:?}",
             flushed.limitations
         );

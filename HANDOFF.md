@@ -108,6 +108,21 @@ Materials are substituted, not translated: every ɴsɪ shader becomes a
 the kind of plausible-but-wrong the oracle discipline exists to
 prevent.
 
+## What Has Been Rendered
+
+Three things, all through a MoonRay built here:
+
+- a triangle, which is what found the two black-image bugs below;
+- a translated quad, checked against where the transform puts it rather
+  than against the matrix in the file (`T1.2`);
+- two quads with two materials, red and green, asserted per channel
+  (`T1.4` — the inherited top risk, and the one thing reading the file
+  could never have settled).
+
+And `examples/polyhedron` renders a `polyhedron-ops` polyhedron through
+this backend loaded as `lib3delight.so`, which is the drop-in path
+working end to end with an unmodified consumer.
+
 ## What Would Bite You
 
 **Two ways a perfectly correct scene renders black**, both found by

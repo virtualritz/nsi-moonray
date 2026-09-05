@@ -25,6 +25,15 @@ mrr scene.rdla -o image.exr     # runs `moonray -in … -out …`
 mrr scene.rdla --print          # the command, without running it
 ```
 
+## The Demo
+
+`examples/polyhedron` builds a polyhedron with
+[`polyhedron-ops`](https://github.com/virtualritz/polyhedron-ops), hands
+it to the ɴsɪ context that crate already talks to, and renders it with
+MoonRay. Nothing in it mentions MoonRay: `nsi-core` resolves a renderer
+at run time, and pointing that resolution at `libnsi_moonray.so` is the
+whole trick.
+
 ## As A Drop-In Renderer
 
 The crate also builds as `libnsi_moonray.so`, exporting the ɴsɪ C entry

@@ -90,20 +90,25 @@ whoever renders to have it installed.
 - [x] T1.1 Minimal path from a `nsi_intermediate::Scene` to an image.
       A flushed triangle renders. `tests/render.rs`, skipped where
       there is no MoonRay.
-- [~] T1.2 Geometry with its world transform. Emitted into
-      `node_xform` and unit-tested; a *translated* mesh has not been
-      rendered and compared against where the transform puts it.
+- [x] T1.2 Geometry with its world transform. A translated quad
+      renders where the transform puts it: the centre of frame is
+      covered before the translation and empty after it, the left is
+      the reverse. `tests/render.rs`.
 - [~] T1.3 Materials through `Layer`. Every ɴsɪ shader becomes a
       `UsdPreviewSurface` at its defaults -- stock MoonRay's PBR
       surface -- and the row points at it. MoonRay runs no OSL, so the
       shader itself cannot be translated; the substitution is reported.
-- [ ] T1.3a Carry what parameters can be carried into the substitute
-      surface: `diffuseColor`, `metallic`, `roughness`, `ior`,
-      `opacity`, `emissiveColor`. Which ɴsɪ shader parameters map onto
-      those depends on the shader, so this needs real scenes, not a
-      guessed name table.
-- [ ] T1.4 **Two shapes, two materials, each correct.** Inherited top
-      risk; nothing earlier catches a misbinding.
+- [~] T1.3a Carry what parameters can be carried into the substitute
+      surface. Six are, **by exact name only** -- `diffuseColor`,
+      `emissiveColor`, `roughness`, `metallic`, `ior`, `opacity` -- and
+      every other parameter on the shader is reported by name rather
+      than dropped quietly. Mapping by anything looser is guesswork: an
+      ɴsɪ shader is an OSL shader and its parameter names are its
+      author's, so a wrong guess renders plausibly and silently.
+- [x] T1.4 **Two shapes, two materials, each correct.** Inherited top
+      risk, and now checked by reading pixels rather than the file: two
+      quads, red left and green right, asserted per channel.
+      `tests/render.rs`.
 - [~] T1.5 `render_outputs()` to `RenderOutput`. One per output layer,
       carrying `channel_name` and the first driver's `file_name`; a
       layer fanning out to several drivers is not handled.
