@@ -79,18 +79,20 @@ whoever renders to have it installed.
 
 ## Needs MoonRay Installed
 
-- [ ] T0.9 Build full MoonRay (Embree, OpenVDB, OpenImageIO, ISPC;
-      Docker is the documented path) *somewhere*, so a render can
-      actually be checked. Nothing in this repository needs it to
-      construct or verify a scene -- only to see one rendered.
+- [x] T0.9 Build full MoonRay *somewhere*, so a render can actually be
+      checked. Done from source on the same four cores, in about fifty
+      minutes; recipe and its five workarounds in `quickstart.md`. It
+      rendered a flushed triangle, which is what turned two silent
+      black-image bugs into fixed ones.
 
 ## User Story 1: Render A Recorded Scene (P1)
 
-- [~] T1.1 Minimal path from a `nsi_intermediate::Scene` to an image.
-      The scene flushes -- mesh, camera, layer, geometry set, render
-      output -- and nothing has rendered it. Needs `T0.9`.
+- [x] T1.1 Minimal path from a `nsi_intermediate::Scene` to an image.
+      A flushed triangle renders. `tests/render.rs`, skipped where
+      there is no MoonRay.
 - [~] T1.2 Geometry with its world transform. Emitted into
-      `node_xform` and unit-tested; unrendered.
+      `node_xform` and unit-tested; a *translated* mesh has not been
+      rendered and compared against where the transform puts it.
 - [~] T1.3 Materials through `Layer`. Every ɴsɪ shader becomes a
       `UsdPreviewSurface` at its defaults -- stock MoonRay's PBR
       surface -- and the row points at it. MoonRay runs no OSL, so the

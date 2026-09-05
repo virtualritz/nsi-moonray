@@ -30,6 +30,14 @@ const PERSPECTIVE_CAMERA: &str = "PerspectiveCamera";
 /// MoonRay's environment light DSO.
 const ENVIRONMENT_LIGHT: &str = "EnvLight";
 
+/// The material given to geometry with no ɴsɪ shader bound.
+///
+/// Not a nicety: MoonRay does not render a `Layer` row whose material
+/// column is `undef()` at all. Verified against the renderer -- the
+/// same triangle is absent from the image without a material and
+/// present with one.
+const DEFAULT_MATERIAL: &str = "/nsi/default_material";
+
 /// The set every light lands in.
 ///
 /// A `Layer` row with no light set is lit by nothing, so this is
@@ -170,16 +178,31 @@ pub fn flush(scene: &Scene) -> Flushed {
         Some(Reference::new("LightSet", LIGHT_SET))
     };
 
+    let mut unshaded = 0;
     let assignments = bindings
         .into_iter()
         .map(|(handle, material)| {
+            let material = material.unwrap_or_else(|| {
+                unshaded += 1;
+                Reference::new(MATERIAL, DEFAULT_MATERIAL)
+            });
+
             Assignment::new(
                 Reference::new(MESH, &handle),
-                material,
+                Some(material),
                 light_set.clone(),
             )
         })
         .collect();
+
+    if unshaded > 0 {
+        objects.push(Object::new(MATERIAL, DEFAULT_MATERIAL));
+        flushed.limitations.push(format!(
+            "{unshaded} shape(s) had no ɴsɪ shader bound and were given a \
+             default {MATERIAL}; MoonRay does not render geometry whose \
+             layer assignment has no material"
+        ));
+    }
 
     if !geometries.is_empty() {
         objects.push(Object {
@@ -522,12 +545,23 @@ mod tests {
         assert!(rdla.contains("[\"image_width\"] = 320,"), "{rdla}");
         assert!(rdla.contains("[\"file_name\"] = \"beauty.exr\","), "{rdla}");
         assert!(rdla.contains("[\"channel_name\"] = \"Ci\","), "{rdla}");
-        // The one thing missing from this scene is a light, and the
-        // flush says exactly that rather than leaving a black render
-        // unexplained.
-        assert_eq!(flushed.limitations.len(), 1, "{:?}", flushed.limitations);
+        // Two things are missing from this scene and the flush names
+        // both: it has no light, and its shape has no shader. A
+        // correct scene that renders black otherwise looks like a bug
+        // in this backend.
         assert!(
-            flushed.limitations[0].contains("renders black"),
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("renders black")),
+            "{:?}",
+            flushed.limitations
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("no ɴsɪ shader bound")),
             "{:?}",
             flushed.limitations
         );
@@ -677,7 +711,8 @@ mod tests {
         );
         assert!(
             rdla.contains(
-                "{RdlMeshGeometry(\"tri\"), \"\", undef(), \
+                "{RdlMeshGeometry(\"tri\"), \"\", \
+                 UsdPreviewSurface(\"/nsi/default_material\"), \
                  LightSet(\"/nsi/lights\")"
             ),
             "{rdla}"
@@ -692,15 +727,36 @@ mod tests {
         );
     }
 
-    /// Geometry with nothing bound to it still gets a `Layer` row.
-    /// MoonRay renders what the layer names, so a shape left out of it
-    /// is simply not in the image.
+    /// Geometry with nothing bound to it still gets a `Layer` row, and
+    /// a material.
+    ///
+    /// Both halves were learned from the renderer rather than reasoned
+    /// out: MoonRay renders what the layer names, and it skips a row
+    /// whose material column is `undef()`. Either mistake produces a
+    /// black image from a scene that looks entirely correct.
     #[test]
-    fn unbound_geometry_is_still_in_the_layer() {
-        let rdla = flush(&triangle()).to_rdla();
+    fn unbound_geometry_gets_a_row_and_a_default_material() {
+        let flushed = flush(&triangle());
+        let rdla = flushed.to_rdla();
+
         assert!(
-            rdla.contains("{RdlMeshGeometry(\"tri\"), \"\", undef()"),
+            rdla.contains(
+                "{RdlMeshGeometry(\"tri\"), \"\", \
+                 UsdPreviewSurface(\"/nsi/default_material\")"
+            ),
             "{rdla}"
+        );
+        assert!(
+            rdla.contains("UsdPreviewSurface(\"/nsi/default_material\") {"),
+            "{rdla}"
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("no ɴsɪ shader bound")),
+            "{:?}",
+            flushed.limitations
         );
     }
 }

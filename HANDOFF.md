@@ -110,10 +110,24 @@ prevent.
 
 ## What Would Bite You
 
-**The renderer build is still heavy, and nothing has rendered.** Every
-claim in these specs about what MoonRay *does* comes from reading its
-source. No image has been produced, and no performance claim is made
-anywhere.
+**Two ways a perfectly correct scene renders black**, both found by
+rendering rather than by reasoning, and both now fixed:
+
+- MoonRay renders what the `Layer` names. Geometry left out of it is
+  not dim — it is absent.
+- MoonRay skips a `Layer` row whose **material column is `undef()`**.
+  The same triangle is missing from the image without a material and
+  present with one, which is why unshaded geometry gets a default
+  `UsdPreviewSurface` rather than an honest-looking `undef()`.
+
+Neither produces a warning. Both produce a black image from a file that
+parses, round-trips and reads correctly. Expect more of this shape, and
+expect to find it the same way.
+
+**The renderer build is heavy but it does work.** MoonRay built from
+source here in about fifty minutes on four cores; `quickstart.md` has
+the recipe and the five packaging problems that stop it. Performance is
+still unmeasured and unclaimed anywhere.
 
 **Two motion samples, not many.** rdl2's `AttributeTimestep` is
 `TIMESTEP_BEGIN` and `TIMESTEP_END`. ɴsɪ has no such limit, so a scene

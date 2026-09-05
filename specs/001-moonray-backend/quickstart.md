@@ -132,11 +132,14 @@ and its reader returns `0`.
 Only needed to *render*. Nothing else here does — the emitter, the
 oracle and the flush are all checked without it.
 
-**Status:** each step below was run on the container described above,
-and each of the five problems named after it is one that stopped the
-build until it was worked around. The compile was still running when
-this was written, so treat the recipe as verified up to that point and
-not past it.
+**Status: verified.** This recipe built MoonRay on the container
+described above — about 50 minutes on four cores — and the renderer it
+produced rendered a scene this crate flushed. Each of the five problems
+named below stopped the build until it was worked around.
+
+One caveat: `MOONRAY_BUILD_TESTING=NO` does not stop the test binaries
+being configured, and two of them fail to link. `cmake --build
+build-moonray --target moonray` builds the renderer without them.
 
 The dependencies are all in Ubuntu 24.04 except OpenSubdiv and
 OpenImageDenoise:

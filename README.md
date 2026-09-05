@@ -16,8 +16,9 @@ Materials are substituted rather than translated: MoonRay runs no OSL,
 so every ɴsɪ shader becomes a `UsdPreviewSurface` — stock MoonRay's PBR
 surface — at its defaults, and the flush reports the substitution.
 
-Nothing has been rendered yet. **Building** MoonRay is heavy;
-**running** it is not, and the two are not the same problem:
+A flushed scene renders: MoonRay built from source on a four-core
+container, and a triangle came out of it. **Building** MoonRay is
+heavy; **running** it is not, and the two are not the same problem:
 
 ```bash
 mrr scene.rdla -o image.exr     # runs `moonray -in … -out …`

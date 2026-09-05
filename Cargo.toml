@@ -46,3 +46,6 @@ libloading = "0.8"
 # For building `OwnedArg` values in `tests/render.rs`; the library
 # itself already depends on it.
 nsi-intermediate = { path = "../nsi/crates/nsi-intermediate" }
+# Reads the rendered EXR in `tests/render.rs`, so the check is "the
+# triangle is in the image" rather than "a file appeared".
+exr = "1"

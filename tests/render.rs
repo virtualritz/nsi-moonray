@@ -104,7 +104,35 @@ fn moonray_renders_what_the_flush_writes() {
         )
     });
 
-    let written = fs::metadata(&image)
-        .unwrap_or_else(|error| panic!("{}: {error}", image.display()));
-    assert!(written.len() > 0, "{} is empty", image.display());
+    let brightest = brightest(&image);
+    assert!(
+        brightest > 0.0,
+        "{} is black: the scene rendered nothing. A .rdla can be \
+         well-formed, parse, and still put no geometry in the image -- \
+         MoonRay skips a layer row whose material column is undef(), \
+         which is why the flush assigns a default surface.",
+        image.display()
+    );
+}
+
+/// The brightest red-channel value in an EXR.
+fn brightest(path: &PathBuf) -> f32 {
+    let image = exr::prelude::read_first_rgba_layer_from_file(
+        path,
+        |resolution, _| vec![0.0f32; resolution.width() * resolution.height()],
+        |pixels: &mut Vec<f32>,
+         position,
+         (red, _, _, _): (f32, f32, f32, f32)| {
+            pixels[position.y() * 64 + position.x()] = red;
+        },
+    )
+    .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+
+    image
+        .layer_data
+        .channel_data
+        .pixels
+        .iter()
+        .copied()
+        .fold(0.0f32, f32::max)
 }
