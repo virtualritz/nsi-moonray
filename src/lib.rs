@@ -29,6 +29,8 @@
 //!
 //! - [`flush`] — turning a [`nsi_intermediate::Scene`] into one of those
 //!   documents.
+//! - [`render`] — handing the result to MoonRay's own renderer binary,
+//!   which is what the `mrr` command does.
 //!
 //! # Building it
 //!
@@ -41,6 +43,7 @@
 
 pub mod document;
 pub mod flush;
+pub mod render;
 pub mod value;
 
 pub use document::{Assignment, Body, Document, Object};

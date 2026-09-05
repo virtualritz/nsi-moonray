@@ -27,6 +27,16 @@ const MESH: &str = "RdlMeshGeometry";
 /// MoonRay's perspective camera DSO.
 const PERSPECTIVE_CAMERA: &str = "PerspectiveCamera";
 
+/// The material every ɴsɪ shader becomes.
+///
+/// MoonRay has no OSL (`research.md` F6), so an ɴsɪ shader cannot be
+/// run as written and there is nothing to translate it into
+/// mechanically. `UsdPreviewSurface` is stock MoonRay's general-purpose
+/// PBR surface -- diffuse colour, metallic, roughness, IOR, opacity,
+/// emission -- and standing it in at its defaults is what keeps a
+/// shaded scene from rendering as MoonRay's untextured default.
+const MATERIAL: &str = "UsdPreviewSurface";
+
 /// `PerspectiveCamera`'s default film-back width in millimetres, which
 /// the focal length is derived against.
 const FILM_WIDTH_APERTURE: f32 = 24.0;
@@ -70,9 +80,7 @@ pub fn flush(scene: &Scene) -> Flushed {
                 objects.push(mesh(scene, handle, subdivision, &mut flushed));
                 geometries.push(Reference::new(MESH, handle));
 
-                if let Some(assignment) =
-                    assignment(scene, handle, &mut flushed)
-                {
+                if let Some(assignment) = assignment(scene, handle) {
                     assignments.push(assignment);
                 }
             }
@@ -87,13 +95,13 @@ pub fn flush(scene: &Scene) -> Flushed {
             "outputdriver" | "outputlayer" => {}
 
             "shader" => {
-                // MoonRay has no OSL and nothing that runs an ɴsɪ
-                // shader, so there is no class to map this to. See
-                // `spec.md` Non-Goals.
+                // Substituted at its defaults, not translated: an ɴsɪ
+                // shader is an OSL shader, and MoonRay runs none.
+                objects.push(Object::new(MATERIAL, handle));
                 flushed.limitations.push(format!(
-                    "shader {handle:?} has no MoonRay equivalent; the \
-                     shapes using it render with MoonRay's default \
-                     material"
+                    "shader {handle:?} is an OSL shader, which MoonRay \
+                     cannot run; a default {MATERIAL} stands in and none \
+                     of the shader's parameters are carried over"
                 ));
             }
 
@@ -217,26 +225,23 @@ fn mesh(
 }
 
 /// The `Layer` row for one piece of geometry, if anything is bound.
-fn assignment(
-    scene: &Scene,
-    handle: &str,
-    flushed: &mut Flushed,
-) -> Option<Assignment> {
+fn assignment(scene: &Scene, handle: &str) -> Option<Assignment> {
     let binding = scene.geometry_binding(handle)?;
 
-    // The shader is deliberately not turned into a material reference:
-    // MoonRay has no way to run an ɴsɪ shader, so pointing at one would
-    // name a class that does not exist and the file would not load.
-    if let Some(shader) = &binding.surface_shader {
-        flushed.limitations.push(format!(
-            "geometry {handle:?} is bound to shader {shader:?} through \
-             {:?}; MoonRay has no equivalent, so the assignment is left \
-             unmaterialed",
-            binding.attributes
-        ));
-    }
+    // The shader itself is substituted where it is declared; here it
+    // only has to be pointed at. An `attributes` node carrying nothing
+    // but visibility has no shader, and that row's material column
+    // stays `undef()`.
+    let material = binding
+        .surface_shader
+        .as_deref()
+        .map(|shader| Reference::new(MATERIAL, shader));
 
-    Some(Assignment::new(Reference::new(MESH, handle), None, None))
+    Some(Assignment::new(
+        Reference::new(MESH, handle),
+        material,
+        None,
+    ))
 }
 
 /// One `PerspectiveCamera`.
@@ -504,10 +509,11 @@ mod tests {
         );
     }
 
-    /// A bound shader is reported, not silently dropped and not turned
-    /// into a class MoonRay does not have.
+    /// A bound shader becomes MoonRay's stock PBR surface at its
+    /// defaults, and the substitution is reported rather than passed
+    /// off as a translation.
     #[test]
-    fn a_bound_shader_is_reported_and_the_scene_still_emits() {
+    fn a_bound_shader_becomes_the_default_surface() {
         let mut scene = triangle();
 
         scene.create("attr", "attributes");
@@ -522,16 +528,21 @@ mod tests {
         let flushed = flush(&scene);
         let rdla = flushed.to_rdla();
 
-        // The row exists, so the geometry is in the layer.
+        // The material is the stand-in surface, and the row points at
+        // it rather than leaving the shape unshaded.
+        assert!(rdla.contains("UsdPreviewSurface(\"shader\") {"), "{rdla}");
         assert!(
-            rdla.contains("{RdlMeshGeometry(\"tri\"), \"\", undef()"),
+            rdla.contains(
+                "{RdlMeshGeometry(\"tri\"), \"\", \
+                 UsdPreviewSurface(\"shader\"), undef()"
+            ),
             "{rdla}"
         );
         assert!(
             flushed
                 .limitations
                 .iter()
-                .any(|line| line.contains("no MoonRay equivalent")),
+                .any(|line| line.contains("none of the shader's parameters")),
             "{:?}",
             flushed.limitations
         );

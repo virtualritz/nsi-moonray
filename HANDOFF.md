@@ -62,6 +62,30 @@ trying to improve it — both were tried:
 Publishing `nsi-intermediate`, or making `.blueprints` non-blocking for
 a consumer's fetch, is what would actually settle it. `T0.7`.
 
+## How This Reaches A Renderer
+
+Two shapes, and neither asks this repository to build MoonRay:
+
+- **`mrr`** hands a `.rdla` to MoonRay's own binary. It exists.
+  Whoever renders needs `moonray` installed; nothing here needs it to
+  write or check a scene.
+- **`libnsi_moonray.so`** would be a drop-in ɴsɪ renderer. `nsi-ffi-wrap`
+  `dlopen`s a library and looks up eleven C entry points — `NSIBegin`,
+  `NSIEnd`, `NSICreate`, `NSIDelete`, `NSISetAttribute`,
+  `NSISetAttributeAtTime`, `NSIDeleteAttribute`, `NSIConnect`,
+  `NSIDisconnect`, `NSIEvaluate`, `NSIRenderControl` — so a `cdylib`
+  exporting those over `nsi_intermediate::Recorder` and this flush lets
+  a consumer load MoonRay where it loads 3Delight, without changing the
+  consumer. `T4.2`, and it is the one that matters for an application.
+
+Taking `.nsi` *files* is a third thing and needs a parser that does not
+exist: `nsi-intermediate` writes streams and does not read them, and
+`nsi-stream` is the pixel-streaming driver, not a reader. That parser
+belongs upstream beside the writer. `T4.3`.
+
+Spawning the binary cannot stream samples back, so progressive
+rendering means linking `libmoonray` instead. `T4.4`.
+
 ## Where To Start
 
 **`T0.6`, the authoring twin of `RdlMeshGeometry`.** Its DSO lives in
@@ -73,13 +97,12 @@ headers: build that file with a stub implementation and there is a
 faithful declaration-twin to author against, and `oracle verify` starts
 covering real mesh scenes.
 
-Then **`T1.3`, materials.** Every `Layer` row this emits has `undef()`
-where the material goes, because MoonRay has no way to run an ɴsɪ
-shader and naming a class it does not have would make the file fail to
-load. The decision to make is what to substitute — `UsdPreviewSurface`
-is the one general-purpose material in `moonray/dso/material`, and how
-much of an ɴsɪ shader's parameters can be fed into it is an open
-question, not a mechanical mapping.
+Materials are substituted, not translated: every ɴsɪ shader becomes a
+`UsdPreviewSurface` at its defaults. Carrying its *parameters* across
+(`T1.3a`) needs real scenes — which ɴsɪ shader parameter means
+`roughness` depends on the shader, and a guessed name table is exactly
+the kind of plausible-but-wrong the oracle discipline exists to
+prevent.
 
 ## What Would Bite You
 

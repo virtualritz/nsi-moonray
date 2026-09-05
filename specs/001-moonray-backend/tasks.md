@@ -40,11 +40,41 @@ be built at all, and has.
       making `.blueprints` non-blocking, is what would actually settle
       it.
 
-## Blocked On A Heavy Host
+## Delivery
+
+How a consumer actually gets a MoonRay render out of an ɴsɪ scene.
+Neither of these needs *this* repository to build MoonRay -- they need
+whoever renders to have it installed.
+
+- [x] T4.1 `mrr`, a CLI that hands a scene to MoonRay's own binary:
+      `moonray -in scene.rdla -out image.exr`. Flags read from
+      `RenderOptions.cc`.
+- [ ] T4.2 **`libnsi_moonray.so`: a drop-in ɴsɪ renderer.**
+      `nsi-ffi-wrap` loads a renderer through `dlopen` and looks up
+      eleven C entry points -- `NSIBegin`, `NSIEnd`, `NSICreate`,
+      `NSIDelete`, `NSISetAttribute`, `NSISetAttributeAtTime`,
+      `NSIDeleteAttribute`, `NSIConnect`, `NSIDisconnect`,
+      `NSIEvaluate`, `NSIRenderControl`. A `cdylib` exporting those over
+      `nsi_intermediate::Recorder` and this crate's flush is what lets
+      an existing ɴsɪ consumer load MoonRay where it loads 3Delight
+      today, with no change to the consumer beyond which library it
+      resolves.
+- [ ] T4.3 `.nsi` stream input. There is no parser for the format:
+      `nsi-intermediate` writes streams and does not read them, and
+      `nsi-stream` is the pixel-streaming driver, not a reader. The
+      parser belongs upstream next to the writer, where the Mitsuba
+      backend gets it too.
+- [ ] T4.4 Link `libmoonray` rather than spawning its CLI. A spawned
+      batch render cannot stream samples back, so this is what
+      progressive rendering and the pixel-streaming driver both need.
+      See `TN.1`.
+
+## Needs MoonRay Installed
 
 - [ ] T0.9 Build full MoonRay (Embree, OpenVDB, OpenImageIO, ISPC;
-      Docker is the documented path). Needed only to *render*, not to
-      construct a scene.
+      Docker is the documented path) *somewhere*, so a render can
+      actually be checked. Nothing in this repository needs it to
+      construct or verify a scene -- only to see one rendered.
 
 ## User Story 1: Render A Recorded Scene (P1)
 
@@ -53,12 +83,15 @@ be built at all, and has.
       output -- and nothing has rendered it. Needs `T0.9`.
 - [~] T1.2 Geometry with its world transform. Emitted into
       `node_xform` and unit-tested; unrendered.
-- [ ] T1.3 Materials through `Layer`. The rows exist; the material
-      column is `undef()`, because MoonRay has no way to run an ɴsɪ
-      shader and naming a class it does not have would make the file
-      fail to load. Needs a decision on what to substitute -- probably
-      a `UsdPreviewSurface` fed from whatever the ɴsɪ shader's
-      parameters can be read as.
+- [~] T1.3 Materials through `Layer`. Every ɴsɪ shader becomes a
+      `UsdPreviewSurface` at its defaults -- stock MoonRay's PBR
+      surface -- and the row points at it. MoonRay runs no OSL, so the
+      shader itself cannot be translated; the substitution is reported.
+- [ ] T1.3a Carry what parameters can be carried into the substitute
+      surface: `diffuseColor`, `metallic`, `roughness`, `ior`,
+      `opacity`, `emissiveColor`. Which ɴsɪ shader parameters map onto
+      those depends on the shader, so this needs real scenes, not a
+      guessed name table.
 - [ ] T1.4 **Two shapes, two materials, each correct.** Inherited top
       risk; nothing earlier catches a misbinding.
 - [~] T1.5 `render_outputs()` to `RenderOutput`. One per output layer,

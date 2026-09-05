@@ -12,10 +12,22 @@ captured from `scene_rdl2`'s own `AsciiWriter` rather than inferred,
 and rdl2 reads back what is written; see
 [`specs/001-moonray-backend/oracle/`](specs/001-moonray-backend/oracle/).
 
-Materials are the gap: MoonRay has no way to run an ɴsɪ shader, so
-assignments carry no material yet and the flush says so rather than
-rendering silently untextured. Nothing has been rendered at all —
-that needs a host that can build MoonRay itself.
+Materials are substituted rather than translated: MoonRay runs no OSL,
+so every ɴsɪ shader becomes a `UsdPreviewSurface` — stock MoonRay's PBR
+surface — at its defaults, and the flush reports the substitution.
+
+Nothing has been rendered yet. **Building** MoonRay is heavy;
+**running** it is not, and the two are not the same problem:
+
+```bash
+mrr scene.rdla -o image.exr     # runs `moonray -in … -out …`
+mrr scene.rdla --print          # the command, without running it
+```
+
+The other delivery shape is a drop-in: `nsi-ffi-wrap` loads a renderer
+by `dlopen` and looks up eleven C entry points, so a `cdylib` exporting
+those over this flush would let an existing ɴsɪ consumer load MoonRay
+exactly where it loads 3Delight today. That is `T4.2`.
 
 ## Building
 
