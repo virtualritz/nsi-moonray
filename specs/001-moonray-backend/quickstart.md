@@ -127,11 +127,93 @@ LD_LIBRARY_PATH=/path/to/install/lib \
 `signed_zero.rdla` is left out on purpose: rdl2's writer prints `-0`
 and its reader returns `0`.
 
-## What Still Needs A Heavy Host
+## Building MoonRay Itself
 
-Rendering. Full MoonRay is a CMake build over Embree, OpenVDB,
-OpenImageIO and ISPC, normally in Docker. Scene *construction* does
-not need it, and neither does checking the emitter against the oracle.
+Only needed to *render*. Nothing else here does — the emitter, the
+oracle and the flush are all checked without it.
+
+**Status:** each step below was run on the container described above,
+and each of the five problems named after it is one that stopped the
+build until it was worked around. The compile was still running when
+this was written, so treat the recipe as verified up to that point and
+not past it.
+
+The dependencies are all in Ubuntu 24.04 except OpenSubdiv and
+OpenImageDenoise:
+
+```bash
+sudo apt-get install -y \
+    libembree-dev libopenvdb-dev libopenimageio-dev openimageio-tools \
+    libopenexr-dev libimath-dev librandom123-dev libjpeg-dev \
+    zlib1g-dev libblosc-dev bison flex libcurl4-openssl-dev \
+    libmicrohttpd-dev
+```
+
+Then, with `scene_rdl2` already built and installed into `$PREFIX`:
+
+```bash
+git clone --depth 1 --branch v3_5_0 \
+    https://github.com/PixarAnimationStudios/OpenSubdiv.git
+cmake -S OpenSubdiv -B build-osd -DCMAKE_INSTALL_PREFIX=$PREFIX \
+    -DCMAKE_BUILD_TYPE=Release -DNO_TBB=1 -DNO_PTEX=1 -DNO_OPENGL=1 \
+    -DNO_CUDA=1 -DNO_OPENCL=1 -DNO_DX=1 -DNO_METAL=1 -DNO_OMP=1 \
+    -DNO_TESTS=1 -DNO_GLTESTS=1 -DNO_EXAMPLES=1 -DNO_TUTORIALS=1 \
+    -DNO_REGRESSION=1 -DNO_DOC=1 -DBUILD_SHARED_LIBS=ON
+cmake --build build-osd -j"$(nproc)" && cmake --install build-osd
+
+curl -sSLO https://github.com/OpenImageDenoise/oidn/releases/download/v2.3.0/oidn-2.3.0.x86_64.linux.tar.gz
+tar xzf oidn-2.3.0.x86_64.linux.tar.gz
+cp -a oidn-2.3.0.x86_64.linux/include/* $PREFIX/include/
+cp -a oidn-2.3.0.x86_64.linux/lib/*     $PREFIX/lib/
+
+git clone --depth 1 https://github.com/OpenMoonRay/mcrt_denoise.git
+export PATH=$PREFIX/bin:$PATH   # moonray's DSO build runs rdl2_json_exporter
+CMAKE_MODULES_ROOT=$PWD/cmake_modules cmake -S mcrt_denoise -B build-denoise \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PREFIX \
+    -DCMAKE_PREFIX_PATH=$PREFIX -DCMAKE_MODULE_PATH=$PWD/cmake_modules/cmake \
+    -DMOONRAY_USE_OPTIX=NO
+cmake --build build-denoise -j"$(nproc)" && cmake --install build-denoise
+
+CMAKE_MODULES_ROOT=$PWD/cmake_modules cmake -S moonray -B build-moonray \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PREFIX \
+    -DCMAKE_PREFIX_PATH=$PREFIX -DCMAKE_MODULE_PATH=$PWD/cmake_modules/cmake \
+    -DMOONRAY_USE_OPTIX=NO -DMOONRAY_BUILD_TESTING=NO \
+    -DOpenSubDiv_INCLUDE_DIR=$PREFIX/include/opensubdiv \
+    -DOpenSubDiv_CPU_LIBRARY=$PREFIX/lib/libosdCPU.so \
+    -DOpenSubDiv_GPU_LIBRARY=$PREFIX/lib/libosdCPU.so
+cmake --build build-moonray -j"$(nproc)" && cmake --install build-moonray
+```
+
+### Five Things That Bite
+
+Each of these stops the build outright, and none of them is a code
+problem:
+
+1. **OpenSubdiv 3.5's TBB evaluator does not compile against oneTBB.**
+   `osd/tbbEvaluator.cpp` includes `tbb/task_scheduler_init.h`, removed
+   in oneTBB 2021. Build with `-DNO_TBB=1`; MoonRay uses the CPU
+   `Far`/`Vtr` side.
+2. **`MoonRay's FindOpenSubDiv` requires an `osdGPU`** that a CPU-only
+   OpenSubdiv does not build, and `find_package_handle_standard_args`
+   fails on the `NOTFOUND`. Pointing `OpenSubDiv_GPU_LIBRARY` at
+   `libosdCPU.so` gets past it; nothing links GPU subdivision.
+3. **OpenImageDenoise cannot be built from a plain clone** — its
+   trained weights are Git LFS pointers and the build refuses them —
+   and `mcrt_denoise` needs **2.x**, not 1.4: it uses
+   `OIDN_DEVICE_TYPE_CUDA`, which 1.4 does not have. The release
+   tarball ships weights, libraries and a CMake config.
+4. **`MOONRAY_USE_OPTIX=NO`, or CUDA is required.** Both `moonray` and
+   `mcrt_denoise` `find_package(CUDAToolkit REQUIRED)` otherwise and
+   die on a missing `nvcc`.
+5. **Ubuntu's OpenImageIO CMake config references files it does not
+   install**: `/usr/bin/iconvert`, which is in `openimageio-tools`, and
+   `/usr/include/opencv4`, which comes from OpenCV. Installing the
+   tools package fixes the first; the second is satisfied by the
+   directory merely existing.
+
+And one that is not a bite so much as a missing `PATH`: MoonRay's DSO
+build shells out to `rdl2_json_exporter`, which `scene_rdl2` installed
+into `$PREFIX/bin`.
 
 ## Building The Crate
 
