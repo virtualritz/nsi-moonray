@@ -105,6 +105,15 @@ whoever renders to have it installed.
 - [~] T1.5 `render_outputs()` to `RenderOutput`. One per output layer,
       carrying `channel_name` and the first driver's `file_name`; a
       layer fanning out to several drivers is not handled.
+- [ ] T1.7 **Lights.** Nothing maps to one yet, so a flushed scene
+      renders black however correct it is. MoonRay's lights are DSO
+      classes -- `EnvLight`, `RectLight`, `DiskLight`, `SphereLight`,
+      `DistantLight`, `SpotLight`, `CylinderLight`. ɴsɪ has one node
+      that says "light" outright, `environment`, and everything else is
+      geometry wearing an emissive shader, which cannot be recognised
+      without reading the shader. So: `environment` to `EnvLight`
+      first, and area lights when there is a rule for spotting one that
+      is not a guess.
 - [ ] T1.6 Confirm ɴsɪ's `fov` is vertical, and the focal length
       derived from it. Read as vertical because
       `nsi_toolbelt::look_at_bounding_box_perspective_camera` treats it

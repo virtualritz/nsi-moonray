@@ -30,6 +30,10 @@ Depends on `nsi-intermediate` having resolved graph semantics already.
 | A scene reaches MoonRay | **Partial** | `render.rs` -- `moonray -in scene.rdla -out image.exr`, flags read from `RenderOptions.cc` | `render::tests` check the argument list; no render has been run | A machine with MoonRay installed. `T0.9` |
 | Motion samples present but unresolved are reported | **Covered** | `flush.rs` -- upstream resolves static transforms only | `flush::tests::motion_samples_are_reported` | -- |
 
+**Not in this matrix yet: lights.** No ɴsɪ node becomes a MoonRay
+light, so every scene flushed today renders black. That is a missing
+mapping rather than a wrong one, and `T1.7` is where it gets fixed.
+
 ## Invariants
 
 - No ɴsɪ graph semantics live here. Composition, dissolution and output

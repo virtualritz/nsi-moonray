@@ -43,3 +43,6 @@ nsi-trait = { path = "../nsi/crates/nsi-trait" }
 # Loads the `cdylib` in `tests/dropin.rs` the way `nsi-ffi-wrap` loads a
 # renderer: by `dlopen` and by symbol.
 libloading = "0.8"
+# For building `OwnedArg` values in `tests/render.rs`; the library
+# itself already depends on it.
+nsi-intermediate = { path = "../nsi/crates/nsi-intermediate" }
