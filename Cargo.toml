@@ -18,14 +18,19 @@ include = [
     "/README.md",
 ]
 
-# No dependencies, deliberately.
-#
-# The flush consumes `nsi_intermediate::Scene`, and that crate is not
-# reachable from a clean checkout: it is unpublished, and a git
-# dependency on the `nsi` workspace makes Cargo fetch that repository's
-# private `.blueprints` submodule, which fails for anyone without
-# access to it -- Cargo resolves every dependency whether or not the
-# feature gating it is enabled, so declaring it optional does not help.
-# Until that is settled upstream, this crate is the `.rdla` format
-# layer, which is what the oracle tests and what the flush is built on.
 [dependencies]
+# The intermediate representation this backend flushes, overlaid from a
+# sibling checkout of https://github.com/virtualritz/nsi.
+#
+# A path dependency, and deliberately so *for now*: the crate is
+# unpublished, and a git dependency on that workspace makes Cargo fetch
+# the repository's private `.blueprints` submodule, which fails without
+# access to it. `[patch]` does not help -- Cargo fetches the patched
+# source anyway. So until `nsi-intermediate` is published, or the
+# submodule stops blocking a fetch, building this crate means cloning
+# `nsi` next to it. `T0.7`.
+nsi-intermediate = { path = "../nsi/crates/nsi-intermediate" }
+
+[dev-dependencies]
+# For building `OwnedArg` values in the flush tests. Same overlay.
+nsi-trait = { path = "../nsi/crates/nsi-trait" }

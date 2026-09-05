@@ -4,9 +4,11 @@ Written 2026-09-05, after Phase 0. Read `specs/README.md`, then this.
 
 ## What Exists
 
-A crate that writes `.rdla`, and a captured oracle proving it writes the
-real format rather than a plausible one. Sixteen tests; `cargo test`
-needs no renderer, no `scene_rdl2`, and no network.
+A crate that flushes a recorded ɴsɪ scene into `.rdla`, and a captured
+oracle proving it writes the real format rather than a plausible one.
+Twenty-four tests; `cargo test` needs no renderer, no `scene_rdl2`, and
+no network — but it does need a sibling `../nsi` checkout, for the
+reason below.
 
 `scene_rdl2` builds on a modest machine — four cores, stock Ubuntu
 packages, about fifteen minutes. `quickstart.md` has the recipe and the
@@ -44,29 +46,40 @@ and two findings in `research.md` that were simply wrong:
 This is the same discipline that made the `.nsi` emitter correct, and
 it paid the same way. Keep it: capture, then emit.
 
+## The Dependency, And Why It Is A Path
+
+`nsi-intermediate` is overlaid from a sibling `../nsi` checkout. That
+is a workaround, not a resolution: the crate is unpublished, and a git
+dependency on the `nsi` workspace makes Cargo fetch that repository's
+private `.blueprints` submodule. Two things worth knowing before
+trying to improve it — both were tried:
+
+- Making the dependency **optional** does not help. Cargo resolves
+  every dependency whether or not the feature gating it is enabled.
+- **`[patch]`** does not help either. Cargo fetches the patched git
+  source anyway, and fails on the same submodule.
+
+Publishing `nsi-intermediate`, or making `.blueprints` non-blocking for
+a consumer's fetch, is what would actually settle it. `T0.7`.
+
 ## Where To Start
 
-**`T0.7`, and it is not a coding task.** The flush cannot be written
-because `nsi-intermediate` cannot be depended on — it is unpublished,
-and a git dependency on the `nsi` workspace makes Cargo fetch that
-repository's private `.blueprints` submodule. Cargo resolves every
-dependency whether or not the feature gating it is enabled, so
-declaring it optional does not sidestep this: with the dependency
-present and unreachable, `cargo test` fails outright. Publishing the
-crate, or making the submodule non-blocking for consumers, unblocks
-every `T1.*` and `T2.*` task.
+**`T0.6`, the authoring twin of `RdlMeshGeometry`.** Its DSO lives in
+`moonray`, so nothing on a host without the renderer can read back a
+scene that uses it — the flush's output is currently checked as text
+only, while the oracle's is checked by rdl2 itself. But
+`moonray/dso/geometry/RdlMesh/attributes.cc` needs only `scene_rdl2`
+headers: build that file with a stub implementation and there is a
+faithful declaration-twin to author against, and `oracle verify` starts
+covering real mesh scenes.
 
-Then `T0.5` and `T0.6`, both of which still need no renderer:
-
-- **`T0.5`, round-trip.** Byte equality against a captured file proves
-  the syntax. Only feeding what this crate writes to rdl2's
-  `AsciiReader` proves rdl2 *accepts* it.
-- **`T0.6`, an authoring twin of `RdlMeshGeometry`.** Its DSO lives in
-  `moonray`, so a scene using it cannot be built or read back on a host
-  without the renderer. But its `attributes.cc` needs only `scene_rdl2`
-  headers: build that file with a stub implementation and there is a
-  faithful declaration-twin to author against. It is what lets the
-  `T1.*` work be checked at all before a heavy host exists.
+Then **`T1.3`, materials.** Every `Layer` row this emits has `undef()`
+where the material goes, because MoonRay has no way to run an ɴsɪ
+shader and naming a class it does not have would make the file fail to
+load. The decision to make is what to substitute — `UsdPreviewSurface`
+is the one general-purpose material in `moonray/dso/material`, and how
+much of an ɴsɪ shader's parameters can be fed into it is an open
+question, not a mechanical mapping.
 
 ## What Would Bite You
 

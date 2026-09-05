@@ -27,15 +27,22 @@
 //! - [`value`] — how rdl2 prints each attribute type.
 //! - [`document`] — the file: objects, sets and the `Layer` table.
 //!
-//! The flush itself — turning a `nsi_intermediate::Scene` into one of
-//! those documents — is not here yet: that crate is unpublished and a
-//! git dependency on it drags in a private submodule, so it cannot be
-//! depended on from a clean checkout. See `Cargo.toml`.
+//! - [`flush`] — turning a [`nsi_intermediate::Scene`] into one of those
+//!   documents.
+//!
+//! # Building it
+//!
+//! `nsi-intermediate` is overlaid from a sibling checkout: clone
+//! <https://github.com/virtualritz/nsi> next to this repository. It is
+//! unpublished, and a git dependency on that workspace makes Cargo
+//! fetch its private `.blueprints` submodule. See `Cargo.toml`.
 //!
 //! [`nsi-intermediate`]: https://github.com/virtualritz/nsi
 
 pub mod document;
+pub mod flush;
 pub mod value;
 
 pub use document::{Assignment, Body, Document, Object};
+pub use flush::{Flushed, flush};
 pub use value::{Reference, Value};

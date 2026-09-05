@@ -33,10 +33,12 @@ be built at all, and has.
       moonray's own `attributes.cc` with a stub implementation, so a
       real mesh scene can be built and read back without the renderer.
       Nothing else lets `T1.*` be checked on a modest host.
-- [ ] T0.7 **Settle how to depend on `nsi-intermediate`.** It is
-      unpublished and a git dependency drags in a private submodule, so
-      the flush layer cannot be built from a clean checkout. Upstream
-      question; blocks every `T1.*` and `T2.*` task below.
+- [~] T0.7 **Settle how to depend on `nsi-intermediate`.** Worked
+      around, not settled: a path dependency on a sibling `nsi`
+      checkout. `[patch]` was tried first and does not help -- Cargo
+      fetches the patched git source anyway. Publishing the crate, or
+      making `.blueprints` non-blocking, is what would actually settle
+      it.
 
 ## Blocked On A Heavy Host
 
@@ -46,14 +48,26 @@ be built at all, and has.
 
 ## User Story 1: Render A Recorded Scene (P1)
 
-Every task here needs `T0.7` first.
-
-- [ ] T1.1 Minimal path from a `nsi_intermediate::Scene` to an image.
-- [ ] T1.2 Geometry with its world transform.
-- [ ] T1.3 Materials through `Layer`.
+- [~] T1.1 Minimal path from a `nsi_intermediate::Scene` to an image.
+      The scene flushes -- mesh, camera, layer, geometry set, render
+      output -- and nothing has rendered it. Needs `T0.9`.
+- [~] T1.2 Geometry with its world transform. Emitted into
+      `node_xform` and unit-tested; unrendered.
+- [ ] T1.3 Materials through `Layer`. The rows exist; the material
+      column is `undef()`, because MoonRay has no way to run an ɴsɪ
+      shader and naming a class it does not have would make the file
+      fail to load. Needs a decision on what to substitute -- probably
+      a `UsdPreviewSurface` fed from whatever the ɴsɪ shader's
+      parameters can be read as.
 - [ ] T1.4 **Two shapes, two materials, each correct.** Inherited top
       risk; nothing earlier catches a misbinding.
-- [ ] T1.5 `render_outputs()` to `RenderOutput`.
+- [~] T1.5 `render_outputs()` to `RenderOutput`. One per output layer,
+      carrying `channel_name` and the first driver's `file_name`; a
+      layer fanning out to several drivers is not handled.
+- [ ] T1.6 Confirm ɴsɪ's `fov` is vertical, and the focal length
+      derived from it. Read as vertical because
+      `nsi_toolbelt::look_at_bounding_box_perspective_camera` treats it
+      that way; unverified against a 3Delight render.
 
 ## User Story 2: Motion Blur (P1)
 

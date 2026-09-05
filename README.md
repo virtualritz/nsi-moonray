@@ -4,12 +4,29 @@ An [ɴsɪ](https://nsi.readthedocs.io/) backend on
 [MoonRay](https://github.com/OpenMoonRay/moonray), DreamWorks
 Animation's production renderer.
 
-**Status: it emits scenes, it does not render them yet.** The crate
-writes `.rdla`, MoonRay's ASCII scene format, and every byte of that
-format was captured from `scene_rdl2`'s own `AsciiWriter` rather than
-inferred — see [`specs/001-moonray-backend/oracle/`](specs/001-moonray-backend/oracle/).
-The flush that consumes a recorded ɴsɪ scene is blocked on being able
-to depend on `nsi-intermediate`; see [`specs/`](specs/).
+**Status: it emits scenes, it does not render them yet.** A recorded
+ɴsɪ scene flushes into `.rdla`, MoonRay's ASCII scene format — mesh
+geometry with its world transform, a camera, a `Layer`, a
+`GeometrySet` and render outputs. Every byte of that format was
+captured from `scene_rdl2`'s own `AsciiWriter` rather than inferred,
+and rdl2 reads back what is written; see
+[`specs/001-moonray-backend/oracle/`](specs/001-moonray-backend/oracle/).
+
+Materials are the gap: MoonRay has no way to run an ɴsɪ shader, so
+assignments carry no material yet and the flush says so rather than
+rendering silently untextured. Nothing has been rendered at all —
+that needs a host that can build MoonRay itself.
+
+## Building
+
+`nsi-intermediate` is overlaid from a sibling checkout for now, since
+it is unpublished:
+
+```bash
+git clone https://github.com/virtualritz/nsi.git      # ../nsi
+git clone https://github.com/virtualritz/nsi-moonray.git
+cd nsi-moonray && cargo test
+```
 
 ## Why MoonRay
 

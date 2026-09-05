@@ -6,9 +6,13 @@
 `scene_rdl2` builds, the `.rdla` format is captured from it, and the
 crate reproduces that capture byte for byte.
 
-The flush that consumes `nsi_intermediate::Scene` is blocked, but not
-on a build host: that crate cannot be depended on from a clean
-checkout. `T0.7`.
+The flush that consumes `nsi_intermediate::Scene` emits a mesh, a
+camera, a `Layer`, a `GeometrySet` and a `RenderOutput`. Nothing has
+rendered any of it, and materials are not mapped at all -- MoonRay has
+no way to run an ɴsɪ shader.
+
+`nsi-intermediate` is overlaid from a sibling checkout rather than
+depended on properly; `T0.7`.
 
 ## Approach
 
@@ -33,7 +37,7 @@ interactive work; `TN.1`.
 | Binding strategy chosen by experiment | no | **yes** |
 | Emitter matches the oracle byte for byte | no | **yes** |
 | rdl2 reads back what the emitter writes | no | **yes** |
-| A scene flushes from `nsi_intermediate::Scene` | no | no, `T0.7` |
+| A scene flushes from `nsi_intermediate::Scene` | no | **yes**, over a sibling-checkout overlay |
 | Full MoonRay builds | **yes** | no |
 | A triangle renders | **yes** | no |
 | Two materials, two shapes, correct | **yes** | no |

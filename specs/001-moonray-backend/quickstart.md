@@ -133,8 +133,23 @@ Rendering. Full MoonRay is a CMake build over Embree, OpenVDB,
 OpenImageIO and ISPC, normally in Docker. Scene *construction* does
 not need it, and neither does checking the emitter against the oracle.
 
+## Building The Crate
+
+`nsi-intermediate` is overlaid from a sibling checkout, so clone it next
+to this repository:
+
+```bash
+git clone https://github.com/virtualritz/nsi.git   # ../nsi
+cargo test
+```
+
+A path dependency, and temporary: the crate is unpublished, and a git
+dependency on that workspace makes Cargo fetch its private
+`.blueprints` submodule. `[patch]` does not help — Cargo fetches the
+patched source anyway, which is worth knowing before trying it. `T0.7`.
+
 ## Verification Commands
 
 ```bash
-cargo test          # the emitter against the captured oracle
+cargo test          # the emitter against the captured oracle, and the flush
 ```
