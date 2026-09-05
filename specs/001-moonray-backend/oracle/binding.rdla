@@ -1,0 +1,9 @@
+SceneVariables {
+}
+
+FakeMaterial("/oracle/source") {
+}
+
+ExtensiveObject("/oracle/bound") {
+    ["string"] = bind(FakeMaterial("/oracle/source"), "pizza"),
+}

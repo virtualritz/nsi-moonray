@@ -1,0 +1,11 @@
+SceneVariables {
+}
+
+FakeTeapot("/oracle/moving") {
+    ["node_xform"] = blur(Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1), Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 0, 0, 1)),
+}
+
+ExtensiveObject("/oracle/blurred") {
+    ["float"] = blur(0, 1),
+    ["vec3f"] = blur(Vec3(0, 0, 0), Vec3(0, 1, 0)),
+}
