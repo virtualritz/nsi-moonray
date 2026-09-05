@@ -27,6 +27,15 @@ const MESH: &str = "RdlMeshGeometry";
 /// MoonRay's perspective camera DSO.
 const PERSPECTIVE_CAMERA: &str = "PerspectiveCamera";
 
+/// MoonRay's environment light DSO.
+const ENVIRONMENT_LIGHT: &str = "EnvLight";
+
+/// The set every light lands in.
+///
+/// A `Layer` row with no light set is lit by nothing, so this is
+/// referenced from every assignment rather than being decoration.
+const LIGHT_SET: &str = "/nsi/lights";
+
 /// The material every ɴsɪ shader becomes.
 ///
 /// MoonRay has no OSL (`research.md` F6), so an ɴsɪ shader cannot be
@@ -68,7 +77,11 @@ pub fn flush(scene: &Scene) -> Flushed {
     // inserted at the front.
     let mut variables = Object::scene_variables();
     let mut geometries = Vec::new();
-    let mut assignments = Vec::new();
+    let mut lights = Vec::new();
+    // Geometry and its material, if it has one. The rows themselves are
+    // built after the walk, because every one of them references the
+    // light set and that is not known until the last node is seen.
+    let mut bindings: Vec<(String, Option<Reference>)> = Vec::new();
     let mut objects = Vec::new();
 
     let resolution = resolution(scene);
@@ -80,13 +93,19 @@ pub fn flush(scene: &Scene) -> Flushed {
                 objects.push(mesh(scene, handle, subdivision, &mut flushed));
                 geometries.push(Reference::new(MESH, handle));
 
-                if let Some(assignment) = assignment(scene, handle) {
-                    assignments.push(assignment);
-                }
+                // Every mesh gets a row, bound or not: MoonRay renders
+                // what the `Layer` names, so geometry left out of it is
+                // simply absent from the image.
+                bindings.push((handle.clone(), material(scene, handle)));
             }
 
             "perspectivecamera" => {
                 objects.push(camera(scene, handle, resolution, &mut flushed));
+            }
+
+            "environment" => {
+                objects.push(environment(scene, handle, &mut flushed));
+                lights.push(Reference::new(ENVIRONMENT_LIGHT, handle));
             }
 
             // Resolved away upstream, or carried by another node.
@@ -131,6 +150,36 @@ pub fn flush(scene: &Scene) -> Flushed {
         variables = variables
             .set("camera", Value::Object(camera_reference(&output.camera)));
     }
+
+    let light_set = if lights.is_empty() {
+        // Nothing lights the scene. Say so: a correct scene that
+        // renders black looks like a bug in this backend, and this is
+        // the one line that says it is not.
+        flushed.limitations.push(
+            "no ɴsɪ node became a MoonRay light, so the scene renders \
+             black; only `environment` maps to one so far"
+                .to_string(),
+        );
+        None
+    } else {
+        objects.push(Object {
+            class: "LightSet".to_string(),
+            name: Some(LIGHT_SET.to_string()),
+            body: Body::Set(lights),
+        });
+        Some(Reference::new("LightSet", LIGHT_SET))
+    };
+
+    let assignments = bindings
+        .into_iter()
+        .map(|(handle, material)| {
+            Assignment::new(
+                Reference::new(MESH, &handle),
+                material,
+                light_set.clone(),
+            )
+        })
+        .collect();
 
     if !geometries.is_empty() {
         objects.push(Object {
@@ -224,24 +273,47 @@ fn mesh(
     object.set("is_subd", Value::Bool(subdivision))
 }
 
-/// The `Layer` row for one piece of geometry, if anything is bound.
-fn assignment(scene: &Scene, handle: &str) -> Option<Assignment> {
-    let binding = scene.geometry_binding(handle)?;
-
-    // The shader itself is substituted where it is declared; here it
-    // only has to be pointed at. An `attributes` node carrying nothing
-    // but visibility has no shader, and that row's material column
-    // stays `undef()`.
-    let material = binding
+/// The material bound to one piece of geometry, if any.
+///
+/// The shader itself is substituted where it is declared; here it only
+/// has to be pointed at. An `attributes` node carrying nothing but
+/// visibility has no shader, and that row's material column stays
+/// `undef()`.
+fn material(scene: &Scene, handle: &str) -> Option<Reference> {
+    scene
+        .geometry_binding(handle)?
         .surface_shader
         .as_deref()
-        .map(|shader| Reference::new(MATERIAL, shader));
+        .map(|shader| Reference::new(MATERIAL, shader))
+}
 
-    Some(Assignment::new(
-        Reference::new(MESH, handle),
-        material,
-        None,
-    ))
+/// One `EnvLight`.
+///
+/// ɴsɪ puts the environment's *look* in an OSL shader hanging off an
+/// `attributes` node, and MoonRay cannot run it, so what crosses is the
+/// light itself at its defaults -- white, intensity 1 -- and its
+/// transform. That is enough to light a scene, which is the point.
+fn environment(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
+    let mut object = Object::new(ENVIRONMENT_LIGHT, handle);
+
+    let transform = scene.world_transform(handle);
+    if transform != IDENTITY {
+        object = object.set("node_xform", Value::Mat4d(transform));
+    }
+
+    if scene
+        .geometry_binding(handle)
+        .and_then(|binding| binding.surface_shader)
+        .is_some()
+    {
+        flushed.limitations.push(format!(
+            "environment {handle:?} carries a shader, which MoonRay \
+             cannot run; the light is white at intensity 1 and any \
+             environment texture is lost"
+        ));
+    }
+
+    object
 }
 
 /// One `PerspectiveCamera`.
@@ -450,7 +522,15 @@ mod tests {
         assert!(rdla.contains("[\"image_width\"] = 320,"), "{rdla}");
         assert!(rdla.contains("[\"file_name\"] = \"beauty.exr\","), "{rdla}");
         assert!(rdla.contains("[\"channel_name\"] = \"Ci\","), "{rdla}");
-        assert!(flushed.limitations.is_empty(), "{:?}", flushed.limitations);
+        // The one thing missing from this scene is a light, and the
+        // flush says exactly that rather than leaving a black render
+        // unexplained.
+        assert_eq!(flushed.limitations.len(), 1, "{:?}", flushed.limitations);
+        assert!(
+            flushed.limitations[0].contains("renders black"),
+            "{:?}",
+            flushed.limitations
+        );
     }
 
     /// `is_subd` defaults to true in MoonRay, so an ɴsɪ `mesh` that does
@@ -575,5 +655,52 @@ mod tests {
     fn fov_becomes_a_focal_length() {
         let millimetres = focal(45.0, (320, 240));
         assert!((millimetres - 21.7279).abs() < 1e-3, "{millimetres} mm");
+    }
+
+    /// An `environment` becomes an `EnvLight`, and every assignment
+    /// points at the set holding it -- a `Layer` row with no light set
+    /// is lit by nothing.
+    #[test]
+    fn an_environment_lights_the_scene() {
+        let mut scene = triangle();
+        scene.create("env", "environment");
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("EnvLight(\"env\") {"), "{rdla}");
+        assert!(
+            rdla.contains(
+                "LightSet(\"/nsi/lights\") {\n    EnvLight(\"env\"),"
+            ),
+            "{rdla}"
+        );
+        assert!(
+            rdla.contains(
+                "{RdlMeshGeometry(\"tri\"), \"\", undef(), \
+                 LightSet(\"/nsi/lights\")"
+            ),
+            "{rdla}"
+        );
+        assert!(
+            !flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("renders black")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// Geometry with nothing bound to it still gets a `Layer` row.
+    /// MoonRay renders what the layer names, so a shape left out of it
+    /// is simply not in the image.
+    #[test]
+    fn unbound_geometry_is_still_in_the_layer() {
+        let rdla = flush(&triangle()).to_rdla();
+        assert!(
+            rdla.contains("{RdlMeshGeometry(\"tri\"), \"\", undef()"),
+            "{rdla}"
+        );
     }
 }

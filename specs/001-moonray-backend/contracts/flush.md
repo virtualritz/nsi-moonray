@@ -30,9 +30,12 @@ Depends on `nsi-intermediate` having resolved graph semantics already.
 | A scene reaches MoonRay | **Partial** | `render.rs` -- `moonray -in scene.rdla -out image.exr`, flags read from `RenderOptions.cc` | `render::tests` check the argument list; no render has been run | A machine with MoonRay installed. `T0.9` |
 | Motion samples present but unresolved are reported | **Covered** | `flush.rs` -- upstream resolves static transforms only | `flush::tests::motion_samples_are_reported` | -- |
 
-**Not in this matrix yet: lights.** No ɴsɪ node becomes a MoonRay
-light, so every scene flushed today renders black. That is a missing
-mapping rather than a wrong one, and `T1.7` is where it gets fixed.
+| An ɴsɪ `environment` lights the scene | **Partial** | `flush.rs` -- `EnvLight` in a `LightSet` that every `Layer` row references; `Light.cc` declares `color`, `intensity` and `texture`, all left at defaults | `flush::tests::an_environment_lights_the_scene` | A render. And the environment's texture, which lives in an OSL shader MoonRay cannot run. |
+| A scene with no light says so | **Covered** | `flush.rs` -- a scene whose `Layer` rows have no light set renders black | `flush::tests::a_triangle_becomes_a_mesh_a_camera_and_an_output` asserts the limitation is reported | -- |
+
+**Area lights are not mapped.** In ɴsɪ they are geometry wearing an
+emissive shader, and recognising one means reading a shader MoonRay
+cannot run. `T1.7a`.
 
 ## Invariants
 

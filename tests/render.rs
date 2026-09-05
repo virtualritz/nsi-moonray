@@ -65,6 +65,11 @@ fn scene() -> nsi_intermediate::Scene {
         .connect("screen", None, "cam", "screens")
         .expect("known attribute");
 
+    // Without a light the render is black, and a black image would
+    // still pass this test -- but it would be a worse smoke test, and
+    // an `environment` is one node.
+    scene.create("env", "environment");
+
     scene
 }
 
