@@ -248,6 +248,7 @@ dependencies = [
 name = "nsi-moonray"
 version = "0.1.0"
 dependencies = [
+ "libloading",
  "nsi-intermediate",
  "nsi-trait",
 ]

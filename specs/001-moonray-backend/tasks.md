@@ -49,7 +49,13 @@ whoever renders to have it installed.
 - [x] T4.1 `mrr`, a CLI that hands a scene to MoonRay's own binary:
       `moonray -in scene.rdla -out image.exr`. Flags read from
       `RenderOptions.cc`.
-- [ ] T4.2 **`libnsi_moonray.so`: a drop-in ɴsɪ renderer.**
+- [~] T4.2 **`libnsi_moonray.so`: a drop-in ɴsɪ renderer.** Built and
+      loadable: `src/capi.rs` exports all twelve symbols, records into
+      `nsi_intermediate::Scene`, and on `NSIRenderControl "start"`
+      writes the `.rdla` and runs MoonRay. `tests/dropin.rs` `dlopen`s
+      the artefact and drives a scene through it. Still batch, so
+      display drivers get nothing (`T4.4`) and `NSIEvaluate` is a
+      no-op (`T4.3`).
       `nsi-ffi-wrap` loads a renderer through `dlopen` and looks up
       eleven C entry points -- `NSIBegin`, `NSIEnd`, `NSICreate`,
       `NSIDelete`, `NSISetAttribute`, `NSISetAttributeAtTime`,
@@ -58,7 +64,9 @@ whoever renders to have it installed.
       `nsi_intermediate::Recorder` and this crate's flush is what lets
       an existing ɴsɪ consumer load MoonRay where it loads 3Delight
       today, with no change to the consumer beyond which library it
-      resolves.
+      resolves. `DspyRegisterDriver` counts as a twelfth: `nsi-ffi-wrap`
+      resolves the whole symbol table up front, so a consumer built
+      with the `output` feature cannot load a library missing it.
 - [ ] T4.3 `.nsi` stream input. There is no parser for the format:
       `nsi-intermediate` writes streams and does not read them, and
       `nsi-stream` is the pixel-streaming driver, not a reader. The

@@ -31,6 +31,8 @@
 //!   documents.
 //! - [`render`] — handing the result to MoonRay's own renderer binary,
 //!   which is what the `mrr` command does.
+//! - [`capi`] — the ɴsɪ C entry points, so this builds as a `cdylib`
+//!   that an existing ɴsɪ consumer can load in place of 3Delight.
 //!
 //! # Building it
 //!
@@ -41,6 +43,7 @@
 //!
 //! [`nsi-intermediate`]: https://github.com/virtualritz/nsi
 
+pub mod capi;
 pub mod document;
 pub mod flush;
 pub mod render;

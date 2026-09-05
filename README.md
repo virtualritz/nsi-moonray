@@ -24,10 +24,32 @@ mrr scene.rdla -o image.exr     # runs `moonray -in … -out …`
 mrr scene.rdla --print          # the command, without running it
 ```
 
-The other delivery shape is a drop-in: `nsi-ffi-wrap` loads a renderer
-by `dlopen` and looks up eleven C entry points, so a `cdylib` exporting
-those over this flush would let an existing ɴsɪ consumer load MoonRay
-exactly where it loads 3Delight today. That is `T4.2`.
+## As A Drop-In Renderer
+
+The crate also builds as `libnsi_moonray.so`, exporting the ɴsɪ C entry
+points. `nsi-ffi-wrap` reaches a renderer by `dlopen` — the library name
+and the environment variable that finds it are parameters of its
+`define_nsi_renderer!` macro, not constants — so an ɴsɪ application can
+load MoonRay exactly where it loads 3Delight:
+
+```rust
+nsi_ffi_wrap::define_nsi_renderer! {
+    name: MoonRay,
+    dynamic: {
+        linux: "libnsi_moonray.so",
+        macos: "libnsi_moonray.dylib",
+        windows: "nsi_moonray.dll",
+    },
+    env_var: "MOONRAY_NSI",
+    link_feature: "link_moonray",
+}
+```
+
+`NSIRenderControl "start"` writes the scene and runs MoonRay's binary.
+It is a batch render, so a display driver gets a file rather than
+pixels, and `NSIEvaluate` needs the `.nsi` parser that does not exist
+yet. `$NSI_MOONRAY_SCENE` names where the `.rdla` is written, which is
+how you look at what a render was made from.
 
 ## Building
 

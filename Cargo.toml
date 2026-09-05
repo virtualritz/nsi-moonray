@@ -18,6 +18,11 @@ include = [
     "/README.md",
 ]
 
+[lib]
+# `cdylib` so this can be `dlopen`ed as an ɴsɪ renderer -- see
+# `src/capi.rs`; `rlib` so the flush stays usable as a Rust library.
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 # The intermediate representation this backend flushes, overlaid from a
 # sibling checkout of https://github.com/virtualritz/nsi.
@@ -30,7 +35,11 @@ include = [
 # submodule stops blocking a fetch, building this crate means cloning
 # `nsi` next to it. `T0.7`.
 nsi-intermediate = { path = "../nsi/crates/nsi-intermediate" }
+# The ɴsɪ types the C entry points speak: `FfiParam` is layout-identical
+# to `NSIParam_t`, and `Type` carries the `NSIType_t` values.
+nsi-trait = { path = "../nsi/crates/nsi-trait" }
 
 [dev-dependencies]
-# For building `OwnedArg` values in the flush tests. Same overlay.
-nsi-trait = { path = "../nsi/crates/nsi-trait" }
+# Loads the `cdylib` in `tests/dropin.rs` the way `nsi-ffi-wrap` loads a
+# renderer: by `dlopen` and by symbol.
+libloading = "0.8"

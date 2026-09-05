@@ -69,14 +69,18 @@ Two shapes, and neither asks this repository to build MoonRay:
 - **`mrr`** hands a `.rdla` to MoonRay's own binary. It exists.
   Whoever renders needs `moonray` installed; nothing here needs it to
   write or check a scene.
-- **`libnsi_moonray.so`** would be a drop-in ɴsɪ renderer. `nsi-ffi-wrap`
-  `dlopen`s a library and looks up eleven C entry points — `NSIBegin`,
-  `NSIEnd`, `NSICreate`, `NSIDelete`, `NSISetAttribute`,
-  `NSISetAttributeAtTime`, `NSIDeleteAttribute`, `NSIConnect`,
-  `NSIDisconnect`, `NSIEvaluate`, `NSIRenderControl` — so a `cdylib`
-  exporting those over `nsi_intermediate::Recorder` and this flush lets
-  a consumer load MoonRay where it loads 3Delight, without changing the
-  consumer. `T4.2`, and it is the one that matters for an application.
+- **`libnsi_moonray.so`** is a drop-in ɴsɪ renderer, and it exists:
+  `src/capi.rs`. `nsi-ffi-wrap` `dlopen`s a library and resolves its
+  whole symbol table up front, so all twelve have to be there —
+  the eleven `NSI*` entry points plus `DspyRegisterDriver`, which the
+  `output` feature looks up and whose absence would make the load fail
+  for a consumer that has that feature on. `tests/dropin.rs` opens the
+  built artefact and drives a triangle through it by symbol.
+
+  What it is not yet: interactive. `"start"` runs MoonRay to
+  completion, so `"synchronize"`, `"suspend"` and `"resume"` have
+  nothing to act on and a display driver receives a file rather than
+  pixels.
 
 Taking `.nsi` *files* is a third thing and needs a parser that does not
 exist: `nsi-intermediate` writes streams and does not read them, and
