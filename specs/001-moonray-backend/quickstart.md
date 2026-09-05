@@ -2,24 +2,33 @@
 
 ## Status
 
-Nothing to run. This repository is spec-only.
+Spec only, but **there is a first move that does not need a heavy host**.
 
-## Prerequisites, When Work Starts
+## Start Here
 
-- A host that can build MoonRay: a CMake build over OpenVDB, Embree,
-  ISPC and OpenImageIO. Docker is the documented path.
-- [`nsi`](https://github.com/virtualritz/nsi) for `nsi-intermediate`.
+`scene_rdl2` builds without MoonRay's Embree/OpenVDB/OpenImageIO/ISPC
+stack — it needs Boost, Lua, CppUnit, OpenSSL, JsonCpp, Log4cplus,
+Python and TBB, all ordinary packages. See `research.md` F7.
 
-## The First Thing To Decide
+```bash
+git clone https://github.com/OpenMoonRay/scene_rdl2.git
+# build per its CMakeLists; record the working invocation in this file
+```
 
-Not a command -- a choice. Read `research.md` Open Questions and settle
-the binding strategy: an `extern "C"` shim over `scene_rdl2`, or
-generating `.rdla`. Every task depends on which.
+Then capture the format oracle: build a small scene through the real
+library and dump it with `AsciiWriter`. **Do not infer the `.rdla`
+format.** The `.nsi` emitter upstream is correct because 3Delight's own
+output was read first, and it corrected four assumptions that would each
+have produced a plausible, wrong file.
 
-Emitting `.rdla` reuses the stream emitter that already exists in
-`nsi-intermediate`, so it is the cheaper route to a first image. It is
-also a batch authoring path, so it cannot reach MoonRay's progressive
-modes. Choose knowing that.
+With that in hand, the binding-strategy question (`T0.3`) becomes an
+experiment rather than an argument.
+
+## What Still Needs A Heavy Host
+
+Rendering. Full MoonRay is a CMake build over Embree, OpenVDB,
+OpenImageIO and ISPC, normally in Docker. Scene *construction* does not
+need it.
 
 ## Verification Commands
 

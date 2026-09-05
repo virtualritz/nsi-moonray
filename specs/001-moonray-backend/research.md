@@ -110,6 +110,32 @@ returns nothing. Shading is `BsdfBuilder`, `BsdfComponent`, `MapApi.h`,
 `BsdfBuilder` is closure-shaped lobe assembly, which would be a natural
 target for OSL closures should generic OSL ever be built.
 
+### F7: `scene_rdl2` builds without MoonRay's heavy dependencies
+
+`scene_rdl2/CMakeLists.txt` requires Boost, Lua, CppUnit, OpenSSL,
+JsonCpp, Log4cplus, Python and TBB. **No Embree, no OpenVDB, no
+OpenImageIO, no ISPC** -- those belong to `moonray`, the renderer.
+
+This splits the work in two, and only the second half needs a heavy
+host:
+
+- **Scene construction** targets `scene_rdl2` alone: `SceneContext`,
+  `SceneObject`, `SceneClass`, `Layer`. Buildable on a modest machine
+  from ordinary distribution packages.
+- **Rendering** needs full MoonRay.
+
+It also supplies a format oracle. `scene_rdl2` ships `AsciiWriter` and
+`BinaryWriter`, so a scene built through the real library can be written
+out and compared against what this backend emits -- the same technique
+that made the `.nsi` emitter correct, where reading 3Delight's own
+output corrected four wrong assumptions rather than shipping a
+plausible format.
+
+Consequence: **the binding-strategy question is smaller than it
+looked.** Building against `scene_rdl2` is cheap enough to try, so the
+choice between a shim and `.rdla` generation can be settled by
+experiment rather than by argument.
+
 ## Open Questions
 
 - **Binding strategy.** Mitsuba's answer was a hand-written `extern "C"`

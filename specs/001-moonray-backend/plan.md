@@ -2,8 +2,11 @@
 
 ## Status
 
-**Spec only.** No code, no crate. Blocked on two things: a host that can
-build MoonRay, and a binding-strategy decision.
+**Spec only.** No code, no crate — but **not blocked**.
+
+`scene_rdl2` builds without MoonRay's heavy dependencies
+(`research.md` F7), so scene construction and its verification can start
+on a modest machine. Only rendering needs a heavy host.
 
 ## Approach
 
@@ -23,10 +26,13 @@ rendering, since `.rdla` is a batch authoring path.
 
 ## Gates
 
-| Gate | Met |
-| --- | --- |
-| MoonRay builds | no |
-| Binding strategy chosen | no |
+| Gate | Needs a heavy host | Met |
+| --- | --- | --- |
+| `scene_rdl2` builds alone | no | no |
+| `.rdla` oracle captured via `AsciiWriter` | no | no |
+| Binding strategy chosen by experiment | no | no |
+| Scene flushes into a `SceneContext` | no | no |
+| Full MoonRay builds | **yes** | no |
 | A triangle renders | no |
 | Two materials, two shapes, correct | no |
 | Transform motion blur | no |

@@ -2,12 +2,29 @@
 
 Nothing started. Ordered by risk retired.
 
-## Blocking
+## Startable Now
 
-- [ ] T0.1 Build MoonRay on a capable host; record the recipe.
-- [ ] T0.2 **Choose the binding strategy** -- `extern "C"` shim over
-      `scene_rdl2`, or generate `.rdla`. Nothing below can be scoped
-      until this is settled. See `research.md` Open Questions.
+`scene_rdl2` builds without MoonRay's heavy dependencies -- Boost, Lua,
+CppUnit, OpenSSL, JsonCpp, Log4cplus, Python, TBB, and nothing from
+Embree/OpenVDB/OpenImageIO/ISPC. See `research.md` F7. So scene
+construction can begin before the renderer can be built at all.
+
+- [ ] T0.1 Build `scene_rdl2` alone; record the recipe.
+- [ ] T0.2 Write a scene by hand through `scene_rdl2` and dump it with
+      `AsciiWriter`. **This is the format oracle**, and it is what makes
+      the emitter correct rather than plausible -- reading 3Delight's
+      real output corrected four wrong assumptions in the `.nsi` case.
+- [ ] T0.3 **Settle the binding strategy by experiment**, now that
+      building against `scene_rdl2` is cheap: an `extern "C"` shim, or
+      generating `.rdla`. See `research.md` Open Questions.
+- [ ] T0.4 Confirm the `scene_rdl2` type names in `data-model.md`
+      against its `Types.h`; they are currently marked unconfirmed.
+
+## Blocked On A Heavy Host
+
+- [ ] T0.9 Build full MoonRay (Embree, OpenVDB, OpenImageIO, ISPC;
+      Docker is the documented path). Needed only to *render*, not to
+      construct a scene.
 
 ## User Story 1: Render A Recorded Scene (P1)
 
