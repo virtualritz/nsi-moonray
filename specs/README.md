@@ -7,7 +7,7 @@ Feature specs live here. The active feature directory is
 
 | # | Surface | Status |
 | --- | --- | --- |
-| [001](001-moonray-backend/) | MoonRay backend | Spec only; blocked on a build host and a binding-strategy decision |
+| [001](001-moonray-backend/) | MoonRay backend | `.rdla` emitter, checked against a captured format oracle; the flush is blocked on depending on `nsi-intermediate` |
 
 ## Scope Of This Repository
 

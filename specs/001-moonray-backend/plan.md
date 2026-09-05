@@ -2,41 +2,43 @@
 
 ## Status
 
-**Spec only.** No code, no crate — but **not blocked**.
+**Phase 0 done, on a modest machine and with no renderer present.**
+`scene_rdl2` builds, the `.rdla` format is captured from it, and the
+crate reproduces that capture byte for byte.
 
-`scene_rdl2` builds without MoonRay's heavy dependencies
-(`research.md` F7), so scene construction and its verification can start
-on a modest machine. Only rendering needs a heavy host.
+The flush that consumes `nsi_intermediate::Scene` is blocked, but not
+on a build host: that crate cannot be depended on from a clean
+checkout. `T0.7`.
 
 ## Approach
 
-Undecided, deliberately. Two candidates:
+**Generate `.rdla`**, MoonRay's Lua scene format, behind a document
+model that leaves room for an `extern "C"` shim over `scene_rdl2` as a
+second target.
 
-1. **`extern "C"` shim over `scene_rdl2`**, mirroring what the Mitsuba
-   backend does. `scene_rdl2` is not template-heavy the way Mitsuba is,
-   so the shim should be simpler there than here.
-2. **Generate `.rdla`**, MoonRay's Lua scene format. No C++ binding at
-   all: `nsi-intermediate` already replays a scene as text, so emitting
-   a second text format is a small step from work that exists. Cheaper
-   to reach a first image, worse for interactive editing.
-
-Option 2 is attractive as a *first* target precisely because it reuses
-the stream emitter. Option 1 is where it has to end up for progressive
-rendering, since `.rdla` is a batch authoring path.
+Settled by experiment, as `T0.3` asked. Building against `scene_rdl2`
+turned out to be cheap, which is what made the *oracle* cheap -- and
+with the format captured exactly, an emitter for it can be checked end
+to end today. The shim's one advantage, MoonRay's progressive modes,
+needs `moonray` itself, which no available host can build yet. So the
+shim buys nothing now and is still where this has to end up for
+interactive work; `TN.1`.
 
 ## Gates
 
 | Gate | Needs a heavy host | Met |
 | --- | --- | --- |
-| `scene_rdl2` builds alone | no | no |
-| `.rdla` oracle captured via `AsciiWriter` | no | no |
-| Binding strategy chosen by experiment | no | no |
-| Scene flushes into a `SceneContext` | no | no |
+| `scene_rdl2` builds alone | no | **yes** |
+| `.rdla` oracle captured via `AsciiWriter` | no | **yes** |
+| Binding strategy chosen by experiment | no | **yes** |
+| Emitter matches the oracle byte for byte | no | **yes** |
+| rdl2 reads back what the emitter writes | no | no |
+| A scene flushes from `nsi_intermediate::Scene` | no | no, `T0.7` |
 | Full MoonRay builds | **yes** | no |
-| A triangle renders | no |
-| Two materials, two shapes, correct | no |
-| Transform motion blur | no |
-| Deformation motion blur | no |
+| A triangle renders | **yes** | no |
+| Two materials, two shapes, correct | **yes** | no |
+| Transform motion blur | **yes** | no |
+| Deformation motion blur | **yes** | no |
 
 ## Artifact Checklist
 
@@ -55,3 +57,10 @@ rendering, since `.rdla` is a batch authoring path.
 workspace. Its motion-sample resolution is an open task there, and
 **this backend is the consumer that justifies doing it** -- Mitsuba
 cannot blur at all.
+
+It is also not reachable yet. The crate is unpublished, and a git
+dependency on the workspace makes Cargo fetch that repository's private
+`.blueprints` submodule; Cargo resolves dependencies whether or not the
+feature gating them is on, so marking it optional does not sidestep it.
+Either publishing `nsi-intermediate` or making the submodule
+non-blocking unblocks this. `T0.7`.

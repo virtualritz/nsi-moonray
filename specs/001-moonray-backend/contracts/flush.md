@@ -10,11 +10,15 @@ Depends on `nsi-intermediate` having resolved graph semantics already.
 | Behavior | Status | Source Evidence | Test/QA Evidence | Required Next Evidence |
 | --- | --- | --- | --- | --- |
 | MoonRay builds on a capable host | Open | None | None | Build `OpenMoonRay/openmoonray`; record the recipe. Docker is the documented path. |
-| A binding strategy is chosen | Open | None | None | Decide between an `extern "C"` shim over `scene_rdl2` and generating `.rdla`. See `research.md` Open Questions. **Nothing else can start until this is settled.** |
+| A binding strategy is chosen | **Covered** | `research.md` Settled Questions; the oracle was captured against a built `scene_rdl2`, which is what made the choice an experiment rather than an argument | `tools/oracle` builds and runs; recipe in `quickstart.md` | -- |
+| The `.rdla` grammar is known, not guessed | **Covered** | `oracle/*.rdla`, written by rdl2's own `AsciiWriter`; `research.md` F8 | `tests/oracle.rs` -- four tests rebuild those scenes and assert byte equality | -- |
+| rdl2 reads back what this crate writes | Open | None | None | Feed emitted `.rdla` to `AsciiReader`, write it out again with `AsciiWriter`, diff. Byte equality against a captured file proves the syntax; only this proves acceptance. `T0.5` |
+| A `Layer` row's shape | **Covered** | `AsciiWriter::writeLayer` -- nine columns keyed on geometry and part | `document.rs` `a_layer_row_has_nine_columns` | -- |
 | Geometry flushes with its world transform | Open | None | None | Flush a translated mesh; assert it renders where the transform puts it. |
 | **Two materials land on the right two shapes** | Open | None | None | Two shapes, two materials via `Layer`, assert each is correct. Inherited top risk: a misclassified connection does not error, it renders wrongly. |
 | Transform motion blur | Open | None | None | Two time samples on a `transform`; assert the result differs from the static render and blurs along the path. Blocked on `nsi-intermediate` motion resolution. |
-| Deformation motion blur | Open | None | None | Two time samples on `P`; assert `vertex list mb` is populated and the render blurs. |
+| Deformation motion blur | Open | None | None | Two time samples on `P`; assert `vertex_list_1` is populated and the render blurs. `vertex list mb` is an alias of it. |
+| More than two motion samples are reported, not flattened | Open | `Types.h` -- `AttributeTimestep` is `TIMESTEP_BEGIN` and `TIMESTEP_END`, nothing else | None | Flush three samples on one attribute; assert the reduction is reported. rdl2 cannot carry them. |
 | Subdivision reaches the limit surface | Open | None | None | Render a cube as a subdivision mesh; assert the silhouette is the limit surface, not the cage. |
 | Analytic primitives are not tessellated | Open | None | None | Flush an ɴsɪ sphere; assert it becomes an analytic primitive rather than a mesh. |
 | Render outputs map to `RenderOutput` | Open | None | None | Flush `render_outputs()`; assert one `RenderOutput` per layer. |
@@ -38,6 +42,7 @@ Depends on `nsi-intermediate` having resolved graph semantics already.
 
 ## Required Evidence Before Marking Complete
 
-- A build host, and a settled binding strategy.
+- A build host for the rendering rows. `scene_rdl2` alone is enough for
+  everything above the render.
 - The two-material test specifically. Do not mark this complete because
   a scene merely rendered.

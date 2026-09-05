@@ -2,7 +2,9 @@
 
 Findings are from reading `OpenMoonRay/moonray` and
 `OpenMoonRay/scene_rdl2` at a shallow clone taken 2026-09-05, not from
-documentation.
+documentation. Findings marked **built** were since checked against a
+`scene_rdl2` that was actually built and run; two of the originals were
+wrong, and both are corrected in place below.
 
 ## Why MoonRay
 
@@ -33,13 +35,30 @@ the ɴsɪ `attributes` node being dissolved.
   `node_xform` as a `Mat4d` attribute. `SceneVariables` carries
   `use_rotation_motion_blur` and a slerp option for interpolating it.
   `.rdla` has a `blur(...)` construct for multi-sample attributes.
-- **Deformation:** `moonray/dso/geometry/RdlMesh` has a **`vertex list
-  mb`** attribute -- a second motion step for vertices -- and a **`use
-  velocity`** flag that takes a velocity list instead.
+- **Deformation:** `moonray/dso/geometry/RdlMesh/attributes.cc`
+  declares `vertex_list_0` and `vertex_list_1` -- two motion steps of
+  `Vec3fVector`. **Corrected (built):** the names originally recorded
+  here, `vertex list` and `vertex list mb`, are *aliases* of those two;
+  the canonical names are the underscored ones.
+- **Velocity: there is no `use velocity` flag.** A search for
+  `use_velocity` across `OpenMoonRay/moonray` returns nothing.
+  Velocity is `velocity_list_0` / `velocity_list_1` plus
+  `velocity_scale`, and which of position, velocity and acceleration
+  gets used is chosen by `motion_blur_type`, declared in
+  `scene_rdl2/lib/scene/rdl2/CommonAttributes.h` with values `static`,
+  `velocity`, `frame delta`, `acceleration`, `hermite` and `best`
+  (the default).
 
 So ɴsɪ `set_attribute_at_time` maps directly: on `transformationmatrix`
-to `node_xform` blur samples, on `P` to `vertex list mb`. This is the
+to `node_xform` blur samples, on `P` to `vertex_list_1`. This is the
 capability Mitsuba lacks entirely.
+
+**But rdl2 takes exactly two motion samples.** `AttributeTimestep` in
+`Types.h` is `TIMESTEP_BEGIN`, `TIMESTEP_END` and nothing else, and the
+`.rdla` construct is `blur(a, b)`. ɴsɪ places no such limit. A scene
+with three or more samples on one attribute therefore cannot be carried
+across, and the backend must report that rather than silently keeping
+the first and last.
 
 ### F2: Tessellation only under displacement
 
@@ -112,9 +131,20 @@ target for OSL closures should generic OSL ever be built.
 
 ### F7: `scene_rdl2` builds without MoonRay's heavy dependencies
 
+**Built.** Done on a four-core, 16 GB container in about fifteen
+minutes; the recipe, and the three upstream problems it has to work
+around, are in `quickstart.md`.
+
 `scene_rdl2/CMakeLists.txt` requires Boost, Lua, CppUnit, OpenSSL,
-JsonCpp, Log4cplus, Python and TBB. **No Embree, no OpenVDB, no
-OpenImageIO, no ISPC** -- those belong to `moonray`, the renderer.
+JsonCpp, Log4cplus, Python and TBB. No Embree, no OpenVDB, no
+OpenImageIO -- those belong to `moonray`, the renderer.
+
+**Corrected: ISPC *is* required.** The same `CMakeLists.txt` appends
+`ISPC` to `project(... LANGUAGES ...)` on every platform but Xcode, and
+five library sources under `lib/common/math/ispc` and
+`lib/common/fb_util/ispc` are `.ispc`. It is one distribution package
+and does not drag the renderer's stack in with it, so the conclusion
+holds; the original list did not.
 
 This splits the work in two, and only the second half needs a heavy
 host:
@@ -136,12 +166,47 @@ looked.** Building against `scene_rdl2` is cheap enough to try, so the
 choice between a shim and `.rdla` generation can be settled by
 experiment rather than by argument.
 
+### F8: The `.rdla` grammar, captured rather than inferred
+
+**Built.** `tools/oracle` writes four scenes through rdl2's own
+`AsciiWriter`; the output is in `oracle/`. Four things in it would not
+have survived a plausible guess:
+
+- `Vec2` / `Vec3` / `Vec4` / `Mat4` carry **no precision suffix**. A
+  `Mat4d` attribute prints `Mat4(...)`, exactly as a `Mat4f` one does.
+- A null object reference is `undef()`, not `nil`.
+- A bound attribute keeps its own value: `bind(Source("/s"), "pizza")`.
+- Numbers print through C++'s `%g` at `max_digits10` -- nine
+  significant digits for `Float`, seventeen for `Double`. `0.1f` is
+  `0.100000001`, `1e20f` is `1.00000002e+20`, `-0.0f` is `-0`. Rust's
+  `{}` prints the shortest round-tripping form and matches none of
+  them.
+
+`SceneVariables` is written without a name or parentheses, sets write
+bare references, and a vector is `{ a, b}` -- a space after the brace,
+none before the close.
+
+## Settled Questions
+
+- **Binding strategy: generate `.rdla` first.** The format is small,
+  now fully captured, and an emitter for it can be checked end to end
+  today against real `AsciiWriter` output. A shim would buy nothing
+  until a host can build the renderer, since its only advantage --
+  MoonRay's progressive modes -- needs `moonray` present. The emitter
+  is kept behind a document model so a `scene_rdl2` shim can be added
+  as a second target rather than a rewrite. `TN.1` still needs it.
+- **`Layer` wants one entry per geometry and part.**
+  `AsciiWriter::writeLayer` writes a nine-column row -- geometry, part
+  name, material, light set, displacement, volume shader, light filter
+  set, shadow set, shadow receiver set -- keyed on the geometry and
+  part pair. An ɴsɪ scene without face groups yields one row per shape
+  with an empty part name.
+
 ## Open Questions
 
-- **Binding strategy.** Mitsuba's answer was a hand-written `extern "C"`
-  shim, forced by its templates. `scene_rdl2` is not template-heavy in
-  the same way, so a shim may be easier -- but `.rdla` is a scripted
-  authoring path that might be a cheaper first target. Decide before
-  planning tasks.
-- **Whether `Layer` wants one entry per shape or per assignment group.**
-  Affects how `geometry_binding` results are consumed.
+- **How a consumer is meant to depend on `nsi-intermediate`.** It is
+  unpublished, and a git dependency on the `nsi` workspace makes Cargo
+  fetch that repository's private `.blueprints` submodule, which fails
+  without access to it -- and Cargo resolves every dependency whether
+  or not the feature gating it is enabled, so making it optional does
+  not help. This blocks the flush layer, not the format layer.

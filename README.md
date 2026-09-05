@@ -4,9 +4,12 @@ An [ɴsɪ](https://nsi.readthedocs.io/) backend on
 [MoonRay](https://github.com/OpenMoonRay/moonray), DreamWorks
 Animation's production renderer.
 
-**Status: spec only.** No crate yet — the binding strategy is undecided,
-and that decision changes what the crate looks like. See
-[`specs/`](specs/).
+**Status: it emits scenes, it does not render them yet.** The crate
+writes `.rdla`, MoonRay's ASCII scene format, and every byte of that
+format was captured from `scene_rdl2`'s own `AsciiWriter` rather than
+inferred — see [`specs/001-moonray-backend/oracle/`](specs/001-moonray-backend/oracle/).
+The flush that consumes a recorded ɴsɪ scene is blocked on being able
+to depend on `nsi-intermediate`; see [`specs/`](specs/).
 
 ## Why MoonRay
 
@@ -25,8 +28,9 @@ closely than the alternatives:
 And it does things the Mitsuba backend cannot:
 
 - **Motion blur, both kinds.** `node_xform` takes blur samples;
-  `RdlMesh` has `vertex list mb` for deformation and a velocity path.
-  Mitsuba 3 dropped `AnimatedTransform` and cannot blur at all.
+  `RdlMeshGeometry` has `vertex_list_1` for deformation and a velocity
+  path. Mitsuba 3 dropped `AnimatedTransform` and cannot blur at all.
+  Two samples, though: rdl2 has exactly two timesteps.
 - **Analytic primitives stay analytic.** Spheres, boxes and nine native
   curve types go to Embree without tessellation. Polygon meshes are
   tessellated *only* when displacement is assigned.
