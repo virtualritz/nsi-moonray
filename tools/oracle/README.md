@@ -13,7 +13,7 @@ The same discipline applies here.
 Needs `scene_rdl2` only — no renderer. Build recipe and how to run it:
 `specs/001-moonray-backend/quickstart.md`.
 
-The four scenes:
+The scenes:
 
 | Scene | Pins down |
 | --- | --- |

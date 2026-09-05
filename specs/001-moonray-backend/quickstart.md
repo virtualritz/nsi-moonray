@@ -39,7 +39,7 @@ cmake --install build
 
 Roughly 15 minutes on four cores.
 
-### Two Things That Bite
+### Three Things That Bite
 
 **Use the Makefile generator, not Ninja.** `lib/common/math/ispc` and
 `lib/common/fb_util/ispc` set
