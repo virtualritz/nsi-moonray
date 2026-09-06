@@ -625,6 +625,13 @@ pub fn render_in_process(scene: &nsi_intermediate::Scene) -> bool {
         eprintln!("nsi-moonray: {limitation}");
     }
 
+    // `.rdla` is a dump now, not the transport -- but a dump you can
+    // still ask for, and `$NSI_MOONRAY_SCENE` is how. It has to work on
+    // *this* path too: the scene someone wants to look at is the one
+    // that actually rendered, and only writing it on the fallback would
+    // hand them the wrong answer or nothing at all.
+    dump_scene(&flushed);
+
     // The renderer owns the scene, so this is the context the frame is
     // rendered from rather than a copy pushed across.
     let Some(live) = render.scene() else {
@@ -694,6 +701,26 @@ pub fn render_in_process(scene: &nsi_intermediate::Scene) -> bool {
     }
 
     true
+}
+
+/// Write the `.rdla` dump, if one was asked for.
+///
+/// Only when `$NSI_MOONRAY_SCENE` names a path: on the in-process path
+/// nothing needs a file, so writing one unasked would leave litter next
+/// to whatever ran the render.
+#[cfg(all(feature = "rdl2", moonray))]
+fn dump_scene(flushed: &crate::flush::Flushed) {
+    let Some(path) = std::env::var_os("NSI_MOONRAY_SCENE") else {
+        return;
+    };
+    let path = PathBuf::from(path);
+
+    if let Err(error) = std::fs::write(&path, flushed.to_rdla()) {
+        eprintln!(
+            "nsi-moonray: cannot write the scene dump {}: {error}",
+            path.display()
+        );
+    }
 }
 
 /// Where MoonRay's scene classes live.

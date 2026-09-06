@@ -276,6 +276,23 @@ patched source anyway, which is worth knowing before trying it. `T0.7`.
 
 ## Verification Commands
 
+**Build the library before testing.** `tests/dropin.rs` `dlopen`s
+`target/debug/libnsi_moonray.so` by path, so Cargo does not know the
+test depends on it and can run against the *previous* one. A stale
+artefact never looks like a stale artefact -- it looks like a bug you
+have already fixed (`002` `research.md` F7).
+
+
 ```bash
 cargo test          # the emitter against the captured oracle, and the flush
+
+# With the renderer linked. `--lib` first, per the note above.
+export SCENE_RDL2_ROOT=$PREFIX MOONRAY_ROOT=$PREFIX
+export NSI_MOONRAY_DSO=$PREFIX/rdl2dso
+cargo build --features rdl2 --lib
+cargo test --features rdl2
 ```
+
+`$NSI_MOONRAY_SCENE` writes the `.rdla` for whatever renders,
+in-process or spawned. It is a dump rather than a transport, and it is
+how you get at the scene a render was actually made from.

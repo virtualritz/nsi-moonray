@@ -43,18 +43,21 @@ fn scene(width: i32, height: i32) -> Scene {
 
     scene.create("quad", "mesh").unwrap();
     scene
-        .set_attribute("quad", vec![
-            arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
-            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
-            arg(
-                "P",
-                Type::Point,
-                OwnedData::F32(vec![
-                    -1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0,
-                    1.0, 0.0,
-                ]),
-            ),
-        ])
+        .set_attribute(
+            "quad",
+            vec![
+                arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+                arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
+                arg(
+                    "P",
+                    Type::Point,
+                    OwnedData::F32(vec![
+                        -1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0,
+                        1.0, 0.0,
+                    ]),
+                ),
+            ],
+        )
         .unwrap();
 
     scene.create("xform", "transform").unwrap();
@@ -66,41 +69,54 @@ fn scene(width: i32, height: i32) -> Scene {
     scene.connect("light", None, ".root", "objects").unwrap();
 
     scene.create("attr", "attributes").unwrap();
-    scene.connect("attr", None, "quad", "geometryattributes").unwrap();
+    scene
+        .connect("attr", None, "quad", "geometryattributes")
+        .unwrap();
     scene.create("surface", "shader").unwrap();
     scene
-        .set_attribute("surface", vec![arg(
-            "diffuseColor",
-            Type::Color,
-            OwnedData::F32(vec![1.0, 0.0, 0.0]),
-        )])
+        .set_attribute(
+            "surface",
+            vec![arg(
+                "diffuseColor",
+                Type::Color,
+                OwnedData::F32(vec![1.0, 0.0, 0.0]),
+            )],
+        )
         .unwrap();
-    scene.connect("surface", None, "attr", "surfaceshader").unwrap();
+    scene
+        .connect("surface", None, "attr", "surfaceshader")
+        .unwrap();
 
     scene.create("cam", "perspectivecamera").unwrap();
     scene
-        .set_attribute("cam", vec![arg(
-            "fov",
-            Type::F32,
-            OwnedData::F32(vec![45.0]),
-        )])
+        .set_attribute(
+            "cam",
+            vec![arg("fov", Type::F32, OwnedData::F32(vec![45.0]))],
+        )
         .unwrap();
     scene.connect("cam", None, ".root", "objects").unwrap();
 
     scene.create("screen", "screen").unwrap();
     scene
-        .set_attribute("screen", vec![arg(
-            "resolution",
-            Type::I32,
-            OwnedData::I32(vec![width, height]),
-        )])
+        .set_attribute(
+            "screen",
+            vec![arg(
+                "resolution",
+                Type::I32,
+                OwnedData::I32(vec![width, height]),
+            )],
+        )
         .unwrap();
     scene.connect("screen", None, "cam", "screens").unwrap();
 
     scene.create("beauty", "outputlayer").unwrap();
-    scene.connect("beauty", None, "screen", "outputlayers").unwrap();
+    scene
+        .connect("beauty", None, "screen", "outputlayers")
+        .unwrap();
     scene.create("driver", "outputdriver").unwrap();
-    scene.connect("driver", None, "beauty", "outputdrivers").unwrap();
+    scene
+        .connect("driver", None, "beauty", "outputdrivers")
+        .unwrap();
 
     scene
 }
@@ -156,8 +172,8 @@ fn one_transform_edit_moves_the_shape_and_nothing_else_is_re_applied() {
         .unwrap_or_else(|error| error.into_inner());
 
     let (width, height) = (64usize, 48usize);
-    let render = Render::new(Some(&dso), Some(2), Mode::Batch)
-        .expect("a renderer");
+    let render =
+        Render::new(Some(&dso), Some(2), Mode::Batch).expect("a renderer");
     let live = render.scene().expect("the renderer's own scene");
 
     let mut nsi = scene(width as i32, height as i32);
@@ -221,33 +237,42 @@ fn one_transform_edit_moves_the_shape_and_nothing_else_is_re_applied() {
     );
 }
 
-/// **What `scene_updated` is actually load-bearing for.**
+/// **`I1`.** A shader edit reaches the image.
 ///
-/// `RenderContext::startFrame` branches three ways: the first frame
-/// builds everything; `mSceneUpdated` runs `applyUpdates`, which calls
-/// `update()` on every `SceneObject` and rebuilds the attribute tables
-/// for shaders the layer says changed; neither means reuse everything.
+/// And a finding worth writing down, because two versions of this test
+/// asserted the opposite and both failed:
 ///
-/// So a **shader** edit needs the mark. This asserts the negative --
-/// that without it the frame is unchanged -- because that is the shape
-/// of the bug: applied but not marked has no symptom except a stale
-/// image, and reading the scene back would show the new value and pass.
+/// `RenderContext::startFrame` branches on `mSceneUpdated` to decide
+/// whether to run `applyUpdates`, and `mSceneUpdated` is set only by
+/// MoonRay's *own* update entry points (`updateScene`,
+/// `updateGeometry`). A scene edited directly through the live
+/// `SceneContext` sets none of them, so `setSceneUpdated` looks like
+/// the load-bearing call -- MoonRay's own comment says it is "for
+/// when the SceneContext is modified externally".
 ///
-/// A *transform* edit, by contrast, reaches the image without the mark:
-/// `GeometryManager` recomputes geometry-to-render matrices from
-/// `node_xform` as it loads. Asserting the negative on a transform was
-/// the first version of this test, and it failed -- which is how the
-/// distinction was found rather than assumed.
+/// **It is not what makes these edits visible.** Both a transform and
+/// a shader parameter reach the render without it: geometry-to-render
+/// matrices are recomputed from `node_xform` as geometry loads, and a
+/// material's parameters are read from the rdl2 object at shade time
+/// rather than from anything `applyUpdates` rebuilds.
+///
+/// So `scene_updated()` is still called on the real path -- it is the
+/// documented hook, it costs nothing, and `applyUpdates` is what
+/// rebuilds primitive-attribute tables and marks geometry for reload,
+/// which these two edits happen not to need. But nothing here may
+/// claim it is what carries the edit across, and no test may assert
+/// that its absence hides one. `I5` is where the difference would
+/// actually show: in what got regenerated, not in the pixels.
 #[test]
-fn a_shader_edit_that_is_not_marked_renders_the_old_scene() {
+fn a_shader_edit_reaches_the_image() {
     let dso = dso_path();
     let _guard = ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
     let (width, height) = (64usize, 48usize);
-    let render = Render::new(Some(&dso), Some(2), Mode::Batch)
-        .expect("a renderer");
+    let render =
+        Render::new(Some(&dso), Some(2), Mode::Batch).expect("a renderer");
     let live = render.scene().expect("a scene");
 
     let mut nsi = scene(width as i32, height as i32);
@@ -258,11 +283,14 @@ fn a_shader_edit_that_is_not_marked_renders_the_old_scene() {
     let _ = nsi.take_changes();
 
     // Turn the surface green. `diffuseColor` crosses by exact name.
-    nsi.set_attribute("surface", vec![arg(
-        "diffuseColor",
-        Type::Color,
-        OwnedData::F32(vec![0.0, 1.0, 0.0]),
-    )])
+    nsi.set_attribute(
+        "surface",
+        vec![arg(
+            "diffuseColor",
+            Type::Color,
+            OwnedData::F32(vec![0.0, 1.0, 0.0]),
+        )],
+    )
     .unwrap();
 
     let changes = nsi.take_changes();
@@ -274,7 +302,7 @@ fn a_shader_edit_that_is_not_marked_renders_the_old_scene() {
 
     apply_affected(&flush(&nsi).document, &live, &changes, &affected);
 
-    // Deliberately no `scene_updated()`.
+    // Deliberately no `scene_updated()` yet.
     let after = frame(&render);
 
     let [red_before, green_before, _] = channels(&before);
@@ -285,23 +313,21 @@ fn a_shader_edit_that_is_not_marked_renders_the_old_scene() {
         "the quad starts red: {red_before} vs {green_before}"
     );
     assert!(
-        red_after > green_after * 2.0,
-        "without `scene_updated` MoonRay skips `applyUpdates`, so the \
-         shader's new value never reaches the render and the quad is \
-         still red. If this ever fails, `scene_updated` has stopped \
-         being load-bearing for shaders and the incremental path needs \
-         re-checking. red {red_after} vs green {green_after}"
+        green_after > red_after * 2.0,
+        "the edited material must reach the image: red {red_after} vs \
+         green {green_after}"
     );
 
-    // And with the mark, it does reach it.
+    // And again with the mark, which is what the real path does. The
+    // point is that it is not *worse*, not that it is what carried the
+    // edit -- see this test's note.
     render.scene_updated().expect("the renderer is told");
     let marked = frame(&render);
     let [red_marked, green_marked, _] = channels(&marked);
 
     assert!(
         green_marked > red_marked * 2.0,
-        "with `scene_updated` the shader edit must reach the image: red \
-         {red_marked} vs green {green_marked}"
+        "red {red_marked} vs green {green_marked}"
     );
 }
 
@@ -315,8 +341,8 @@ fn a_created_node_falls_back_and_reports() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let render = Render::new(Some(&dso), Some(2), Mode::Batch)
-        .expect("a renderer");
+    let render =
+        Render::new(Some(&dso), Some(2), Mode::Batch).expect("a renderer");
     let live = render.scene().expect("a scene");
 
     let mut nsi = scene(64, 48);

@@ -243,10 +243,8 @@ pub fn flush(scene: &Scene) -> Flushed {
         // identity transform points a camera, with a plain 45-degree
         // field of view. Arbitrary, and said so rather than implied.
         objects.push(
-            Object::new(PERSPECTIVE_CAMERA, DEFAULT_CAMERA).set(
-                "focal",
-                Value::Float(focal(45.0, resolution)),
-            ),
+            Object::new(PERSPECTIVE_CAMERA, DEFAULT_CAMERA)
+                .set("focal", Value::Float(focal(45.0, resolution))),
         );
         variables = variables.set(
             "camera",

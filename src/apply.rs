@@ -85,7 +85,10 @@ pub fn apply_affected(
     // filter rather than a second mapping.
     let touched = |described: &Described| {
         described.name.as_ref().is_some_and(|name| {
-            affected.nodes.contains(name) || affected.shaders.contains(name)
+            // `Affected` borrows from the scene now rather than
+            // owning copies of every handle, so these are `&str`.
+            affected.nodes.contains(name.as_str())
+                || affected.shaders.contains(name.as_str())
         })
     };
 

@@ -188,3 +188,56 @@ assume a scene assembled by MoonRay's own front end. A backend feeding
 it scenes built from somewhere else will keep finding these, and each
 one is a crash rather than an error. Guard at the shim, where one check
 protects every caller.
+
+## F6: `setSceneUpdated` is not what carries an edit across
+
+`RenderContext::startFrame` branches three ways: the first frame
+builds everything; `mSceneUpdated` runs `applyUpdates`, which calls
+`update()` on every `SceneObject` and rebuilds the attribute tables
+for shaders the layer says changed; neither reuses everything.
+
+`mSceneUpdated` is set only by MoonRay's own update entry points --
+`updateScene(manifest, payload)`, `updateScene(filename)`,
+`updateGeometry`. A scene edited directly through a live
+`SceneContext` sets none of them, and `setSceneUpdated`'s own comment
+says it is "for when the SceneContext is modified externally". So it
+reads like the load-bearing call.
+
+**It is not what makes an edit visible.** Two tests asserted that it
+was, and both failed:
+
+- A **transform** edit reaches the image without it. `GeometryManager`
+  recomputes geometry-to-render matrices from `node_xform` as it
+  loads geometry.
+- A **shader parameter** edit reaches the image without it. A
+  material's parameters are read from the rdl2 object at shade time
+  rather than from anything `applyUpdates` rebuilds. The quad went
+  from red to green with the mark deliberately withheld.
+
+So `scene_updated()` is still called on the real path -- it is the
+documented hook, it costs nothing, and `applyUpdates` is what rebuilds
+primitive-attribute tables and flags geometry for reload, which
+neither of those two edits needs. But nothing may claim it is what
+carries an edit across, and no test may assert that its absence hides
+one.
+
+**Where the difference would actually show is cost, not pixels**, and
+that is `I5`: what got regenerated. This is the same trap the contract
+already names -- "marked but not applied" is a full rebuild that
+renders correctly and slowly, and only timing finds it. It now has a
+sibling: *unmarked and applied anyway*, which renders correctly and
+may or may not be doing more work than it needs.
+
+## F7: The `cdylib` goes stale under `cargo test`
+
+`tests/dropin.rs` `dlopen`s `target/debug/libnsi_moonray.so` by path,
+so Cargo does not know the test depends on it. A `cargo test` run
+after editing `src/capi.rs` can load the *previous* library.
+
+This cost two debugging sessions, and both times the symptom pointed
+somewhere else entirely: once a SIGSEGV whose backtrace named a
+function whose signature had already been changed, once a missing file
+whose writer had already been added. A stale artefact does not look
+like a stale artefact; it looks like a bug you have already fixed.
+
+`cargo build --lib` before `cargo test` is the reliable order.
