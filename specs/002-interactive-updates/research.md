@@ -242,57 +242,54 @@ like a stale artefact; it looks like a bug you have already fixed.
 
 `cargo build --lib` before `cargo test` is the reliable order.
 
-## F8: MoonRay's cost counters do not accumulate for a library consumer
+## F8: The cost counters work — read before the frame stops
 
-`I5` -- "assert the cost, not only the pixels" -- needs a number that
-says whether an edit re-tessellated anything, because a synchronise
-that rebuilds the whole scene renders exactly the right image, slightly
-later, and no pixel test can tell the difference.
+`I5` -- "assert the cost, not only the pixels" -- needs a number saying
+whether an edit re-tessellated anything, because a synchronise that
+rebuilds the whole scene renders exactly the right image, slightly
+later, and no pixel test can tell.
 
-`RenderStats` looks like the answer and is reachable:
-`RenderContext::getSceneRenderStats()` is public, its counters are
-public (`// stats are public for ease of access`), and
-`RenderContext.cc:2605` copies `mTessellationTime`,
-`mPerPrimitiveTessellationTime`, `mBuildAcceleratorTime` and the rest
-across from the `GeometryManager` after every `finalizeChanges`.
+`RenderStats` is the answer, and for a long time it looked like it was
+not: every timer read `0.0` and `primitives_tessellated` never moved,
+through a polygon mesh, a subdivision surface and `log_info`.
 
-**They do not move.** Adding a second shape to a live session -- first
-a polygon mesh, then a subdivision surface, which certainly
-tessellates -- leaves `primitives_tessellated` at 1 and every timer at
-`0.0`. The shape renders correctly, so the incremental path is fine;
-it is the measurement that is not there. The likely cause is that the
-timers are gated on stats logging a library consumer does not enable,
-but that was not chased down.
+**`RenderContext::stopFrame` calls `RenderStats::reset()`**
+(`RenderContext.cc:1208`), which zeroes every timer. Reading the
+counters after a render is therefore guaranteed to read zeros. They
+have to be captured *before* the frame stops, which is why
+`Session::last_cost` exists and why `stream` no longer stops the frame
+on the way out -- the frame's lifetime belongs to whoever wants to
+know what it cost.
 
-Three things were tried and ruled out:
+`mPerPrimitiveTessellationTime` is the exception: `reset` does not
+clear it, which is why it read a constant `1` and looked like a counter
+stuck rather than a counter reset.
 
-- **A subdivision surface** rather than a polygon mesh, in case
-  polygons never reach `GeometryManager::tessellate`. No change.
-- **`log_info` on the scene variables**, in case the timers are gated
-  on stats logging. No change -- and note that what *is* gated on the
-  log flags is `reportGeometryTessellationTime`, the reporting, not
-  the accumulation (`RenderContext.cc:2006`).
-- **Checking the shape actually arrived.** It does: the left of frame
-  goes from `0` to `11.2` when the second shape is added, so the
-  incremental path is correct and it is only the measurement that is
-  missing. This was worth checking rather than assuming -- the first
-  version of the check asked whether the left column was non-zero,
-  which the environment light satisfies on its own.
+**And the scene has to be heavy enough to measure.** A four-vertex quad
+tessellates in about a tenth of a millisecond, and so does deciding not
+to; the two are indistinguishable. A subdivided 40x40 grid takes about
+ten milliseconds, and the difference is a hundredfold.
 
-The next thing to look at is `RenderContext.cc:2001`: `loadGeometries`
--- which is where the stats are copied across from the
-`GeometryManager` -- runs only `if (geomChangeFlag != ChangeFlag::NONE)`.
-Even the *first* frame reports `load_procedurals: 0.0` here, so
-something more basic than the incremental path is not wiring these up.
+### What the measurement then said
 
-`Render::cost` is kept, because the fields are real and the accessor is
-right. What is *not* kept is an assertion built on it: a test saying "a
-shader edit costs no geometry work" would pass because nothing ever
-moves, which is worse than no assertion at all. The control test --
-"adding geometry shows up in the counters" -- is committed and
-`#[ignore]`d, so `cargo test -- --ignored` says whether this is still
-true.
+- **A material change re-tessellates its geometry, by design.**
+  `scene_rdl2`'s `Layer.cc:497`: "if a material changes it might
+  request a new primitive attribute from the geometry and so the
+  geometry would need to be reloaded and retessellated. At this point
+  we do not know which primitive attributes the material requests...
+  so we add this geometry to the list of changed or deformed
+  geometries **just in case**." Conservative, upstream's, and not
+  something a backend can map around.
+- **A visibility edit re-tessellates too**, and should not:
+  `Geometry`'s `visible_*` attributes are declared
+  `FLAGS_GEOM_RELOAD_BVH_ONLY` (F3), so hiding a shape ought to cost an
+  accelerator rebuild instead. **This is the gap `I5` opened.** It is
+  now a measurement rather than a suspicion, and it is the next thing
+  to chase.
 
-`I5` stays open, and it is the last thing standing between "the
-incremental path renders the right image" and "the incremental path is
-actually incremental".
+Narrowing the apply by *attribute* rather than only by object went in
+along the way, and is worth keeping regardless: re-sending a mesh's
+`vertex_list_0` marks its geometry for regeneration whether or not the
+vertices moved, since rdl2 tracks that an attribute was *set*, not that
+it changed.
+

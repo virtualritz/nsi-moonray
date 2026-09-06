@@ -57,6 +57,7 @@ const SCENE_VARIABLES: &str = "SceneVariables";
 /// and slowly is invisible in the image and shows up only as time.
 pub fn apply_affected(
     document: &Document,
+    previous: Option<&Document>,
     context: &Context,
     changes: &nsi_intermediate::Changes,
     affected: &nsi_intermediate::Affected,
@@ -99,7 +100,8 @@ pub fn apply_affected(
             .objects
             .iter()
             .filter(|described| touched(described))
-            .cloned()
+            .map(|described| unchanged_removed(described, previous))
+            .filter(|described| !is_empty(described))
             .collect(),
     };
 
@@ -108,6 +110,69 @@ pub fn apply_affected(
     }
 
     (apply(&narrowed, context), false)
+}
+
+/// Drop the attributes whose values did not change.
+///
+/// **Narrow by attribute, not only by object.** Re-sending a mesh's
+/// `vertex_list_0` marks its geometry for regeneration whether or not
+/// the vertices moved -- rdl2 tracks that an attribute was *set*, not
+/// that it changed -- so hiding a shape by writing nine visibility
+/// flags would also re-tessellate it, and the cheap cost tier that
+/// `002` `research.md` F3 is about would be lost to an attribute
+/// nobody edited.
+///
+/// The comparison is against the previous flush of the same scene, so
+/// it costs one `Document` of memory and no bookkeeping: whatever the
+/// backend computed last time is what MoonRay is holding.
+///
+/// A set's membership and a `Layer`'s rows are left alone. They are
+/// structure rather than attributes, and `apply_affected` has already
+/// refused to narrow anything that changes them.
+fn unchanged_removed(
+    described: &Described,
+    previous: Option<&Document>,
+) -> Described {
+    let Body::Attributes(attributes) = &described.body else {
+        return described.clone();
+    };
+
+    let Some(before) = previous.and_then(|document| {
+        document.objects.iter().find(|other| {
+            other.class == described.class && other.name == described.name
+        })
+    }) else {
+        // Never applied, so everything about it is new.
+        return described.clone();
+    };
+
+    let Body::Attributes(was) = &before.body else {
+        return described.clone();
+    };
+
+    Described {
+        class: described.class.clone(),
+        name: described.name.clone(),
+        body: Body::Attributes(
+            attributes
+                .iter()
+                .filter(|(name, value)| {
+                    !was.iter()
+                        .any(|(had, before)| had == name && before == value)
+                })
+                .cloned()
+                .collect(),
+        ),
+    }
+}
+
+/// Whether an object has nothing left to say.
+///
+/// An object every one of whose attributes was unchanged is not worth
+/// an update: `beginUpdate`/`endUpdate` around no writes still marks it
+/// dirty, which is the cost this is avoiding.
+fn is_empty(described: &Described) -> bool {
+    matches!(&described.body, Body::Attributes(attributes) if attributes.is_empty())
 }
 
 /// Apply a document, reporting what would not go across.

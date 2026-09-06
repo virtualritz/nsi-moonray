@@ -23,6 +23,7 @@
 use crate::{
     apply::{apply, apply_affected},
     display::Callbacks,
+    document::Document,
     flush::{Flushed, flush},
     rdl2::{Mode, Render},
     stream::{Stopped, stream},
@@ -33,6 +34,23 @@ use nsi_intermediate::Scene;
 pub struct Session {
     scene: Scene,
     render: Render,
+    /// The document last applied to the renderer.
+    ///
+    /// What MoonRay is holding, so a synchronise can send only the
+    /// attributes that actually differ. Without it the narrow path is
+    /// narrow in *objects* only, and re-sending a mesh's
+    /// `vertex_list_0` regenerates its geometry whether or not the
+    /// vertices moved.
+    applied: Document,
+    /// What the last completed frame cost.
+    ///
+    /// Captured **before** the frame is stopped, because
+    /// `RenderContext::stopFrame` calls `RenderStats::reset()`
+    /// (`RenderContext.cc:1208`) and zeroes every timer. Reading the
+    /// counters after a render is therefore guaranteed to read zeros,
+    /// which is what made them look like they were never wired up at
+    /// all (`002` `research.md` F8).
+    last_cost: Option<crate::rdl2::Cost>,
 }
 
 impl Session {
@@ -48,7 +66,12 @@ impl Session {
     /// reported on the way out.
     pub fn new(scene: Scene, dso_path: &str) -> Option<Self> {
         let render = Render::new(Some(dso_path), None, Mode::Progressive)?;
-        let mut session = Self { scene, render };
+        let mut session = Self {
+            scene,
+            render,
+            applied: Document::default(),
+            last_cost: None,
+        };
 
         let flushed = flush(&session.scene);
         session.report(&flushed);
@@ -57,6 +80,7 @@ impl Session {
         for line in apply(&flushed.document, &live) {
             eprintln!("nsi-moonray: {line}");
         }
+        session.applied = flushed.document.clone();
 
         if let Err(error) = session.render.initialize() {
             eprintln!(
@@ -108,6 +132,26 @@ impl Session {
         &self.render
     }
 
+    /// What the last completed frame cost.
+    ///
+    /// The only way to tell an incremental update from a rebuild: a
+    /// synchronise that re-tessellates everything renders exactly the
+    /// right image, slightly later, and no pixel test can see the
+    /// difference.
+    ///
+    /// `None` before the first [`Session::wait`]. The counters must be
+    /// read before the frame stops -- `stopFrame` resets them -- which
+    /// is why this is recorded here rather than left to the caller.
+    pub fn last_cost(&self) -> Option<crate::rdl2::Cost> {
+        self.last_cost
+    }
+
+    /// Read the cost, then stop the frame. Order matters.
+    fn stop_and_record(&mut self) {
+        self.last_cost = self.render.cost().ok();
+        let _ = self.render.stop();
+    }
+
     /// Apply the edits made since the last call, and re-render.
     ///
     /// Returns whether the edit forced a whole-scene re-apply. That is
@@ -129,11 +173,17 @@ impl Session {
             return false;
         };
 
-        let (report, rebuilt) =
-            apply_affected(&flushed.document, &live, &changes, &affected);
+        let (report, rebuilt) = apply_affected(
+            &flushed.document,
+            Some(&self.applied),
+            &live,
+            &changes,
+            &affected,
+        );
         for line in report {
             eprintln!("nsi-moonray: {line}");
         }
+        self.applied = flushed.document.clone();
 
         let _ = self.render.scene_updated();
         if let Err(error) = self.render.start() {
@@ -149,7 +199,7 @@ impl Session {
     /// A scene whose output driver carries no callbacks is a batch
     /// render: it converges and then writes the files the scene names,
     /// through MoonRay's own output machinery.
-    pub fn wait(&self) -> Option<Stopped> {
+    pub fn wait(&mut self) -> Option<Stopped> {
         let driver = self
             .scene
             .nodes()
@@ -173,7 +223,7 @@ impl Session {
                 while !self.render.frame_complete() {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
-                let _ = self.render.stop();
+                self.stop_and_record();
                 if let Err(error) = self.render.write() {
                     eprintln!(
                         "nsi-moonray: the image was not written ({}): {error}",

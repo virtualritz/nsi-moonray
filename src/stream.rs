@@ -56,8 +56,12 @@ pub enum Stopped {
 /// Render, delivering each snapshot to the callbacks as it converges.
 ///
 /// Blocks until the frame completes, a callback stops it, or `deadline`
-/// passes. The renderer is left stopped either way: leaving a frame
-/// running is a crash at drop rather than a leak.
+/// passes.
+///
+/// **The frame is left running.** Stopping it is the caller's, because
+/// `stopFrame` resets MoonRay's statistics and a caller that wants to
+/// know what the frame cost has to read them first. Dropping the
+/// [`Render`] stops the frame safely, so nothing leaks either way.
 ///
 /// # Errors
 ///
@@ -149,7 +153,12 @@ pub fn stream(
         };
     }
 
-    render.stop()?;
+    // The frame is **not** stopped here. The caller owns its lifetime,
+    // and it matters: `RenderContext::stopFrame` calls
+    // `RenderStats::reset()`, so anything wanting to know what the
+    // frame cost has to read the counters first (`002` `research.md`
+    // F8). A loop that stopped the frame on the way out would make
+    // that impossible for every caller.
 
     // SAFETY: as `open`.
     unsafe { callbacks.finish(name, width, height, format) };

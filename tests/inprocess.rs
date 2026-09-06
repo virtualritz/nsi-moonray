@@ -504,7 +504,7 @@ fn a_batch_render_writes_the_image_it_was_asked_for() {
     )
     .unwrap();
 
-    let session = Session::new(nsi, &dso).expect("a render");
+    let mut session = Session::new(nsi, &dso).expect("a render");
     session.wait();
     drop(session);
 
@@ -615,7 +615,7 @@ fn an_instanced_scene_renders_its_copies() {
     )
     .unwrap();
 
-    let session = Session::new(nsi, &dso).expect("a render");
+    let mut session = Session::new(nsi, &dso).expect("a render");
     session.wait();
     let pixels = session.render().snapshot().expect("a frame").2;
 
@@ -713,7 +713,7 @@ fn a_prototypes_own_transform_is_applied_once() {
     )
     .unwrap();
 
-    let session = Session::new(nsi, &dso).expect("a render");
+    let mut session = Session::new(nsi, &dso).expect("a render");
     session.wait();
     let pixels = session.render().snapshot().expect("a frame").2;
 
@@ -803,7 +803,7 @@ fn a_deforming_mesh_renders_blurred() {
             .unwrap();
         }
 
-        let session = Session::new(nsi, &dso).expect("a render");
+        let mut session = Session::new(nsi, &dso).expect("a render");
         session.wait();
         session.render().snapshot().expect("a frame").2
     };

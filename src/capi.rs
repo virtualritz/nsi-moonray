@@ -727,7 +727,7 @@ pub fn render_in_process(scene: &nsi_intermediate::Scene) -> bool {
     // The session takes the scene by value; this path is handed a
     // borrow, and cloning is the honest cost of being the batch entry
     // point rather than the owner.
-    let Some(session) = crate::session::Session::new(scene.clone(), &dso)
+    let Some(mut session) = crate::session::Session::new(scene.clone(), &dso)
     else {
         eprintln!(
             "nsi-moonray: no in-process render; the scene goes to the \
@@ -793,7 +793,7 @@ fn synchronize(ctx: NsiContext) {
 #[cfg(all(feature = "rdl2", moonray))]
 fn wait_for_frame(ctx: NsiContext) {
     with(ctx, |context| {
-        if let Some(session) = context.session.as_ref() {
+        if let Some(session) = context.session.as_mut() {
             session.wait();
         }
     });

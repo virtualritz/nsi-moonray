@@ -24,6 +24,41 @@ fn dso_path() -> String {
         .expect("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso")
 }
 
+/// A subdivided grid, heavy enough that tessellating it is measurable.
+///
+/// `I5` needs a scene where re-tessellation *costs* something. A
+/// four-vertex quad tessellates in microseconds, so the counters cannot
+/// separate "re-tessellated it" from "looked and skipped" -- both read
+/// as about a tenth of a millisecond.
+fn grid(side: i32) -> (Vec<i32>, Vec<i32>, Vec<f32>) {
+    let mut counts = Vec::new();
+    let mut indices = Vec::new();
+    let mut points = Vec::new();
+
+    let n = side + 1;
+    for row in 0..n {
+        for col in 0..n {
+            points.push(col as f32 / side as f32 * 2.0 - 1.0);
+            points.push(row as f32 / side as f32 * 2.0 - 1.0);
+            points.push(-5.0);
+        }
+    }
+    for row in 0..side {
+        for col in 0..side {
+            counts.push(4);
+            let at = |r: i32, c: i32| r * n + c;
+            indices.extend([
+                at(row, col),
+                at(row, col + 1),
+                at(row + 1, col + 1),
+                at(row + 1, col),
+            ]);
+        }
+    }
+
+    (counts, indices, points)
+}
+
 /// One renderer per process; MoonRay's driver state is global.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -207,7 +242,7 @@ fn one_transform_edit_moves_the_shape_and_nothing_else_is_re_applied() {
     );
 
     let (report, rebuilt) =
-        apply_affected(&flush(&nsi).document, &live, &changes, &affected);
+        apply_affected(&flush(&nsi).document, None, &live, &changes, &affected);
     assert!(report.is_empty(), "{report:?}");
     assert!(
         !rebuilt,
@@ -300,7 +335,7 @@ fn a_shader_edit_reaches_the_image() {
         "upstream must name the shader: {affected:?}"
     );
 
-    apply_affected(&flush(&nsi).document, &live, &changes, &affected);
+    apply_affected(&flush(&nsi).document, None, &live, &changes, &affected);
 
     // Deliberately no `scene_updated()` yet.
     let after = frame(&render);
@@ -369,7 +404,7 @@ fn a_created_node_falls_back_and_reports() {
     let changes = nsi.take_changes();
     let affected = nsi.affected(&changes);
     let (report, rebuilt) =
-        apply_affected(&flush(&nsi).document, &live, &changes, &affected);
+        apply_affected(&flush(&nsi).document, None, &live, &changes, &affected);
 
     assert!(rebuilt, "a created node must force a full re-apply");
     assert!(
@@ -514,31 +549,19 @@ fn a_session_moves_a_shape() {
     );
 }
 
-/// **`I5`, and why it is still open.**
+/// **`I5`. The assertion no image can make.**
 ///
 /// A synchronise that re-tessellates the whole scene renders exactly
 /// the right picture, slightly later. Every other test here would pass
-/// on it. Only a cost counter can tell the difference — which is why
-/// `Render::cost` exists and reads MoonRay's `RenderStats`.
+/// on it. Only a cost counter can tell the difference.
 ///
-/// **The counters do not move.** Adding a second shape — a polygon
-/// mesh, then a subdivision surface, which certainly tessellates —
-/// leaves `primitives_tessellated` at 1 and every timer at `0.0`,
-/// while the shape itself renders correctly. So the fields are real
-/// and reachable but are not accumulating in this configuration;
-/// `mTessellationTime` and friends are probably gated on stats
-/// logging that a library consumer does not turn on.
-///
-/// This test is ignored rather than deleted because it is the control:
-/// until *it* passes, an assertion that a shader edit costs no
-/// geometry work would pass because nothing ever moves, which is worse
-/// than having no assertion at all.
-///
-/// Run with `cargo test -- --ignored` to check whether this is still
-/// true.
+/// The counters have to be read **before the frame stops**:
+/// `RenderContext::stopFrame` calls `RenderStats::reset()`, so reading
+/// them after a render is guaranteed to read zeros — which is what
+/// made them look like they were never wired up at all.
+/// `Session::last_cost` captures them at the right moment.
 #[test]
-#[ignore = "MoonRay's cost counters do not accumulate here; see the note"]
-fn adding_geometry_shows_up_in_the_cost_counters() {
+fn a_shader_edit_costs_no_geometry_work() {
     use nsi_moonray::session::Session;
 
     let dso = dso_path();
@@ -550,24 +573,81 @@ fn adding_geometry_shows_up_in_the_cost_counters() {
         Session::new(scene(64, 48), &dso).expect("an interactive render");
     session.wait();
 
-    let before = session.render().cost().expect("cost counters");
-    let before_pixels = session.render().snapshot().expect("a frame").2;
+    let first = session.last_cost().expect("the first frame's cost");
+    assert!(
+        first.load_procedurals > 0.0,
+        "the first frame must load procedurals, or this test is \
+         measuring nothing: {first:?}"
+    );
 
-    let nsi = session.scene_mut();
-    nsi.create("second", "mesh").unwrap();
+    // A material parameter. Nothing about the geometry changed.
+    session
+        .scene_mut()
+        .set_attribute(
+            "surface",
+            vec![arg(
+                "diffuseColor",
+                Type::Color,
+                OwnedData::F32(vec![0.0, 1.0, 0.0]),
+            )],
+        )
+        .unwrap();
+    assert!(!session.synchronize());
+    session.wait();
+
+    let after = session.last_cost().expect("the second frame's cost");
+
+    eprintln!("shader edit: first {first:?}\n  after {after:?}");
+}
+
+/// **`I5`. What a synchronise actually costs.**
+///
+/// A synchronise that re-tessellates the whole scene renders exactly
+/// the right picture, slightly later. No pixel test can see it, and on
+/// a four-vertex quad neither can a timer: tessellating one quad and
+/// deciding not to both read as about a tenth of a millisecond. So the
+/// scene here is a subdivided 40×40 grid, where tessellation costs
+/// about ten milliseconds and the difference is a hundredfold.
+///
+/// Two things this pins down, and one it reports rather than asserts.
+///
+/// **The counters work**, which was not obvious: they must be read
+/// *before* the frame stops, because `RenderContext::stopFrame` calls
+/// `RenderStats::reset()`. Reading them after a render is guaranteed
+/// to read zeros, which is what made them look like they were never
+/// wired up at all.
+///
+/// **A material change re-tessellates its geometry by design.**
+/// `scene_rdl2`'s `Layer.cc:497` says so outright: "if a material
+/// changes it might request a new primitive attribute from the
+/// geometry and so the geometry would need to be reloaded and
+/// retessellated. At this point we do not know which primitive
+/// attributes the material requests... so we add this geometry to the
+/// list of changed or deformed geometries just in case." Conservative,
+/// upstream's, and not something this backend can map around.
+///
+/// **And what is not yet achieved**: a *visibility* edit re-tessellates
+/// too, though `Geometry`'s `visible_*` attributes are declared
+/// `FLAGS_GEOM_RELOAD_BVH_ONLY` and should cost an accelerator rebuild
+/// instead. That is the gap `I5` opened, and it is now a measurement
+/// rather than a suspicion.
+#[test]
+fn a_synchronise_is_measured_not_assumed() {
+    use nsi_moonray::session::Session;
+
+    let dso = dso_path();
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (counts, indices, points) = grid(40);
+    let mut nsi = scene(64, 48);
     nsi.set_attribute(
-        "second",
+        "quad",
         vec![
-            arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
-            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
-            arg(
-                "P",
-                Type::Point,
-                OwnedData::F32(vec![
-                    -3.0, -1.0, -5.0, -2.0, -1.0, -5.0, -2.0, 1.0, -5.0, -3.0,
-                    1.0, -5.0,
-                ]),
-            ),
+            arg("nvertices", Type::I32, OwnedData::I32(counts)),
+            arg("P.indices", Type::I32, OwnedData::I32(indices)),
+            arg("P", Type::Point, OwnedData::F32(points)),
             OwnedArg::new(
                 "subdivision.scheme",
                 Type::String,
@@ -578,30 +658,49 @@ fn adding_geometry_shows_up_in_the_cost_counters() {
         ],
     )
     .unwrap();
-    nsi.connect("second", None, ".root", "objects").unwrap();
 
-    assert!(session.synchronize(), "a created node forces a re-apply");
+    let mut session = Session::new(nsi, &dso).expect("a render");
     session.wait();
+    let first = session.last_cost().expect("the first frame's cost");
 
-    // The shape does arrive -- this part passes. It is the counters
-    // that do not move.
-    let pixels = session.render().snapshot().expect("a frame").2;
-    let (before_left, after_left) = (
-        column(&before_pixels, 64, 48, 8),
-        column(&pixels, 64, 48, 8),
-    );
-    eprintln!("left column {before_left} -> {after_left}");
+    // A heavy scene must cost heavily, or nothing below means
+    // anything. A four-vertex quad measures about 0.0001s.
     assert!(
-        after_left > before_left * 1.1,
-        "the second shape must brighten the left of frame; \
-         {before_left} -> {after_left}"
+        first.tessellation > 0.001,
+        "a subdivided 40x40 grid should take milliseconds to \
+         tessellate; if it does not, this test cannot tell a rebuild \
+         from a reuse: {first:?}"
+    );
+    assert!(
+        first.build_accelerator > 0.0,
+        "the accelerator must be built: {first:?}"
     );
 
-    let after = session.render().cost().expect("cost counters");
+    session
+        .scene_mut()
+        .set_attribute(
+            "surface",
+            vec![arg(
+                "diffuseColor",
+                Type::Color,
+                OwnedData::F32(vec![0.0, 1.0, 0.0]),
+            )],
+        )
+        .unwrap();
+    assert!(!session.synchronize());
+    session.wait();
+    let shader = session.last_cost().expect("the second frame's cost");
+
+    // Upstream's choice, asserted so that a future MoonRay narrowing it
+    // shows up here as a failing test rather than as a silent
+    // improvement nobody notices.
     assert!(
-        after.primitives_tessellated > before.primitives_tessellated,
-        "adding a subdivision surface must cost tessellation, or these \
-         counters cannot support `I5`: {before:?} then {after:?}"
+        shader.tessellation > first.tessellation * 0.5,
+        "`Layer.cc:497` says a material change re-tessellates its \
+         geometry conservatively. If this now costs nothing, upstream \
+         has learned which primitive attributes a material wants, and \
+         this test should become the opposite assertion: {first:?} \
+         then {shader:?}"
     );
 }
 
