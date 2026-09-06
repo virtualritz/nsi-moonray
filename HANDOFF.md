@@ -168,10 +168,11 @@ because this backend *spawns* MoonRay, and a batch process has no
 `RenderContext` to snapshot. That is the whole reason, and linking
 `libmoonray` (`002` `R1`–`R3`) is the whole fix. `T5.3`.
 
-Taking `.nsi` *files* is a third thing and needs a parser that does not
-exist: `nsi-intermediate` writes streams and does not read them, and
-`nsi-stream` is the pixel-streaming driver, not a reader. That parser
-belongs upstream beside the writer. `T4.3`.
+Taking `.nsi` *files* works: `mrr scene.nsi` parses, flushes and
+renders. The parser is upstream's `nsi-parse`, which drives
+`nsi_trait::Nsi` rather than producing a scene type of its own, so it
+feeds the same `Recorder` the C entry points do. Which kind of file it
+is comes from the content rather than the name.
 
 Spawning is now the *fallback*, for when there is no linked renderer:
 `rdl2dso` not found, a session already running, or render prep

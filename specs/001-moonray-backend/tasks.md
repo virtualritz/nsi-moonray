@@ -68,10 +68,18 @@ whoever renders to have it installed.
       resolves. `DspyRegisterDriver` counts as a twelfth: `nsi-ffi-wrap`
       resolves the whole symbol table up front, so a consumer built
       with the `output` feature cannot load a library missing it.
-- [~] T4.3 `.nsi` stream input. **The parser exists upstream now**:
-      `nsi-parse`, which drives `nsi_trait::Nsi` rather than producing
-      a scene type of its own -- so it feeds a `Recorder`, and through
-      it this backend, with nothing to write here but the wiring.
+- [x] T4.3 `.nsi` stream input. `mrr` takes an ɴsɪ stream, flushes it
+      to `.rdla` beside itself, and renders that -- which is also what
+      someone debugging the translation wants to look at. The parser is
+      upstream's (`nsi-parse`) and drives `nsi_trait::Nsi`, which
+      `Recorder` implements, so an ɴsɪ file feeds the same `Scene` the
+      C entry points record into and there was nothing to write here
+      but the wiring. gzip too, since 3Delight writes compressed
+      streams.
+      **Told apart by content, not by extension**: a file named `.nsi`
+      that is really `.rdla` is a thing that happens, and guessing from
+      the name would fail with a parse error about the wrong format.
+      `tests/nsi_input.rs`.
 - [ ] T4.4 Link `libmoonray` rather than spawning its CLI. **Moved to
       [`002`](../002-interactive-updates/tasks.md)**, which is where the
       reason for it lives. A spawned

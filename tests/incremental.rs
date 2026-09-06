@@ -694,8 +694,14 @@ fn a_synchronise_is_measured_not_assumed() {
     // Upstream's choice, asserted so that a future MoonRay narrowing it
     // shows up here as a failing test rather than as a silent
     // improvement nobody notices.
+    // An absolute floor, not a fraction of the first frame. A ratio
+    // reads as the sharper claim and is the flakier one: both numbers
+    // move with machine load, and a second frame that happened to run
+    // on warmer caches once dipped under half. The floor is two orders
+    // of magnitude above what a four-vertex quad costs, so it still
+    // fails loudly if the work stops happening.
     assert!(
-        shader.tessellation > first.tessellation * 0.5,
+        shader.tessellation > 0.001,
         "`Layer.cc:497` says a material change re-tessellates its \
          geometry conservatively. If this now costs nothing, upstream \
          has learned which primitive attributes a material wants, and \

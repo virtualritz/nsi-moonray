@@ -69,6 +69,13 @@ ndspy-sys = "0.2"
 # come from `snapshotDelta` and never reach a file. See
 # `specs/002-interactive-updates`.
 exr = "1"
+# Reads a `.nsi` stream, so `mrr` takes ɴsɪ as well as `.rdla`. It
+# drives `nsi_trait::Nsi`, which `nsi_intermediate::Recorder`
+# implements, so the parser feeds this backend with nothing to write
+# here but the wiring. `gzip` because 3Delight writes compressed
+# streams and a caller who took a file from a pipeline should not have
+# to know that.
+nsi-parse = { path = "../nsi/crates/nsi-parse", features = ["gzip"] }
 
 [dev-dependencies]
 # The application side of the callback test: it writes the closure the
