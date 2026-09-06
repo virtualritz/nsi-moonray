@@ -182,6 +182,22 @@ Rust on both sides, so **no ndspy marshalling is involved**.
 
 The capability that distinguishes this backend.
 
+- [x] T2.0 **One shutter for the scene, not one per object.** MoonRay
+      evaluates every `blur(a, b)` at two *global* timesteps, so
+      sampling each node over its own recorded times renders a shape
+      that moved between `t=10` and `t=11` as though it had moved
+      during another shape's shutter -- and two objects moving over
+      different ranges come out with the same smear, which looks like
+      motion blur working.
+      The interval is the camera's `shutterrange` when it has one and
+      the union of every recorded motion time otherwise, every blurred
+      value is sampled at its two ends, and `motion_steps` tells
+      MoonRay which two they are. Held at the ends rather than
+      extrapolated, so a shape that stopped moving early stays put.
+      `flush::tests::two_objects_share_one_shutter`,
+      `a_shutter_range_beats_the_union`,
+      `deformation_is_resampled_onto_the_shutter`.
+
 - [x] T2.1 Depends on `nsi-intermediate` resolving motion samples.
       Done upstream: `motion_times`, `world_transform_samples` and
       `world_transform_interpolated_at`, which interpolates

@@ -164,6 +164,9 @@ pub fn flush(scene: &Scene) -> Flushed {
     let mut cameras = 0usize;
 
     let resolution = resolution(scene);
+    // One interval for the whole scene: MoonRay has two global
+    // timesteps, not two per object. See `shutter`.
+    let shutter = shutter(scene);
 
     // Which instancer, if any, places each prototype. Built before the
     // walk because node order says nothing: a prototype is commonly
@@ -179,6 +182,7 @@ pub fn flush(scene: &Scene) -> Flushed {
                     scene,
                     handle,
                     prototypes.get(handle).map(String::as_str),
+                    shutter,
                     &mut flushed,
                 );
                 // A prototype does not reach `.root` and is not
@@ -202,17 +206,25 @@ pub fn flush(scene: &Scene) -> Flushed {
             }
 
             "perspectivecamera" => {
-                objects.push(camera(scene, handle, resolution, &mut flushed));
+                objects.push(camera(
+                    scene,
+                    handle,
+                    resolution,
+                    shutter,
+                    &mut flushed,
+                ));
                 cameras += 1;
             }
 
             "environment" => {
-                objects.push(environment(scene, handle, &mut flushed));
+                objects.push(environment(scene, handle, shutter, &mut flushed));
                 lights.push(Reference::new(ENVIRONMENT_LIGHT, handle));
             }
 
             "instances" => {
-                if let Some(object) = instancer(scene, handle, &mut flushed) {
+                if let Some(object) =
+                    instancer(scene, handle, shutter, &mut flushed)
+                {
                     objects.push(if detached(scene, handle) {
                         hidden(object)
                     } else {
@@ -350,6 +362,21 @@ pub fn flush(scene: &Scene) -> Flushed {
         name: Some("/nsi/layer".to_string()),
         body: Body::Layer(assignments),
     });
+
+    if let Some([open, close]) = shutter {
+        // The two timesteps every `blur(a, b)` in this scene is
+        // evaluated at. Without this MoonRay keeps its `{-1, 0}`
+        // default and blurs over an interval that has nothing to do
+        // with the one the values were sampled at -- which still
+        // *looks* like motion blur, of the wrong length.
+        variables = variables.set(
+            "motion_steps",
+            Value::Vector(vec![
+                Value::Float(open as f32),
+                Value::Float(close as f32),
+            ]),
+        );
+    }
 
     variables = variables
         .set(
@@ -518,6 +545,7 @@ fn geometry_class(scene: &Scene, handle: &str) -> &'static str {
 fn instancer(
     scene: &Scene,
     handle: &str,
+    shutter: Option<[f64; 2]>,
     flushed: &mut Flushed,
 ) -> Option<Object> {
     let sources = scene.instance_sources(handle);
@@ -642,7 +670,7 @@ fn instancer(
         // own transform below the instancer is simply lost.
         .set("use_reference_xforms", Value::Bool(true));
 
-    Some(with_transform(object, scene, handle, flushed))
+    Some(with_transform(object, scene, handle, shutter, flushed))
 }
 
 /// Put an object's resolved world transform on it, as `node_xform`.
@@ -652,6 +680,63 @@ fn instancer(
 /// which has one matrix per instance and none of its own. Each of those
 /// is reported and the object is left where it is, because ɴsɪ always
 /// returns an image.
+/// The one interval every blurred attribute is sampled over.
+///
+/// **MoonRay has two global timesteps, not two per object.** Every
+/// `blur(a, b)` in the scene is evaluated at the same pair, so
+/// sampling each node over *its own* recorded times renders a shape
+/// that moved between `t=10` and `t=11` as though it had moved during
+/// another shape's shutter. Two objects moving over different ranges
+/// come out with the same smear, which looks like motion blur working.
+///
+/// ɴsɪ's answer is the camera's `shutterrange`. Without one, the union
+/// of every recorded motion time is the honest fallback: it covers all
+/// the motion the scene describes, and upstream's
+/// `world_transform_interpolated_at` holds the ends outside a node's
+/// own samples, so a node that stopped moving early stays still for
+/// the rest of the shutter rather than being extrapolated.
+///
+/// `None` when nothing moves, which is the ordinary case.
+fn shutter(scene: &Scene) -> Option<[f64; 2]> {
+    for (handle, node) in scene.nodes() {
+        if node.node_type != "perspectivecamera" {
+            continue;
+        }
+        if let Some(OwnedData::F64(values)) =
+            node.effective("shutterrange").map(|arg| &arg.data)
+            && values.len() >= 2
+            && values[0] < values[1]
+        {
+            return Some([values[0], values[1]]);
+        }
+        let _ = handle;
+    }
+
+    // No shutter: take everything that moves.
+    let mut span: Option<[f64; 2]> = None;
+    let mut widen = |times: &[f64]| {
+        if times.len() < 2 {
+            return;
+        }
+        let (first, last) = (times[0], times[times.len() - 1]);
+        span = Some(match span {
+            Some([low, high]) => [low.min(first), high.max(last)],
+            None => [first, last],
+        });
+    };
+
+    for (handle, _) in scene.nodes() {
+        widen(&scene.motion_times(handle).unwrap_or_default());
+        if let Ok(samples) = scene.attribute_samples(handle, "P") {
+            let times: Vec<f64> =
+                samples.iter().map(|(time, _)| *time).collect();
+            widen(&times);
+        }
+    }
+
+    span
+}
+
 /// A mesh's two deformation samples, if it has any.
 ///
 /// **`P` sampled over time is deformation blur.** rdl2 carries it as
@@ -671,52 +756,117 @@ fn instancer(
 fn deformation(
     scene: &Scene,
     handle: &str,
+    shutter: Option<[f64; 2]>,
     flushed: &mut Flushed,
 ) -> Option<(Value, Value)> {
     let samples = scene.attribute_samples(handle, "P").ok()?;
-    if samples.len() < 2 {
+
+    let recorded: Vec<(f64, &[f32])> = samples
+        .iter()
+        .filter_map(|(time, argument)| match &argument.data {
+            OwnedData::F32(values) if values.len() % 3 == 0 => {
+                Some((*time, values.as_slice()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    if recorded.len() < 2 {
         return None;
     }
 
-    if samples.len() > 2 {
-        flushed.limitations.push(format!(
-            "mesh {handle:?} has {} motion samples on \"P\"; rdl2 has \
-             two timesteps, so the first and last were taken and the \
-             rest dropped",
-            samples.len()
-        ));
-    }
-
-    let points = |argument: &nsi_intermediate::OwnedArg| match &argument.data {
-        OwnedData::F32(values) if values.len() % 3 == 0 => Some(Value::Vector(
-            values
-                .chunks_exact(3)
-                .map(|p| Value::Vec3f([p[0], p[1], p[2]]))
-                .collect(),
-        )),
-        _ => None,
-    };
-
-    let begin = points(samples.first()?.1)?;
-    let end = points(samples.last()?.1)?;
-
     // A mesh whose vertex count changes between samples is not
-    // deformation, and MoonRay cannot interpolate it. Rendering the
-    // first sample unblurred is the honest answer.
-    if let (Value::Vector(a), Value::Vector(b)) = (&begin, &end)
-        && a.len() != b.len()
+    // deforming, and nothing can interpolate it.
+    let width = recorded[0].1.len();
+    if let Some((time, other)) =
+        recorded.iter().find(|(_, values)| values.len() != width)
     {
         flushed.limitations.push(format!(
-            "mesh {handle:?} has {} vertices at its first motion sample \
-             and {} at its last; that is not deformation and cannot be \
-             blurred, so the first sample is used",
-            a.len(),
-            b.len()
+            "mesh {handle:?} has {} vertices at time {} and {} at \
+             {time}; that is not deformation and cannot be blurred, so \
+             the first sample is used",
+            width / 3,
+            recorded[0].0,
+            other.len() / 3
         ));
-        return Some((begin.clone(), begin));
+        let first = points_of(recorded[0].1);
+        return Some((first.clone(), first));
     }
 
-    Some((begin, end))
+    // The *scene's* interval, for the reason transforms use it too:
+    // MoonRay evaluates one global pair of timesteps, so a mesh
+    // sampled over its own range deforms during somebody else's
+    // shutter.
+    let [open, close] =
+        shutter.unwrap_or([recorded[0].0, recorded[recorded.len() - 1].0]);
+
+    if recorded.len() > 2 {
+        flushed.limitations.push(format!(
+            "mesh {handle:?} has {} motion samples on \"P\"; rdl2 has two \
+             timesteps, so it was resampled to the shutter and the \
+             intermediate shapes were lost",
+            recorded.len()
+        ));
+    }
+
+    Some((
+        points_of(&sampled_at(&recorded, open)),
+        points_of(&sampled_at(&recorded, close)),
+    ))
+}
+
+/// A flat `P` buffer as a vector of points.
+fn points_of(values: &[f32]) -> Value {
+    Value::Vector(
+        values
+            .chunks_exact(3)
+            .map(|p| Value::Vec3f([p[0], p[1], p[2]]))
+            .collect(),
+    )
+}
+
+/// `P` at an arbitrary time, interpolated element-wise between the
+/// bracketing samples and **held** outside them.
+///
+/// The same policy upstream documents for transforms
+/// (`world_transform_interpolated_at`), applied to vertices for the
+/// same reason: with one global pair of timesteps, a mesh whose
+/// samples do not reach the shutter's ends has to answer for them
+/// somehow, and holding is the answer that does not invent motion. A
+/// mesh that stopped deforming early stays put for the rest of the
+/// shutter rather than being flung onwards by extrapolation.
+fn sampled_at(recorded: &[(f64, &[f32])], time: f64) -> Vec<f32> {
+    let first = recorded[0];
+    let last = recorded[recorded.len() - 1];
+
+    if time <= first.0 {
+        return first.1.to_vec();
+    }
+    if time >= last.0 {
+        return last.1.to_vec();
+    }
+
+    let after = recorded
+        .iter()
+        .position(|(sample, _)| *sample >= time)
+        .unwrap_or(recorded.len() - 1)
+        .max(1);
+    let (before_time, before) = recorded[after - 1];
+    let (after_time, values) = recorded[after];
+
+    let span = after_time - before_time;
+    // Two samples recorded at the same time: the later one wins, which
+    // is what a repeated `SetAttributeAtTime` means.
+    if span <= 0.0 {
+        return values.to_vec();
+    }
+    let alpha = ((time - before_time) / span) as f32;
+
+    before
+        .iter()
+        .zip(values)
+        .map(|(a, b)| a + (b - a) * alpha)
+        .collect()
 }
 
 /// Turn a shape off, every way MoonRay can see one.
@@ -762,14 +912,18 @@ fn with_transform(
     object: Object,
     scene: &Scene,
     handle: &str,
+    shutter: Option<[f64; 2]>,
     flushed: &mut Flushed,
 ) -> Object {
     // Motion first: a moving object's static transform is only one of
     // its samples, and taking it would be the silent flattening this
     // backend exists to avoid.
     let times = scene.motion_times(handle).unwrap_or_default();
-    if times.len() >= 2 {
-        return match blurred_transform(scene, handle, &times, flushed) {
+    if times.len() >= 2
+        && let Some(shutter) = shutter
+    {
+        return match blurred_transform(scene, handle, &times, shutter, flushed)
+        {
             Some(object_with_blur) => {
                 object.set("node_xform", object_with_blur)
             }
@@ -801,9 +955,15 @@ fn blurred_transform(
     scene: &Scene,
     handle: &str,
     times: &[f64],
+    shutter: [f64; 2],
     flushed: &mut Flushed,
 ) -> Option<Value> {
-    let (first, last) = (times[0], times[times.len() - 1]);
+    // The *scene's* interval, not this node's. MoonRay evaluates every
+    // `blur(a, b)` at one global pair of timesteps, so a node sampled
+    // over its own range would be rendered as though it moved during
+    // somebody else's shutter. Upstream holds the ends outside a
+    // node's own samples, so one that stops moving early stays still.
+    let [first, last] = shutter;
 
     let begin = match scene.world_transform_interpolated_at(handle, first) {
         Ok(matrix) => matrix,
@@ -851,6 +1011,7 @@ fn mesh(
     scene: &Scene,
     handle: &str,
     prototype_of: Option<&str>,
+    shutter: Option<[f64; 2]>,
     flushed: &mut Flushed,
 ) -> Object {
     let Some(node) = scene.node(handle) else {
@@ -863,7 +1024,7 @@ fn mesh(
         Some(instancer) => {
             with_prototype_transform(object, scene, handle, instancer, flushed)
         }
-        None => with_transform(object, scene, handle, flushed),
+        None => with_transform(object, scene, handle, shutter, flushed),
     };
 
     match node.effective("nvertices").map(|arg| &arg.data) {
@@ -894,7 +1055,7 @@ fn mesh(
     // and `vertex_list_1`, and reading the static value of a moving
     // mesh would be the silent flattening this backend exists to
     // avoid. `T2.3`.
-    let deformed = deformation(scene, handle, flushed);
+    let deformed = deformation(scene, handle, shutter, flushed);
     if let Some((begin, end)) = deformed {
         object = object.set("vertex_list_0", begin).set("vertex_list_1", end);
     } else {
@@ -1121,10 +1282,15 @@ fn shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
 /// `attributes` node, and MoonRay cannot run it, so what crosses is the
 /// light itself at its defaults -- white, intensity 1 -- and its
 /// transform. That is enough to light a scene, which is the point.
-fn environment(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
+fn environment(
+    scene: &Scene,
+    handle: &str,
+    shutter: Option<[f64; 2]>,
+    flushed: &mut Flushed,
+) -> Object {
     let mut object = Object::new(ENVIRONMENT_LIGHT, handle);
 
-    object = with_transform(object, scene, handle, flushed);
+    object = with_transform(object, scene, handle, shutter, flushed);
 
     if scene
         .geometry_binding(handle)
@@ -1148,6 +1314,7 @@ fn camera(
     scene: &Scene,
     handle: &str,
     resolution: (i32, i32),
+    shutter: Option<[f64; 2]>,
     flushed: &mut Flushed,
 ) -> Object {
     let Some(node) = scene.node(handle) else {
@@ -1156,7 +1323,7 @@ fn camera(
 
     let mut object = Object::new(PERSPECTIVE_CAMERA, handle);
 
-    object = with_transform(object, scene, handle, flushed);
+    object = with_transform(object, scene, handle, shutter, flushed);
 
     match node.effective("fov").map(|arg| &arg.data) {
         Some(OwnedData::F32(values)) if !values.is_empty() => {
@@ -1769,6 +1936,105 @@ mod tests {
         matrix
     }
 
+    /// **Every blurred value is sampled over one interval.**
+    ///
+    /// MoonRay has two *global* timesteps, not two per object. A node
+    /// sampled over its own range would be rendered as though it had
+    /// moved during another node's shutter, and two objects moving
+    /// over different ranges would come out with the same smear --
+    /// which looks like motion blur working.
+    #[test]
+    fn two_objects_share_one_shutter() {
+        let mut scene = triangle();
+
+        // One moves over [0, 1].
+        scene
+            .create("early", "transform")
+            .expect("a recordable edit");
+        scene.connect("early", None, ".root", "objects").unwrap();
+        for (time, x) in [(0.0, 0.0), (1.0, 2.0)] {
+            scene
+                .set_attribute_at_time("early", time, vec![translation(x)])
+                .expect("a recordable edit");
+        }
+        scene.create("a", "mesh").expect("a recordable edit");
+        scene.connect("a", None, "early", "objects").unwrap();
+
+        // The other over [2, 4], which no shared pair of timesteps
+        // could describe if each were sampled over its own range.
+        scene
+            .create("late", "transform")
+            .expect("a recordable edit");
+        scene.connect("late", None, ".root", "objects").unwrap();
+        for (time, x) in [(2.0, 10.0), (4.0, 12.0)] {
+            scene
+                .set_attribute_at_time("late", time, vec![translation(x)])
+                .expect("a recordable edit");
+        }
+        scene.create("b", "mesh").expect("a recordable edit");
+        scene.connect("b", None, "late", "objects").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        // The union is [0, 4], and MoonRay is told so.
+        assert!(
+            rdla.contains("[\"motion_steps\"] = { 0, 4}"),
+            "the scene's timesteps must span all of its motion\n{rdla}"
+        );
+
+        // `b` is held at its ends outside its own samples, so at t=0 it
+        // is already at 10 and at t=4 it is at 12 -- not extrapolated
+        // backwards to somewhere it never was.
+        assert!(
+            rdla.contains("blur(Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 0, 0, 1), Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 12, 0, 0, 1))"),
+            "the later-moving shape is held at its ends, not \
+             extrapolated\n{rdla}"
+        );
+    }
+
+    /// A camera's `shutterrange` decides the interval when it has one.
+    #[test]
+    fn a_shutter_range_beats_the_union() {
+        let mut scene = triangle();
+        scene
+            .set_attribute(
+                "cam",
+                vec![arg(
+                    "shutterrange",
+                    Type::F64,
+                    OwnedData::F64(vec![0.25, 0.75]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        scene.create("xf", "transform").expect("a recordable edit");
+        scene.connect("xf", None, ".root", "objects").unwrap();
+        for (time, x) in [(0.0, 0.0), (1.0, 4.0)] {
+            scene
+                .set_attribute_at_time("xf", time, vec![translation(x)])
+                .expect("a recordable edit");
+        }
+        scene.create("m", "mesh").expect("a recordable edit");
+        scene.connect("m", None, "xf", "objects").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(
+            rdla.contains("[\"motion_steps\"] = { 0.25, 0.75}"),
+            "the camera's shutter decides\n{rdla}"
+        );
+        // A quarter and three quarters of the way along a 0->4 move.
+        assert!(
+            rdla.contains(
+                "Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1)"
+            ) && rdla.contains(
+                "Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1)"
+            ),
+            "the transform must be interpolated to the shutter's \
+             ends\n{rdla}"
+        );
+    }
+
     /// **`T2.3`.** `P` sampled over time becomes two vertex lists.
     ///
     /// rdl2 carries deformation as `vertex_list_0` and
@@ -1802,6 +2068,57 @@ mod tests {
         assert!(
             rdla.contains("[\"vertex_list_1\"] = { Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 3, 0)}"),
             "the second sample must be its own attribute\n{rdla}"
+        );
+    }
+
+    /// Deformation is resampled onto the scene's shutter, like every
+    /// other blurred value.
+    ///
+    /// A mesh sampled over `[0, 1]` in a scene whose shutter is
+    /// `[0.25, 0.75]` must hand MoonRay the shape at those two times,
+    /// not at its own — there is one global pair of timesteps and
+    /// every blurred value is read at them.
+    #[test]
+    fn deformation_is_resampled_onto_the_shutter() {
+        let mut scene = triangle();
+        scene
+            .set_attribute(
+                "cam",
+                vec![arg(
+                    "shutterrange",
+                    Type::F64,
+                    OwnedData::F64(vec![0.25, 0.75]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        // One vertex travels from y=0 to y=4 across [0, 1].
+        for (time, y) in [(0.0, 0.0f32), (1.0, 4.0f32)] {
+            scene
+                .set_attribute_at_time(
+                    "tri",
+                    time,
+                    vec![arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, y, 0.0,
+                        ]),
+                    )],
+                )
+                .expect("a recordable edit");
+        }
+
+        let rdla = flush(&scene).to_rdla();
+
+        // A quarter and three quarters along, so y = 1 and y = 3.
+        assert!(
+            rdla.contains("[\"vertex_list_0\"] = { Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)}"),
+            "the shutter opens a quarter of the way along\n{rdla}"
+        );
+        assert!(
+            rdla.contains("[\"vertex_list_1\"] = { Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 3, 0)}"),
+            "and closes three quarters along\n{rdla}"
         );
     }
 
