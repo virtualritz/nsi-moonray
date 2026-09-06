@@ -218,15 +218,19 @@ says so in its own doc. This backend calls none of it.
       *nothing* -- `flush.rs` handled `ResolveError::Instanced` by
       reporting it and never asked the question that succeeds -- so a
       crowd of a thousand rendered as one prototype at the origin.
-- [~] T6.2 A prototype's own transform. `relative_transform(prototype,
-      instancer)` becomes the prototype's `node_xform`, and
-      `use_reference_xforms` is set -- settled by reading
-      `rt/GeometryManager.cc` rather than guessing: a referenced
-      geometry is generated at **identity** (`localXform`), and its own
-      `node_xform` reaches the instance only through
-      `getReferenceData`, which `use_reference_xforms` gates. Still
-      wants a render: double-applying and dropping both look
-      plausible.
+- [x] T6.2 A prototype's own transform, **applied exactly once** --
+      settled by rendering, as it had to be.
+      `a_prototypes_own_transform_is_applied_once` puts the prototype
+      one unit right of its instancer and places instances at -3 and
+      +3, so applied once the left copy centres on -2, dropped on -3,
+      doubled on -1: three distinguishable places in the frame. The
+      columns either side stay dark.
+      **This found a bug that made an instanced scene render nothing.**
+      A `sourcemodels` edge need not point at geometry -- ɴsɪ connects
+      the *model root*, commonly a `transform` with the geometry under
+      it, which is how a prototype gets its own placement. `references`
+      named the transform, the attribute failed to set entirely, and
+      nothing drew. Reported, at least, rather than silent.
 - [ ] T6.3 A moving instancer. `instance_transforms_at(t)` exists
       because 3Delight renders a sampled `transformationmatrices`;
       rdl2 has two timesteps, so this is `T2.5`'s reduction rule again.
@@ -238,8 +242,11 @@ says so in its own doc. This backend calls none of it.
       `a_prototype_is_referenced_once_not_expanded` counts the
       prototype's declarations, because a flattened scene renders an
       identical image and no image test can tell them apart.
-- [ ] T6.6 Render an instanced scene. The mapping is asserted as text;
-      what it looks like is not. This is also what settles `T6.2`.
+- [x] T6.6 Render an instanced scene.
+      `an_instanced_scene_renders_its_copies`: two copies of one
+      prototype, left and right, with a dark gap between them --
+      which is what a prototype drawn once at the origin would not
+      produce.
 
 - [x] T5.4 **A batch render writes its file from the linked
       renderer.** Through MoonRay's own output machinery --

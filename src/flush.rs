@@ -380,7 +380,11 @@ fn prototypes(scene: &Scene) -> std::collections::HashMap<String, String> {
     for (handle, node) in scene.nodes() {
         if node.node_type == "instances" {
             for source in scene.instance_sources(handle) {
-                map.entry(source).or_insert_with(|| handle.clone());
+                // The connection may name a transform above the
+                // geometry; the prototype is what is under it.
+                if let Some(geometry) = prototype_geometry(scene, &source) {
+                    map.entry(geometry).or_insert_with(|| handle.clone());
+                }
             }
         }
     }
@@ -415,6 +419,57 @@ fn with_prototype_transform(
             object
         }
     }
+}
+
+/// The geometry an `instances` node's `sourcemodels` connection names.
+///
+/// **A `sourcemodels` edge need not point at geometry.** ɴsɪ connects
+/// the *model root*, which is commonly a `transform` with the geometry
+/// under it -- that is how a prototype gets a placement of its own
+/// relative to the instancer. MoonRay's `references` takes `Geometry`
+/// objects, so the transform has to be descended through.
+///
+/// Getting this wrong is quiet: `references` names an object that does
+/// not exist, the whole attribute fails to set, and **nothing renders**
+/// while the scene itself is perfectly valid.
+///
+/// The transform on the way down is not lost -- it comes back as
+/// `relative_transform(geometry, instancer)` in
+/// [`with_prototype_transform`], which composes the whole chain.
+///
+/// Returns `None` for a subtree holding no geometry, and the *first*
+/// geometry for one holding several: MoonRay's `references` is one
+/// `Geometry` per entry, and a subtree of many would need a group it
+/// has no way to express. The caller reports both.
+fn prototype_geometry(scene: &Scene, source: &str) -> Option<String> {
+    const GEOMETRY: [&str; 3] = ["mesh", "subdivisionmesh", "instances"];
+
+    let node = scene.node(source)?;
+    if GEOMETRY.contains(&node.node_type.as_str()) {
+        return Some(source.to_string());
+    }
+
+    // Breadth first, so the shallowest geometry wins and the answer
+    // does not depend on how deep an unrelated branch goes.
+    let mut queue = std::collections::VecDeque::from([source.to_string()]);
+    let mut seen = std::collections::HashSet::new();
+
+    while let Some(handle) = queue.pop_front() {
+        if !seen.insert(handle.clone()) {
+            continue;
+        }
+        for edge in scene.edges_to_attr(&handle, "objects") {
+            let Some(child) = scene.node(&edge.from) else {
+                continue;
+            };
+            if GEOMETRY.contains(&child.node_type.as_str()) {
+                return Some(edge.from.clone());
+            }
+            queue.push_back(edge.from.clone());
+        }
+    }
+
+    None
 }
 
 /// The rdl2 class an ɴsɪ geometry node becomes.
@@ -521,13 +576,37 @@ fn instancer(
         return None;
     }
 
+    // Each `sourcemodels` connection resolved to the geometry it
+    // names, which may be under a transform.
+    let mut prototypes = Vec::with_capacity(sources.len());
+    for source in &sources {
+        match prototype_geometry(scene, source) {
+            Some(geometry) => prototypes.push(geometry),
+            None => flushed.limitations.push(format!(
+                "instancer {handle:?} has a `sourcemodels` connection to                  {source:?}, which holds no geometry; that prototype                  places nothing"
+            )),
+        }
+    }
+
+    if prototypes.len() != sources.len() {
+        // The indices upstream resolved are positions in `sources`, and
+        // dropping one would silently renumber every instance after it
+        // onto the wrong prototype.
+        flushed.limitations.push(format!(
+            "instancer {handle:?} places nothing: {} of its {}              prototypes hold no geometry, and dropping one would              renumber the rest onto the wrong models",
+            sources.len() - prototypes.len(),
+            sources.len()
+        ));
+        return None;
+    }
+
     let references = Value::Vector(
-        sources
+        prototypes
             .iter()
-            .map(|source| {
+            .map(|geometry| {
                 Value::Object(Reference::new(
-                    geometry_class(scene, source),
-                    source,
+                    geometry_class(scene, geometry),
+                    geometry,
                 ))
             })
             .collect(),

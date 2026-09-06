@@ -532,3 +532,204 @@ fn a_batch_render_writes_the_image_it_was_asked_for() {
     });
     assert!(lit, "the written image is entirely black");
 }
+
+/// One instance matrix: a translation.
+#[rustfmt::skip]
+fn instance_at(x: f64, z: f64) -> Vec<f64> {
+    vec![
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+          x, 0.0,   z, 1.0,
+    ]
+}
+
+/// How much light a column carries.
+fn column(pixels: &[f32], width: usize, height: usize, x: usize) -> f32 {
+    (0..height)
+        .map(|y| {
+            let i = (y * width + x) * 4;
+            pixels[i] + pixels[i + 1] + pixels[i + 2]
+        })
+        .sum()
+}
+
+/// **`T6.6`.** An instanced scene renders — two copies of one
+/// prototype, in two places.
+///
+/// The mapping was asserted as text (`flush::tests`); this is what it
+/// looks like. It is also the only thing that can catch a prototype
+/// drawn once at the origin instead of twice where its matrices put
+/// it, which is what the backend did before instancing was mapped at
+/// all.
+#[test]
+fn an_instanced_scene_renders_its_copies() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    // The scene's own quad is in the way; hide it by detaching, which
+    // is now a visibility change rather than a removal.
+    nsi.disconnect("quad", None, ".root", "objects").unwrap();
+
+    // A prototype, placed twice.
+    nsi.create("proto", "mesh").unwrap();
+    nsi.set_attribute(
+        "proto",
+        vec![
+            arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
+            arg(
+                "P",
+                Type::Point,
+                OwnedData::F32(vec![
+                    -1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0,
+                    0.0,
+                ]),
+            ),
+        ],
+    )
+    .unwrap();
+
+    nsi.create("inst", "instances").unwrap();
+    nsi.connect("inst", None, ".root", "objects").unwrap();
+    nsi.connect("proto", None, "inst", "sourcemodels").unwrap();
+
+    let mut matrices = instance_at(-2.0, -8.0);
+    matrices.extend(instance_at(2.0, -8.0));
+    nsi.set_attribute(
+        "inst",
+        vec![arg(
+            "transformationmatrices",
+            Type::MatrixF64,
+            OwnedData::F64(matrices),
+        )],
+    )
+    .unwrap();
+
+    let session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let pixels = session.render().snapshot().expect("a frame").2;
+
+    // At z = -8 with a 45-degree vertical field of view, x = ±2 lands
+    // around a quarter and three quarters of the way across, and the
+    // centre column falls between the two copies.
+    let left = column(&pixels, width, height, width / 4);
+    let centre = column(&pixels, width, height, width / 2);
+    let right = column(&pixels, width, height, width * 3 / 4);
+
+    assert!(
+        left > 0.0 && right > 0.0,
+        "both instances should be drawn: left {left}, right {right}"
+    );
+    assert!(
+        centre < left * 0.5 && centre < right * 0.5,
+        "the gap between the two instances should be darker than \
+         either: left {left}, centre {centre}, right {right}"
+    );
+}
+
+/// **`T6.2`.** A prototype's own transform is applied exactly once.
+///
+/// MoonRay generates a referenced geometry at **identity** and reads
+/// its `node_xform` back separately, gated on `use_reference_xforms`
+/// (`rt/GeometryManager.cc`). So the prototype's own chain can be
+/// dropped or applied twice, and both look like a plausible render of
+/// something. Only measuring where the copies land settles it.
+///
+/// The prototype sits one unit right of its instancer's origin, and
+/// the instances are placed at -3 and +3. Applied once, the left copy
+/// is centred on -2; dropped, on -3; doubled, on -1. Those are three
+/// distinguishable places in the frame.
+#[test]
+fn a_prototypes_own_transform_is_applied_once() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+    nsi.disconnect("quad", None, ".root", "objects").unwrap();
+
+    nsi.create("proto", "mesh").unwrap();
+    nsi.set_attribute(
+        "proto",
+        vec![
+            arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
+            arg(
+                "P",
+                Type::Point,
+                OwnedData::F32(vec![
+                    -1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0,
+                    0.0,
+                ]),
+            ),
+        ],
+    )
+    .unwrap();
+
+    nsi.create("inst", "instances").unwrap();
+    nsi.connect("inst", None, ".root", "objects").unwrap();
+
+    // The prototype's own transform, below the instancer.
+    nsi.create("proto_xform", "transform").unwrap();
+    nsi.set_attribute(
+        "proto_xform",
+        vec![arg(
+            "transformationmatrix",
+            Type::MatrixF64,
+            OwnedData::F64(instance_at(1.0, 0.0)),
+        )],
+    )
+    .unwrap();
+    nsi.connect("proto_xform", None, "inst", "sourcemodels")
+        .unwrap();
+    nsi.connect("proto", None, "proto_xform", "objects")
+        .unwrap();
+
+    let mut matrices = instance_at(-3.0, -8.0);
+    matrices.extend(instance_at(3.0, -8.0));
+    nsi.set_attribute(
+        "inst",
+        vec![arg(
+            "transformationmatrices",
+            Type::MatrixF64,
+            OwnedData::F64(matrices),
+        )],
+    )
+    .unwrap();
+
+    let session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let pixels = session.render().snapshot().expect("a frame").2;
+
+    let at = |x: usize| column(&pixels, width, height, x);
+    // Centred on -2 spans roughly columns 10 to 25.
+    assert!(at(14) > 0.0 && at(22) > 0.0, "the left copy is missing");
+    assert!(
+        at(5) == 0.0,
+        "light at column 5 means the prototype's transform was \
+         *dropped* — the copy is centred on -3, not -2: {}",
+        at(5)
+    );
+    assert!(
+        at(30) == 0.0,
+        "light at column 30 means the prototype's transform was applied \
+         *twice* — the copy is centred on -1, not -2: {}",
+        at(30)
+    );
+}
