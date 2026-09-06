@@ -17,19 +17,35 @@ namespace math = scene_rdl2::math;
 // The context, plus the last error. rdl2 reports by throwing, and the
 // codes this returns are deliberately coarse -- the message is what a
 // person needs, so it is kept alongside rather than encoded.
+//
+// The scene is a *pointer* rather than a member because MoonRay's
+// `RenderContext` owns one and hands out a reference to it
+// (`getSceneContext`, "only call this when not rendering"). So a scene
+// built for rendering has to be built inside the renderer's own
+// context, not built separately and handed over. `owned` says which
+// kind this is; only a standalone one is deleted.
 struct NmrContext {
-    rdl2::SceneContext context;
+    rdl2::SceneContext* context;
+    bool owned;
     std::string error;
 };
+
+// Used by `render.cc` to wrap a `RenderContext`'s own scene.
+NmrContext* nmr_context_borrow(rdl2::SceneContext* scene)
+{
+    auto* wrapper = new NmrContext{scene, false, {}};
+    return wrapper;
+}
 
 extern "C" {
 
 NmrContext* nmr_context_new(const char* dso_path)
 {
     try {
-        auto* wrapper = new NmrContext();
+        auto* wrapper =
+            new NmrContext{new rdl2::SceneContext(), true, {}};
         if (dso_path != nullptr && dso_path[0] != '\0') {
-            wrapper->context.setDsoPath(dso_path);
+            wrapper->context->setDsoPath(dso_path);
         }
         return wrapper;
     } catch (...) {
@@ -39,6 +55,12 @@ NmrContext* nmr_context_new(const char* dso_path)
 
 void nmr_context_free(NmrContext* context)
 {
+    if (context == nullptr) {
+        return;
+    }
+    if (context->owned) {
+        delete context->context;
+    }
     delete context;
 }
 
@@ -62,7 +84,7 @@ NmrObject* nmr_object(NmrContext* context, const char* class_name,
         // second flush of the same scene idempotent rather than an
         // error -- and what an incremental apply relies on.
         return reinterpret_cast<NmrObject*>(
-            context->context.createSceneObject(class_name, object_name));
+            context->context->createSceneObject(class_name, object_name));
     } catch (const std::exception& error) {
         context->error = std::string(class_name) + " \"" + object_name
             + "\": " + error.what();
@@ -487,7 +509,7 @@ int nmr_context_write_ascii(NmrContext* context, const char* path)
         return NMR_BAD_ARGUMENT;
     }
     try {
-        rdl2::AsciiWriter writer(context->context);
+        rdl2::AsciiWriter writer(*context->context);
         writer.toFile(path);
         return NMR_OK;
     } catch (const std::exception& error) {

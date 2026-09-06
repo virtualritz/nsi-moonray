@@ -101,9 +101,9 @@ it.
 
 | Gate | Met |
 | --- | --- |
-| MoonRay is linked, not spawned | no — **the first gate** |
-| A `Document` reaches a live `SceneContext` with no file | no |
-| A scene renders through `RenderContext` in process | no |
+| MoonRay is linked, not spawned | **yes** — `tests/inprocess.rs` renders a quad through a linked `RenderContext`; no file, no process |
+| A `Document` reaches a live `SceneContext` with no file | **yes** — `src/apply.rs`, `tests/apply.rs` |
+| A scene renders through `RenderContext` in process | **yes** — `R1` |
 | One attribute edit restarts a render without re-tessellation | no |
 | Geometry turned off costs an accelerator rebuild, not a reload | no |
 | Pixels reach a display driver | no |

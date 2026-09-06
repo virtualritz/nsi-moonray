@@ -114,3 +114,39 @@ This section asked for three things upstream. All three exist:
 no geometry work.** That is MoonRay's own distinction, arrived at
 independently — F3's three cost tiers. The two models line up, and this
 backend has to be taught to use them.
+
+## F4: Two things MoonRay needs that no header says
+
+Both found by running it, both fatal, and neither produces a
+diagnostic that points anywhere near its cause. Read from
+`rndr/RenderContext.cc` and `mcrt_common/AffinityManager.h` on a
+MoonRay built here.
+
+### `initGlobalDriver` is not optional
+
+`RenderContext`'s constructor does not set up the process. A consumer
+must call `rndr::initGlobalDriver(options)` first -- `moonray`'s own
+`main` does, at `cmd/raas_cmd/moonray/moonray.cc:117`. It starts
+`ProcKeeper`, the `AffinityManager`, the render driver's thread-local
+pools and the image-write driver.
+
+Skipping it does not fail cleanly. `RenderContext::initialize` reaches
+`RenderStats::logHardwareConfiguration`, which asks
+`AffinityManager::get()` for a manager nothing ever made, and the
+process dies with **SIGSEGV inside `setupLogInfo`** -- no message, no
+exception to catch, and a backtrace pointing at *logging*. It is
+declared in `rndr/RenderContext.h`, so it is public API; it is simply
+not something the type's own construction implies.
+
+### One renderer per process
+
+That driver state is global, not per-context. Two live
+`RenderContext`s share what one is already using, and the failure is
+an **abort in the allocator** -- `munmap_chunk(): invalid pointer` --
+which names nothing involved.
+
+Sequential use is fine: create, render, drop, create again. So the
+shim refuses a second live renderer rather than leaving the abort
+waiting, and says why. An application that wants two concurrent
+MoonRay renders needs two processes, which is a real constraint on
+what this backend can offer and is better stated than discovered.

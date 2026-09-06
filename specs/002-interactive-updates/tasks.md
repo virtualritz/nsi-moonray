@@ -4,24 +4,57 @@ Nothing built. Ordered so that each step is checkable on its own.
 
 ## The Shim
 
-- [ ] S1 An `extern "C"` surface over `scene_rdl2`: create a
-      `SceneContext`, create objects by class and name, set the typed
-      attributes rdl2 has, set bindings and blur pairs, `Layer::assign`,
-      set membership.
-- [ ] S2 `apply(&Document, &Context)` — the same structure the `.rdla`
-      writer consumes, replayed into live objects.
-- [ ] S3 `AsciiWriter`/`BinaryWriter` behind the shim, so a live context
-      can be dumped. This is what keeps `.rdla` honest once it is no
-      longer the path: dump the live scene, diff against the emitter.
-- [ ] S4 Gate all of it behind a `rdl2` feature. A checkout with no
-      `scene_rdl2` still builds and still runs the oracle tests.
+- [x] S1 An `extern "C"` surface over `scene_rdl2`: `shim/`. Creates a
+      `SceneContext`, creates objects by class and name, sets every
+      typed attribute rdl2 has, sets bindings and blur pairs, assigns
+      `Layer` rows and set membership. **Checked by running it** --
+      `shim/tests/smoke.cc` drives every setter through rdl2's own
+      `ExtensiveObject` and writes the result out, which is how the
+      calls were confirmed against the library rather than against its
+      headers. Two rules hold at every entry point: no C++ exception
+      crosses the boundary (`set` by name throws, and unwinding into
+      Rust is undefined behaviour), and nothing refuses a scene.
+- [x] S2 `apply(&Document, &Context)` -- `src/apply.rs`. Two passes,
+      because an attribute can name an object the document declares
+      later and one pass would resolve it to `undef()`; for a `Layer`
+      row's material that means MoonRay skips the shape entirely, so
+      the failure is a black render rather than an error.
+- [x] S3 `AsciiWriter` behind the shim: `Context::write_ascii`. What
+      keeps `.rdla` honest now that it is a dump -- apply a document,
+      write the live scene, diff against the emitter.
+- [x] S4 Gated behind a `rdl2` feature, off by default. A checkout with
+      no `scene_rdl2` builds and runs everything but `tests/apply.rs`.
+      `cc` is an unconditional build-dependency: a build script sees
+      features only as `CARGO_FEATURE_*`, never as a `cfg`.
+- [ ] S5 A round trip against the emitter. `oracle verify` proves rdl2
+      reads what the emitter writes; the twin check is that applying a
+      document and dumping it gives the same bytes. Any divergence is a
+      setter that took a different path from the writer, and nothing
+      else would find it.
 
 ## In-Process Rendering
 
-- [ ] R1 `RenderContext`: `startFrame`, `stopFrame`, snapshot to a
-      buffer. No file.
+- [x] R1 `RenderContext`: `startFrame`, `stopFrame`, snapshot to a
+      buffer. **No file, no spawned process.** `shim/src/render.cc` and
+      `src/rdl2/render.rs`; `tests/inprocess.rs` renders a lit quad and
+      asserts the centre of frame carries light and that a tenth of the
+      frame does -- "any pixel is non-zero" would pass on a stray
+      sample. Two things had to be found by running it, neither of
+      which fails legibly (`research.md` F4): `initGlobalDriver` must
+      be called before any `RenderContext` or the process SIGSEGVs
+      inside *logging*, and only one renderer may live at a time or two
+      abort in the allocator.
+      **The renderer owns the scene.** `getSceneContext()` hands out a
+      reference to its own, so a scene meant to be rendered is built
+      inside the renderer rather than built separately and handed
+      across.
 - [ ] R2 Progressive modes, and the render running while the
-      application carries on.
+      application carries on. `startFrame` already returns once render
+      *prep* is done, with the frame converging behind it --
+      `a_frame_can_be_snapshotted_while_it_converges` shows a snapshot
+      answering mid-flight. What is left is choosing
+      `RenderMode::PROGRESSIVE` rather than `BATCH`, and pacing with
+      `isFrameReadyForDisplay` / `areCoarsePassesComplete`.
 - [ ] R3 Pixels to a registered display driver **as the render
       converges**. Half of this is already done and is not the hard
       half: an application's `callback.open`/`write`/`finish` closures

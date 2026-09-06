@@ -30,6 +30,13 @@ pub struct NmrObject {
     _private: [u8; 0],
 }
 
+/// Opaque; owns the `SceneContext` it renders.
+#[cfg(moonray)]
+#[repr(C)]
+pub struct NmrRender {
+    _private: [u8; 0],
+}
+
 unsafe extern "C" {
     pub fn nmr_context_new(dso_path: *const c_char) -> *mut NmrContext;
     pub fn nmr_context_free(context: *mut NmrContext);
@@ -246,5 +253,31 @@ unsafe extern "C" {
         part: *const c_char,
         material: *mut NmrObject,
         light_set: *mut NmrObject,
+    ) -> c_int;
+}
+
+#[cfg(moonray)]
+unsafe extern "C" {
+    pub fn nmr_render_new(
+        dso_path: *const c_char,
+        threads: u32,
+    ) -> *mut NmrRender;
+    pub fn nmr_render_free(render: *mut NmrRender);
+    pub fn nmr_render_error(render: *const NmrRender) -> *const c_char;
+    pub fn nmr_render_scene(render: *mut NmrRender) -> *mut NmrContext;
+    pub fn nmr_render_initialize(render: *mut NmrRender) -> c_int;
+    pub fn nmr_render_start(render: *mut NmrRender) -> c_int;
+    pub fn nmr_render_stop(render: *mut NmrRender) -> c_int;
+    pub fn nmr_render_is_ready_for_display(render: *const NmrRender) -> c_int;
+    pub fn nmr_render_is_frame_complete(render: *const NmrRender) -> c_int;
+    pub fn nmr_render_resolution(
+        render: *const NmrRender,
+        width: *mut u32,
+        height: *mut u32,
+    ) -> c_int;
+    pub fn nmr_render_snapshot(
+        render: *mut NmrRender,
+        pixels: *mut f32,
+        capacity: usize,
     ) -> c_int;
 }

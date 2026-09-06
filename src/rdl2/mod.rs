@@ -27,6 +27,11 @@ use std::ffi::{CString, c_char, c_int, c_void};
 
 mod ffi;
 
+#[cfg(moonray)]
+mod render;
+#[cfg(moonray)]
+pub use render::Render;
+
 /// What a shim call answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -144,6 +149,15 @@ impl Context {
             raw,
             _context: std::marker::PhantomData,
         })
+    }
+
+    /// Wrap a context the shim handed over.
+    ///
+    /// Used for a scene borrowed from a [`Render`], which owns it.
+    /// `nmr_context_free` knows not to delete what it does not own, so
+    /// the wrapper is still dropped normally.
+    pub(super) fn from_raw(raw: *mut ffi::NmrContext) -> Self {
+        Self { raw }
     }
 
     /// What rdl2 last complained about, if anything.

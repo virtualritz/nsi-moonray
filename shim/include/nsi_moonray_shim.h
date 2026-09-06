@@ -151,6 +151,62 @@ int nmr_layer_assign(NmrObject* layer, NmrObject* geometry, const char* part,
 // against what the emitter writes.
 int nmr_context_write_ascii(NmrContext* context, const char* path);
 
+// ─── Rendering, in this process ──────────────────────────────────────
+//
+// MoonRay renders progressively already: `RenderMode::PROGRESSIVE` puts
+// samples up as they exist. What it does not do is *push* them -- a
+// consumer pulls with `snapshotRenderBuffer` or `snapshotDelta`, and
+// `moonray_gui` is a loop around exactly that. ɴsɪ pushes to an output
+// driver's callbacks, so the adapter is a snapshot loop on this side.
+//
+// The one thing that made that impossible before was spawning: a
+// separate process has no `RenderContext` to snapshot.
+//
+// **The renderer owns the scene.** `RenderContext::getSceneContext()`
+// hands out a reference to its own, so a scene meant to be rendered is
+// built *inside* the renderer rather than built separately and given
+// to it. `nmr_render_scene` is that scene, and it must not outlive the
+// render context.
+
+typedef struct NmrRender NmrRender;
+
+// A render context. `threads` of 0 means every core.
+NmrRender* nmr_render_new(const char* dso_path, unsigned threads);
+void nmr_render_free(NmrRender* render);
+
+// The last thing MoonRay complained about, or null.
+const char* nmr_render_error(const NmrRender* render);
+
+// The scene to build into. Borrowed from the render context and freed
+// with `nmr_context_free`, which knows not to delete what it does not
+// own.
+NmrContext* nmr_render_scene(NmrRender* render);
+
+// Prepare. Call once, after the scene is built.
+int nmr_render_initialize(NmrRender* render);
+
+// Begin rendering. Returns as soon as render prep is done -- the frame
+// keeps converging in the background, which is what makes a snapshot
+// loop worth having.
+int nmr_render_start(NmrRender* render);
+int nmr_render_stop(NmrRender* render);
+
+// Where a snapshot loop looks. `ready_for_display` goes true once
+// there is something worth showing; `frame_complete` once there is
+// nothing more coming.
+int nmr_render_is_ready_for_display(const NmrRender* render);
+int nmr_render_is_frame_complete(const NmrRender* render);
+
+// The frame's dimensions, as the renderer resolved them -- which is
+// not necessarily what the scene asked for, since `res` scales it.
+int nmr_render_resolution(const NmrRender* render, unsigned* width,
+                          unsigned* height);
+
+// Copy the current frame into `pixels`, which must hold
+// `width * height * 4` floats: MoonRay's render buffer is RGBA float
+// per pixel. Returns `NMR_BAD_ARGUMENT` if it is shorter.
+int nmr_render_snapshot(NmrRender* render, float* pixels, size_t capacity);
+
 #ifdef __cplusplus
 }
 #endif
