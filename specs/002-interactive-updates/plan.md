@@ -2,17 +2,42 @@
 
 ## Status
 
-Specified, not built. The three layers below are the work, and the
-first is a prerequisite for anything interactive at all.
+Specified, not built.
+
+**Linking MoonRay directly is the first thing, not a later one.**
+`001` ships a backend that *spawns* `moonray` and hands it a `.rdla`.
+That was the right first step and it is now the thing in the way: a
+separate process has no `SceneContext` to edit and no `RenderContext`
+to snapshot, so it forecloses every capability below at once —
+incremental updates, progressive delivery, and the render running
+while the application carries on. None of those are separate features
+waiting their turn. They are one prerequisite.
+
+So the order is: **shim, then in-process render, then everything
+else.** The spawn path stays reachable for batch work and stops being
+the path.
+
+### What `.rdla` is now
+
+A dump, and only a dump — `--print`, a bug report, a diff against the
+oracle. It is not a transport and nothing on the render path writes
+one. The oracle tests keep covering it *because* it is a dump: they
+check the values this backend computes without needing a renderer, and
+they go on doing that after the transport changes underneath them.
 
 ## Approach
 
 ```
 ɴsɪ calls ──▶ nsi-intermediate ──▶ nsi-moonray ──▶ scene_rdl2 ──▶ MoonRay
               (records + journals)   (applies)     SceneContext    RenderContext
-                                          │
-                                          └──▶ .rdla / .rdlb, an *output*
+                                          │                             │
+                                          │                     snapshot│
+                    .rdla / .rdlb ◀───────┘                             ▼
+                    a *dump*, off the render path        callback.write
 ```
+
+All of it in one process, in one address space. The application's
+closure and the renderer's sample buffer are a `memcpy` apart.
 
 ### 1. An in-process `SceneContext`
 
@@ -50,9 +75,17 @@ same image, one tier cheaper.
 
 ### 3. Pixels out
 
-`RenderContext` snapshots into buffers rather than files, which is what
-feeds a display driver and what `DspyRegisterDriver` currently has
-nothing to do. Progressive modes come with it.
+`RenderContext` snapshots into buffers rather than files. The
+receiving end is **already built and tested** (`001` `T5.1`): an
+application's `callback.open`/`write`/`finish` closures are called
+directly, no ndspy marshalling. What is missing is only the source of
+the pixels.
+
+MoonRay renders progressively already (`001` `research.md` F5); it
+expects to be *pulled* (`snapshotDelta` + `ActivePixels`) where ɴsɪ
+pushes. The adapter is a snapshot loop here, and it is small. It has
+no `RenderContext` to loop over until §1 and `R1` exist, which is the
+only reason it does not exist today.
 
 ## What Upstream Provides
 
@@ -68,6 +101,7 @@ it.
 
 | Gate | Met |
 | --- | --- |
+| MoonRay is linked, not spawned | no — **the first gate** |
 | A `Document` reaches a live `SceneContext` with no file | no |
 | A scene renders through `RenderContext` in process | no |
 | One attribute edit restarts a render without re-tessellation | no |
