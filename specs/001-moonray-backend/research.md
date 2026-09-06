@@ -196,7 +196,17 @@ check.
 
 ## Settled Questions
 
-- **Binding strategy: generate `.rdla` first.** The format is small,
+- **Binding strategy: generate `.rdla` first — superseded for
+  interactive work.** The reasoning below held while no host could
+  build MoonRay. It cannot hold for a viewport: a scene file cannot
+  express "this one attribute changed", so every edit becomes a whole
+  new scene and a renderer that starts from nothing. MoonRay applies
+  edits without rebuilding, and at a finer grain than ɴsɪ asks for; see
+  `specs/002-interactive-updates/research.md`. `.rdla` remains what it
+  should have been called from the start: an **output**, for batch and
+  for reading what a render was made from.
+
+  The original reasoning, unedited: The format is small,
   now fully captured, and an emitter for it can be checked end to end
   today against real `AsciiWriter` output. A shim would buy nothing
   until a host can build the renderer, since its only advantage --

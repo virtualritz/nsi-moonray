@@ -72,7 +72,9 @@ whoever renders to have it installed.
       `nsi-stream` is the pixel-streaming driver, not a reader. The
       parser belongs upstream next to the writer, where the Mitsuba
       backend gets it too.
-- [ ] T4.4 Link `libmoonray` rather than spawning its CLI. A spawned
+- [ ] T4.4 Link `libmoonray` rather than spawning its CLI. **Moved to
+      [`002`](../002-interactive-updates/tasks.md)**, which is where the
+      reason for it lives. A spawned
       batch render cannot stream samples back, so this is what
       progressive rendering and the pixel-streaming driver both need.
       See `TN.1`.

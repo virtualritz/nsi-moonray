@@ -16,6 +16,11 @@ depended on properly; `T0.7`.
 
 ## Approach
 
+**Superseded for interactive work by
+[`002`](../002-interactive-updates/).** What follows is right for batch
+and wrong for a viewport, for the reason `002` gives: a scene file
+cannot carry an edit.
+
 **Generate `.rdla`**, MoonRay's Lua scene format, behind a document
 model that leaves room for an `extern "C"` shim over `scene_rdl2` as a
 second target.
