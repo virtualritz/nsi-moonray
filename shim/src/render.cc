@@ -221,6 +221,14 @@ int nmr_render_initialize(NmrRender* render)
     });
 }
 
+int nmr_render_scene_updated(NmrRender* render)
+{
+    return guarded(render, [&] {
+        render->context->setSceneUpdated();
+        return NMR_OK;
+    });
+}
+
 int nmr_render_start(NmrRender* render)
 {
     return guarded(render, [&] {

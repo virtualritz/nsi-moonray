@@ -200,6 +200,16 @@ NmrContext* nmr_render_scene(NmrRender* render);
 // Prepare. Call once, after the scene is built.
 int nmr_render_initialize(NmrRender* render);
 
+// Tell the renderer the scene changed under it.
+//
+// `RenderContext` watches its own `updateScene` entry points; a scene
+// edited through `nmr_render_scene` is changed "externally" as far as
+// it is concerned, and without this the next `startFrame` renders the
+// old one -- correctly, quickly, and wrongly. Marked but not applied
+// and applied but not marked are the two failure modes, and only this
+// call separates them.
+int nmr_render_scene_updated(NmrRender* render);
+
 // Begin rendering. Returns as soon as render prep is done -- the frame
 // keeps converging in the background, which is what makes a snapshot
 // loop worth having.

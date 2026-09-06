@@ -57,6 +57,24 @@ const ENVIRONMENT_LIGHT: &str = "EnvLight";
 /// present with one.
 const DEFAULT_MATERIAL: &str = "/nsi/default_material";
 
+/// The camera a scene without one gets.
+///
+/// Not a nicety either. MoonRay's `RenderContext::initialize` does
+/// `initActiveCamera(getActiveCameras()[0])`, and `getActiveCameras`
+/// returns an **empty vector** for a scene holding no camera --
+/// indexing which is undefined behaviour, not the `KeyError` its own
+/// `catch` is waiting for. The process dies with a SIGSEGV, and in a
+/// renderer loaded by `dlopen` it takes the host application with it
+/// (`002` `research.md` F5).
+///
+/// Emitting one is the better answer than refusing the scene, and it
+/// is the one MoonRay itself intends: `getActiveCameras` already falls
+/// back to whichever camera was created first when the scene variables
+/// name none. It only has nothing to fall back *to*. So: ɴsɪ always
+/// returns an image, and a scene with no camera gets a view from the
+/// origin down `-Z` rather than a crash. The substitution is reported.
+const DEFAULT_CAMERA: &str = "/nsi/default_camera";
+
 /// The set every light lands in.
 ///
 /// A `Layer` row with no light set is lit by nothing, so this is
@@ -119,6 +137,9 @@ pub fn flush(scene: &Scene) -> Flushed {
     // an ordinary shape after the walk -- a prototype is drawn by its
     // instancer and must not also be drawn on its own.
     let mut instancers: Vec<String> = Vec::new();
+    // A scene with none gets one, because MoonRay crashes rather than
+    // complains. See `DEFAULT_CAMERA`.
+    let mut cameras = 0usize;
 
     let resolution = resolution(scene);
 
@@ -152,6 +173,7 @@ pub fn flush(scene: &Scene) -> Flushed {
 
             "perspectivecamera" => {
                 objects.push(camera(scene, handle, resolution, &mut flushed));
+                cameras += 1;
             }
 
             "environment" => {
@@ -214,6 +236,28 @@ pub fn flush(scene: &Scene) -> Flushed {
 
         variables = variables
             .set("camera", Value::Object(camera_reference(&output.camera)));
+    }
+
+    if cameras == 0 {
+        // At the origin looking down `-Z`, which is where ɴsɪ's own
+        // identity transform points a camera, with a plain 45-degree
+        // field of view. Arbitrary, and said so rather than implied.
+        objects.push(
+            Object::new(PERSPECTIVE_CAMERA, DEFAULT_CAMERA).set(
+                "focal",
+                Value::Float(focal(45.0, resolution)),
+            ),
+        );
+        variables = variables.set(
+            "camera",
+            Value::Object(Reference::new(PERSPECTIVE_CAMERA, DEFAULT_CAMERA)),
+        );
+        flushed.limitations.push(format!(
+            "no ɴsɪ camera reached the scene, so a default \
+             {PERSPECTIVE_CAMERA} at the origin looking down -Z was \
+             added; MoonRay reads cameras[0] of an empty list and \
+             would otherwise crash rather than report"
+        ));
     }
 
     let light_set = if lights.is_empty() {
@@ -1497,6 +1541,52 @@ mod tests {
               x, 0.0, 0.0, 1.0,
         ];
         matrix
+    }
+
+    /// A scene with no camera still gets one.
+    ///
+    /// Not cosmetic: MoonRay's `initialize` indexes `[0]` of an empty
+    /// camera list, which is undefined behaviour rather than the error
+    /// its own `catch` expects, and the process dies. A camera-less
+    /// ɴsɪ scene is legal to record, so this is the difference between
+    /// an image with a note and a crashed host application.
+    #[test]
+    fn a_scene_with_no_camera_gets_a_default_one() {
+        let mut scene = Scene::default();
+        scene.create("tri", "mesh").expect("a recordable edit");
+        scene.connect("tri", None, ".root", "objects").unwrap();
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(
+            rdla.contains("PerspectiveCamera(\"/nsi/default_camera\")"),
+            "{rdla}"
+        );
+        assert!(
+            rdla.contains(
+                "[\"camera\"] = PerspectiveCamera(\"/nsi/default_camera\")"
+            ),
+            "the scene variables must name it, or MoonRay has nothing to \
+             fall back to\n{rdla}"
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("no ɴsɪ camera")),
+            "the substitution must be reported: {:?}",
+            flushed.limitations
+        );
+    }
+
+    /// A scene that has a camera does not get a second one.
+    #[test]
+    fn a_scene_with_a_camera_keeps_only_its_own() {
+        let rdla = flush(&triangle()).to_rdla();
+
+        assert!(!rdla.contains("/nsi/default_camera"), "{rdla}");
+        assert!(rdla.contains("PerspectiveCamera(\"cam\")"), "{rdla}");
     }
 
     /// A prototype mesh under an instancer that places it twice.

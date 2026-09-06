@@ -27,6 +27,84 @@ use std::collections::HashMap;
 /// `SceneVariables` has no name, and rdl2 reaches it by class alone.
 const SCENE_VARIABLES: &str = "SceneVariables";
 
+/// Apply only the objects an edit touched.
+///
+/// The synchronise loop's half of `apply`. One ɴsɪ attribute changing
+/// should cost one rdl2 attribute write, not a scene rebuild --
+/// MoonRay reuses tessellation and acceleration structures for
+/// anything it was not told changed, and that reuse is the entire
+/// point of an interactive render.
+///
+/// `affected` comes from `Scene::affected(&scene.take_changes())`
+/// upstream, which answers "given this node changed, whose resolved
+/// answers depended on it" by walking the graph *down*. Working that
+/// out here would mean re-deriving ɴsɪ's scoping rules in a backend,
+/// which is exactly the duplication `nsi-intermediate` exists to
+/// prevent.
+///
+/// # When it does everything anyway
+///
+/// - `Affected::everything`, which upstream sets for an edit to
+///   `.root` or `.global`. It does not fill `nodes` in that case, since
+///   the answer is the whole scene.
+/// - A node created or deleted. The `Layer`, the `GeometrySet` and the
+///   `LightSet` are *membership*, and a member appearing or vanishing
+///   changes them rather than any one object. Narrowing that is
+///   `I6`'s business; getting it wrong renders a shape that should be
+///   gone, or loses one that should be there.
+///
+/// Both are reported, because a full rebuild that renders correctly
+/// and slowly is invisible in the image and shows up only as time.
+pub fn apply_affected(
+    document: &Document,
+    context: &Context,
+    changes: &nsi_intermediate::Changes,
+    affected: &nsi_intermediate::Affected,
+) -> (Vec<String>, bool) {
+    if affected.everything {
+        let mut report = apply(document, context);
+        report.push(
+            "an attribute on `.root` or `.global` changed, so the whole              scene was re-applied"
+                .to_string(),
+        );
+        return (report, true);
+    }
+
+    if !changes.created.is_empty() || !changes.deleted.is_empty() {
+        let mut report = apply(document, context);
+        report.push(format!(
+            "{} node(s) created and {} deleted, which changes set and              layer membership, so the whole scene was re-applied",
+            changes.created.len(),
+            changes.deleted.len()
+        ));
+        return (report, true);
+    }
+
+    // The narrow path: only the objects whose handles upstream named.
+    // `Object::name` is the ɴsɪ handle, which is what makes this a
+    // filter rather than a second mapping.
+    let touched = |described: &Described| {
+        described.name.as_ref().is_some_and(|name| {
+            affected.nodes.contains(name) || affected.shaders.contains(name)
+        })
+    };
+
+    let narrowed = Document {
+        objects: document
+            .objects
+            .iter()
+            .filter(|described| touched(described))
+            .cloned()
+            .collect(),
+    };
+
+    if narrowed.objects.is_empty() {
+        return (Vec::new(), false);
+    }
+
+    (apply(&narrowed, context), false)
+}
+
 /// Apply a document, reporting what would not go across.
 ///
 /// Two passes, and the reason is references: an attribute can name an

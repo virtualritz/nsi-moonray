@@ -267,6 +267,7 @@ unsafe extern "C" {
     pub fn nmr_render_error(render: *const NmrRender) -> *const c_char;
     pub fn nmr_render_scene(render: *mut NmrRender) -> *mut NmrContext;
     pub fn nmr_render_initialize(render: *mut NmrRender) -> c_int;
+    pub fn nmr_render_scene_updated(render: *mut NmrRender) -> c_int;
     pub fn nmr_render_start(render: *mut NmrRender) -> c_int;
     pub fn nmr_render_stop(render: *mut NmrRender) -> c_int;
     pub fn nmr_render_is_ready_for_display(render: *const NmrRender) -> c_int;

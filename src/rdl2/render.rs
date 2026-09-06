@@ -124,6 +124,23 @@ impl Render {
         result(unsafe { ffi::nmr_render_start(self.raw) })
     }
 
+    /// Tell the renderer its scene changed under it.
+    ///
+    /// A scene edited through [`Render::scene`] is changed *externally*
+    /// as far as `RenderContext` is concerned -- it watches its own
+    /// `updateScene` entry points, not the objects. Without this the
+    /// next [`Render::start`] renders the previous scene: correctly,
+    /// quickly, and wrongly.
+    ///
+    /// **Applied but not marked** is the failure this prevents, and it
+    /// has no symptom other than a stale image. Its twin, **marked but
+    /// not applied**, is a full rebuild that renders correctly and
+    /// slowly; only timing finds that one.
+    pub fn scene_updated(&self) -> Result<(), Error> {
+        // SAFETY: a live renderer.
+        result(unsafe { ffi::nmr_render_scene_updated(self.raw) })
+    }
+
     /// End the frame, blocking until the threads are down.
     pub fn stop(&self) -> Result<(), Error> {
         // SAFETY: a live renderer.
