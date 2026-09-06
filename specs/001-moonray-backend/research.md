@@ -328,21 +328,30 @@ so **velocities are in units per second**, and ɴsɪ's motion times are
 in whatever unit the scene's shutter uses -- which this crate has no
 way to confirm from here.
 
-**The conversion does not have to guess, though.** Setting
-`evaluation_frame` to the first ɴsɪ sample time and `motion_steps` to
-the two sample times makes `fps` cancel:
+**The conversion does not have to guess, but `fps` does not cancel.**
+An earlier draft of this note claimed it did; working the arithmetic
+through says otherwise. With `motion_steps` set to the shutter's two
+ends and `evaluation_frame` to the first:
 
 ```
-velocity = (p1 - p0) / (t1 - t0)          [per ɴsɪ time unit]
-p(t1)    = p0 + velocity * (t1 - t0)      [since evaluationFrame = t0]
-         = p1
+dt0 = (open  - open) / fps = 0
+dt1 = (close - open) / fps
 ```
 
-The unit only has to be *consistent*, not known. That is the mapping
-`T6.3` should take, and it needs `motion_steps` on `SceneVariables` to
-be written from the scene's own sample times rather than left at its
-`{-1, 0}` default -- which is a change that touches transform blur too,
-and wants its own render to confirm.
+and MoonRay computes `position + velocity * dt`. For the second
+timestep to land on the second sample:
+
+```
+p0 + velocity * dt1 = p0 + delta
+velocity = delta * fps / (close - open)
+```
+
+So `fps` is in it. That is fine, because `fps` is a `SceneVariable`
+this backend writes, so the two agree by construction rather than by
+assumption -- but it has to be written rather than left at rdl2's
+default, or the conversion depends on a number nobody stated.
+
+`motion_steps` written from the scene is `T2.0` and is done.
 
 **Only translation.** `velocities` is a position offset; an instance
 that rotates or scales across the shutter needs the decomposed form

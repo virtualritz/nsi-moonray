@@ -232,15 +232,6 @@ The capability that distinguishes this backend.
       the same failure `T1.3a` refuses: a wrong guess renders
       plausibly, blurred by the wrong amount, and looks like a shutter
       setting. Whoever has the spec can finish this in minutes.
-- [x] T6.4 Nested instancing. An `instances` node connected to
-      another's `sourcemodels` works through the same recursion in
-      `fillGenerateList` that stops a prototype drawing on its own --
-      nothing extra to map. `inprocess::instancers_nest` places two
-      copies of a two-copy instancer and counts four runs of lit
-      columns, which one collapsed level would not give.
-      `instance_level` is left unset: its own comment says it adds a
-      shading primitive attribute, not that it is needed for the
-      nesting to work.
 - [x] T2.5 Report, never flatten, a scene with more than two motion
       samples on one attribute. rdl2 has exactly two timesteps.
       `flush::tests::more_than_two_motion_samples_are_reported` for a
@@ -299,21 +290,35 @@ says so in its own doc. This backend calls none of it.
       it, which is how a prototype gets its own placement. `references`
       named the transform, the attribute failed to set entirely, and
       nothing drew. Reported, at least, rather than silent.
-- [~] T6.3 A moving instancer. **`xform_list` is not blurrable** --
-      declared with no flags, and `FLAGS_BLURRABLE` is what carries two
-      timesteps (`research.md` F10) -- so ɴsɪ's sampled
-      `transformationmatrices` cannot cross as a `blur()` pair. The
-      flush takes the shutter-open sample and reports it, which is
-      where this stands.
-      The route MoonRay intends is `velocities`, in **units per
-      second**. The conversion need not guess at ɴsɪ's time unit:
-      setting `evaluation_frame` to the first sample time and
-      `motion_steps` to the two sample times makes `fps` cancel, so the
-      unit only has to be consistent. That wants `motion_steps` written
-      from the scene rather than left at its `{-1, 0}` default, which
-      touches transform blur too and needs its own render.
-      Only translation either way; a rotating instance needs the
-      decomposed form and `use_rotation_motion_blur`.
+- [x] T6.3 A moving instancer, through `velocities`.
+      **`xform_list` is not blurrable** -- declared with no flags, and
+      `FLAGS_BLURRABLE` is what carries two timesteps (`research.md`
+      F10) -- so ɴsɪ's sampled `transformationmatrices` cannot cross as
+      a `blur()` pair. MoonRay's route is a per-instance velocity,
+      applied as `position + velocity * dt` with
+      `dt = (motionStep - evaluationFrame) / fps`.
+      So the magnitude is `delta * fps / (close - open)`. **`fps` does
+      not cancel** -- an earlier note in `research.md` said it did, and
+      the arithmetic says otherwise -- which is harmless only because
+      this backend now *writes* `fps` rather than relying on rdl2's
+      default, so the two agree by construction.
+      `flush::tests::a_moving_instancer_gets_velocities` checks the
+      number (6 units across a `[0, 1]` shutter at 24fps is 144);
+      `inprocess::a_moving_instancer_renders_blurred` checks it reaches
+      the image, through a different mechanism from every other moving
+      thing here.
+      Only translation. Rotation and scale across the shutter need the
+      decomposed form and `use_rotation_motion_blur`, and that is
+      reported rather than silently dropped.
+- [x] T6.4 Nested instancing. An `instances` node connected to
+      another's `sourcemodels` works through the same recursion in
+      `fillGenerateList` that stops a prototype drawing on its own --
+      nothing extra to map. `inprocess::instancers_nest` places two
+      copies of a two-copy instancer and counts four runs of lit
+      columns, which one collapsed level would not give.
+      `instance_level` is left unset: its own comment says it adds a
+      shading primitive attribute, not that it is needed for the
+      nesting to work.
 - [x] T6.5 **Assert it is instanced, not expanded.**
       `a_prototype_is_referenced_once_not_expanded` counts the
       prototype's declarations, because a flattened scene renders an

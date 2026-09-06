@@ -113,6 +113,16 @@ const VISIBILITY: [&str; 9] = [
     "visible_volume",
 ];
 
+/// The frame rate written into the scene.
+///
+/// rdl2's own default, and written rather than relied on: MoonRay
+/// converts a per-instance velocity to a position offset with
+/// `dt = (motionStep - evaluationFrame) / fps`, so an instancer's
+/// velocities are only correct if this backend and the renderer agree
+/// on `fps`. Emitting it makes them agree by construction instead of
+/// by assumption.
+const FPS: f32 = 24.0;
+
 /// `PerspectiveCamera`'s default film-back width in millimetres, which
 /// the focal length is derived against.
 const FILM_WIDTH_APERTURE: f32 = 24.0;
@@ -364,6 +374,9 @@ pub fn flush(scene: &Scene) -> Flushed {
     });
 
     if let Some([open, close]) = shutter {
+        // See `FPS`: the instancer velocity conversion depends on this
+        // and on `motion_steps` being the two below.
+        variables = variables.set("fps", Value::Float(FPS));
         // The two timesteps every `blur(a, b)` in this scene is
         // evaluated at. Without this MoonRay keeps its `{-1, 0}`
         // default and blurs over an interval that has nothing to do
@@ -557,37 +570,48 @@ fn instancer(
         return None;
     }
 
-    // A moving instancer is ɴsɪ-legal and 3Delight renders it, but
-    // `xform_list` is one list and rdl2 has two timesteps. Take the
-    // shutter-open sample and *say so*: a crowd frozen at t0 is a
-    // reduction, and reporting it is what separates this from the
-    // silent flattening the backend exists to avoid.
-    let instances = match scene.instance_transforms(handle) {
-        Ok(instances) => instances,
+    // A moving instancer, or a still one. `xform_list` is **not
+    // blurrable** -- declared with no flags, and `FLAGS_BLURRABLE` is
+    // what carries two timesteps (`research.md` F10) -- so ɴsɪ's
+    // sampled `transformationmatrices` cannot cross as a `blur()`
+    // pair. MoonRay's route is `velocities`, one vector per instance,
+    // applied as `position + velocity * dt`.
+    let (instances, velocities) = match scene.instance_transforms(handle) {
+        Ok(instances) => (instances, None),
+
         Err(nsi_intermediate::ResolveError::MotionSampledTransform {
             ..
         }) => {
-            let time = scene
-                .motion_times(handle)
-                .unwrap_or_default()
-                .first()
-                .copied()
-                .unwrap_or(0.0);
-            flushed.limitations.push(format!(
-                "instancer {handle:?} moves; its instance transforms were \
-                 taken at time {time} because `xform_list` is a single \
-                 list. Per-instance motion blur needs `velocities`"
-            ));
-            match scene.instance_transforms_at(handle, time) {
-                Ok(instances) => instances,
-                Err(error) => {
-                    flushed.limitations.push(format!(
-                        "instancer {handle:?} places nothing: {error}"
-                    ));
-                    return None;
-                }
+            let [open, close] = shutter.unwrap_or([0.0, 1.0]);
+
+            let mut at =
+                |time: f64| match scene.instance_transforms_at(handle, time) {
+                    Ok(placed) => Some(placed),
+                    Err(error) => {
+                        flushed.limitations.push(format!(
+                            "instancer {handle:?} places nothing at {time}: \
+                         {error}"
+                        ));
+                        None
+                    }
+                };
+
+            let (begin, end) = (at(open)?, at(close)?);
+
+            if begin.len() != end.len() {
+                flushed.limitations.push(format!(
+                    "instancer {handle:?} places {} instances at the \
+                     shutter's open and {} at its close; that cannot be \
+                     blurred, so the open sample is used",
+                    begin.len(),
+                    end.len()
+                ));
+                (begin, None)
+            } else {
+                (begin.clone(), Some(velocity(&begin, &end, open, close)))
             }
         }
+
         Err(error) => {
             flushed
                 .limitations
@@ -670,7 +694,74 @@ fn instancer(
         // own transform below the instancer is simply lost.
         .set("use_reference_xforms", Value::Bool(true));
 
+    if let Some(velocities) = velocities {
+        // `evaluation_frame` is the time `xform_list` describes, so
+        // MoonRay's `dt` is zero there and the open-shutter positions
+        // are used as written.
+        let object = object
+            .set(
+                "evaluation_frame",
+                Value::Float(shutter.map_or(0.0, |[open, _]| open as f32)),
+            )
+            .set("velocities", Value::Vector(velocities));
+
+        flushed.limitations.push(format!(
+            "instancer {handle:?} moves; only its **translation** is \
+             blurred. `xform_list` cannot carry two timesteps, so \
+             rotation and scale across the shutter would need the \
+             decomposed form and `use_rotation_motion_blur`"
+        ));
+
+        return Some(with_transform(object, scene, handle, shutter, flushed));
+    }
+
     Some(with_transform(object, scene, handle, shutter, flushed))
+}
+
+/// Per-instance velocity, in units per second.
+///
+/// MoonRay applies it as `position + velocity * dt` with
+/// `dt = (motionStep - evaluationFrame) / fps`
+/// (`InstanceProceduralLeaf.cc:344`), so with `motion_steps` at the
+/// shutter's ends and `evaluation_frame` at its open, landing on the
+/// close-shutter position needs
+///
+/// ```text
+/// velocity = delta * fps / (close - open)
+/// ```
+///
+/// `fps` is in it and does not cancel -- an earlier note said it did.
+/// That is harmless because this backend *writes* `fps` (see [`FPS`]),
+/// so the two agree by construction rather than by assumption.
+fn velocity(
+    begin: &[nsi_intermediate::Instance],
+    end: &[nsi_intermediate::Instance],
+    open: f64,
+    close: f64,
+) -> Vec<Value> {
+    let span = close - open;
+    // A zero-length shutter is not motion; a velocity of zero renders
+    // the open sample sharp, which is the honest answer.
+    let scale = if span > 0.0 {
+        f64::from(FPS) / span
+    } else {
+        0.0
+    };
+
+    begin
+        .iter()
+        .zip(end)
+        .map(|(from, to)| {
+            // The translation is the last row: ɴsɪ uses RenderMan's
+            // row-vector convention, so a point is a row and the
+            // offset lives at 12, 13, 14.
+            Value::Vec3f([
+                ((to.transform[12] - from.transform[12]) * scale) as f32,
+                ((to.transform[13] - from.transform[13]) * scale) as f32,
+                ((to.transform[14] - from.transform[14]) * scale) as f32,
+            ])
+        })
+        .collect()
 }
 
 /// Put an object's resolved world transform on it, as `node_xform`.
@@ -727,10 +818,18 @@ fn shutter(scene: &Scene) -> Option<[f64; 2]> {
 
     for (handle, _) in scene.nodes() {
         widen(&scene.motion_times(handle).unwrap_or_default());
-        if let Ok(samples) = scene.attribute_samples(handle, "P") {
-            let times: Vec<f64> =
-                samples.iter().map(|(time, _)| *time).collect();
-            widen(&times);
+
+        // The three attributes this backend blurs. `motion_times`
+        // walks the *transform chain*, so it does not see a mesh
+        // deforming in place or an instancer whose own matrices are
+        // sampled -- and missing either would leave those blurred over
+        // a shutter that does not cover them.
+        for attribute in ["P", "transformationmatrices"] {
+            if let Ok(samples) = scene.attribute_samples(handle, attribute) {
+                let times: Vec<f64> =
+                    samples.iter().map(|(time, _)| *time).collect();
+                widen(&times);
+            }
         }
     }
 
@@ -2359,6 +2458,81 @@ mod tests {
         assert!(rdla.contains("[\"method\"] = 2"), "{rdla}");
         assert!(rdla.contains("[\"xform_list\"] = { Mat4("), "{rdla}");
         assert!(rdla.contains("[\"use_reference_xforms\"] = true"), "{rdla}");
+    }
+
+    /// **`T6.3`.** A moving instancer blurs through `velocities`.
+    ///
+    /// `xform_list` carries no timesteps, so ɴsɪ's sampled
+    /// `transformationmatrices` cannot cross as a `blur()` pair.
+    /// MoonRay's route is a per-instance velocity, applied as
+    /// `position + velocity * dt` with
+    /// `dt = (motionStep - evaluationFrame) / fps` -- so the magnitude
+    /// is `delta * fps / (close - open)`, and getting it wrong is a
+    /// smear of the wrong length, which reads as a shutter setting.
+    #[test]
+    fn a_moving_instancer_gets_velocities() {
+        let mut scene = triangle();
+        scene
+            .create("inst", "instances")
+            .expect("a recordable edit");
+        scene.connect("inst", None, ".root", "objects").unwrap();
+        scene.create("proto", "mesh").expect("a recordable edit");
+        scene
+            .connect("proto", None, "inst", "sourcemodels")
+            .unwrap();
+
+        // One instance, travelling 6 units along X across [0, 1].
+        for (time, x) in [(0.0, 0.0), (1.0, 6.0)] {
+            scene
+                .set_attribute_at_time(
+                    "inst",
+                    time,
+                    vec![arg(
+                        "transformationmatrices",
+                        Type::MatrixF64,
+                        OwnedData::F64(instance_matrix(x)),
+                    )],
+                )
+                .expect("a recordable edit");
+        }
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        // The shutter is [0, 1] and `fps` is 24, so 6 units across it
+        // is 144 units per second.
+        assert!(
+            rdla.contains("[\"velocities\"] = { Vec3(144, 0, 0)}"),
+            "delta * fps / (close - open) = 6 * 24 / 1\n{rdla}"
+        );
+        // `xform_list` is the shutter-open placement, and
+        // `evaluation_frame` says so, making MoonRay's `dt` zero there.
+        assert!(rdla.contains("[\"evaluation_frame\"] = 0"), "{rdla}");
+        assert!(
+            rdla.contains("[\"xform_list\"] = { Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)}"),
+            "the open-shutter placement\n{rdla}"
+        );
+        // And the scene agrees about both numbers the maths used.
+        assert!(rdla.contains("[\"fps\"] = 24"), "{rdla}");
+        assert!(rdla.contains("[\"motion_steps\"] = { 0, 1}"), "{rdla}");
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("only its **translation**")),
+            "rotation and scale are not blurred, and that is reported: \
+             {:?}",
+            flushed.limitations
+        );
+    }
+
+    /// A still instancer gets no velocities at all.
+    #[test]
+    fn a_still_instancer_has_no_velocities() {
+        let rdla = flush(&two_instances()).to_rdla();
+        assert!(!rdla.contains("velocities"), "{rdla}");
+        assert!(!rdla.contains("evaluation_frame"), "{rdla}");
     }
 
     /// **`T6.5`.** The point of instancing is that the prototype exists

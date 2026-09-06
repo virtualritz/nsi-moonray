@@ -1059,3 +1059,105 @@ fn subdivision_reaches_the_limit_surface() {
          {subdivided} subdivided"
     );
 }
+
+/// **`T6.3`, rendered.** A moving instancer smears.
+///
+/// The velocities are asserted as numbers in `flush::tests`; this is
+/// that they reach the image. `xform_list` carries no timesteps, so
+/// this is MoonRay's `position + velocity * dt` path rather than the
+/// `blur(a, b)` one every other moving thing uses — a different
+/// mechanism, and worth seeing work.
+#[test]
+fn a_moving_instancer_renders_blurred() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (96usize, 48usize);
+
+    let frame_of = |moving: bool| {
+        let mut nsi = scene(width as i32, height as i32);
+        nsi.disconnect("quad", None, ".root", "objects").unwrap();
+
+        nsi.create("proto", "mesh").unwrap();
+        nsi.set_attribute(
+            "proto",
+            vec![
+                arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+                arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
+                arg(
+                    "P",
+                    Type::Point,
+                    OwnedData::F32(vec![
+                        -0.5, -0.5, 0.0, 0.5, -0.5, 0.0, 0.5, 0.5, 0.0, -0.5,
+                        0.5, 0.0,
+                    ]),
+                ),
+            ],
+        )
+        .unwrap();
+
+        nsi.create("inst", "instances").unwrap();
+        nsi.connect("inst", None, ".root", "objects").unwrap();
+        nsi.connect("proto", None, "inst", "sourcemodels").unwrap();
+
+        if moving {
+            for (time, x) in [(0.0, -1.5), (1.0, 1.5)] {
+                nsi.set_attribute_at_time(
+                    "inst",
+                    time,
+                    vec![arg(
+                        "transformationmatrices",
+                        Type::MatrixF64,
+                        OwnedData::F64(instance_at(x, -8.0)),
+                    )],
+                )
+                .unwrap();
+            }
+        } else {
+            nsi.set_attribute(
+                "inst",
+                vec![arg(
+                    "transformationmatrices",
+                    Type::MatrixF64,
+                    OwnedData::F64(instance_at(-1.5, -8.0)),
+                )],
+            )
+            .unwrap();
+        }
+
+        let mut session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        session.render().snapshot().expect("a frame").2
+    };
+
+    // Columns lit but not fully lit: the signature of an edge that
+    // swept across them.
+    let partial = |pixels: &[f32]| {
+        let brightest = (0..width)
+            .map(|x| column(pixels, width, height, x))
+            .fold(0.0f32, f32::max);
+        (0..width)
+            .filter(|x| {
+                let light = column(pixels, width, height, *x);
+                light > brightest * 0.05 && light < brightest * 0.95
+            })
+            .count()
+    };
+
+    let still = frame_of(false);
+    let moving = frame_of(true);
+
+    assert!(
+        partial(&moving) > partial(&still),
+        "a moving instancer should leave more partially covered \
+         columns than a still one: {} still, {} moving",
+        partial(&still),
+        partial(&moving)
+    );
+}
