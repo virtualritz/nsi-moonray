@@ -12,6 +12,7 @@ crashes for one assembled in memory.
 | Report | Status |
 | --- | --- |
 | [`moonray-empty-camera-crash.md`](moonray-empty-camera-crash.md) | Not filed — see the note at the top of the file |
+| [`scene_rdl2-bvh-only-flag-ignored.md`](scene_rdl2-bvh-only-flag-ignored.md) | Not filed — as above |
 
 The workaround for each lives in this repository and is marked as
 such, so that fixing it upstream is a deletion rather than an
