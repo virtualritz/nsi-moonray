@@ -293,3 +293,63 @@ along the way, and is worth keeping regardless: re-sending a mesh's
 vertices moved, since rdl2 tracks that an attribute was *set*, not that
 it changed.
 
+
+## F9: The BVH-only tier exists, on a path we do not take
+
+`I5` measured a visibility edit re-tessellating a subdivided grid,
+which `F3` says should cost an accelerator rebuild instead. The reason
+is precise, and it is not our mapping.
+
+**Two functions ask the same question and answer it differently.**
+
+`scene_rdl2`'s `Geometry::requiresGeometryUpdate` (`Geometry.cc:238`)
+skips only the attributes that need nothing at all:
+
+```cpp
+if (!attribute->updateRequiresGeomReload()) {   // FLAGS_CAN_SKIP_GEOM_RELOAD
+    continue;
+}
+if (hasChanged(attribute) || hasBindingChanged(attribute)) {
+    return true;                                // a full geometry update
+}
+```
+
+A `visible_*` attribute is `FLAGS_GEOM_RELOAD_BVH_ONLY` *without*
+`FLAGS_CAN_SKIP_GEOM_RELOAD`, so `updateRequiresGeomReload()` is true
+for it and changing one asks for a full update.
+
+MoonRay's `RenderContext::checkGeometryChangesRequireReload`
+(`RenderContext.cc:712`) asks properly, and its comment is the
+specification:
+
+```cpp
+if (!attribute->updateRequiresGeomReload() ||
+    attribute->updateOnlyRequiresBVHRebuild()) {
+    continue;
+}
+```
+
+> `FLAGS_GEOM_RELOAD_BVH_ONLY`: change needs a BVH rebuild but no
+> reload (e.g. the visibility flags, baked into the BVH ray mask).
+
+**But it is only called from `updateScene`** -- the binary-delta and
+file entry points -- and we edit the `SceneContext` directly and call
+`setSceneUpdated`, so it never runs for us. `updateOnlyRequiresBVHRebuild`
+has exactly one caller in either repository.
+
+### Two ways out
+
+- **Take the `updateScene(manifest, payload)` path** (`F4`): write a
+  binary rdl2 delta with `BinaryWriter::setDeltaEncoding(true)` and
+  hand it over, instead of editing objects in place. That is the path
+  MoonRay's own incremental machinery is built around, and it gets the
+  BVH-only tier for free. It also costs a serialise-deserialise per
+  edit, which is the thing editing in place was chosen to avoid --
+  so it wants measuring, not assuming.
+- **Ask upstream to consult the flag in `requiresGeometryUpdate`.**
+  The predicate already exists next to the one it does use, the
+  intent is documented in MoonRay's comment, and this is a two-line
+  change. Worth sending alongside the camera report.
+
+Either way this is now a number: `a_synchronise_is_measured_not_assumed`
+is where it would show up.

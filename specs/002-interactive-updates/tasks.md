@@ -110,11 +110,20 @@ whether it embeds this crate or `dlopen`s it.
       `a_synchronise_is_measured_not_assumed` pins down that the
       counters discriminate, and that a material change re-tessellates
       **by design** (`Layer.cc:497`, quoted in `research.md` F8).
-      What is left: a *visibility* edit re-tessellates too, though
-      `visible_*` is `FLAGS_GEOM_RELOAD_BVH_ONLY` and should cost an
-      accelerator rebuild instead. That is the real remaining work on
-      the incremental path, and it is now a number rather than a
-      suspicion.
+      What is left: a *visibility* edit re-tessellates too, and
+      `research.md` F9 says exactly why -- the BVH-only tier is
+      implemented in `checkGeometryChangesRequireReload`, which only
+      MoonRay's own `updateScene` entry points call, while
+      `Geometry::requiresGeometryUpdate` does not consult the flag at
+      all. Two ways out, `I7` and an upstream ask.
+- [ ] I7 Take the `updateScene(manifest, payload)` path instead of
+      editing objects in place: a binary rdl2 delta, which is what
+      MoonRay's incremental machinery is built around and what reaches
+      the BVH-only tier (`research.md` F4, F9). It costs a
+      serialise-deserialise per edit, which is precisely what editing
+      in place was chosen to avoid -- so this is a measurement, not a
+      rewrite: `a_synchronise_is_measured_not_assumed` is where the
+      answer shows up.
 - [x] I6 Fall back to a full re-apply for anything not narrowable,
       and report it. `Affected::everything` (an edit to `.root` or
       `.global`) and any node created or deleted -- set and layer
