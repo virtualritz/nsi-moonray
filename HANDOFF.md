@@ -106,9 +106,12 @@ Two shapes, and neither asks this repository to build MoonRay:
 
 ## Pixels Reach The Application, Without ndspy
 
-MoonRay has no display-driver interface — it writes files, and an
-interactive consumer *snapshots* buffers off a `RenderContext`. An ɴsɪ
-consumer expects the other shape. They meet in `nsi-ffi-wrap`'s
+MoonRay delivers progressively; it just does not *push*.
+`RenderMode::PROGRESSIVE` puts samples up as they exist and a consumer
+*pulls* them with `snapshotDelta` — `moonray_gui` is a loop around
+that. An ɴsɪ consumer expects a push. The gap is pull-versus-push, not
+a missing capability, and it closes on this side. They meet in
+`nsi-ffi-wrap`'s
 `output` feature, which is Rust on both sides: an application hands
 over `callback.open`, `callback.write` and `callback.finish` as
 `Reference` attributes on an `outputdriver`, and `src/display.rs`
@@ -131,9 +134,10 @@ debugging session:
   `dlopen` is a different compilation, and the safe route there is the
   `extern "C"` entry points `DspyRegisterDriver` hands over. `T5.2`.
 
-Delivery is still one bucket at the end, read back off the file.
-`snapshotDelta` against a live `RenderContext` is the real thing and
-needs the in-process renderer, so it sits with `002`. `T5.3`.
+Delivery is still one bucket at the end, read back off the file —
+because this backend *spawns* MoonRay, and a batch process has no
+`RenderContext` to snapshot. That is the whole reason, and linking
+`libmoonray` (`002` `R1`–`R3`) is the whole fix. `T5.3`.
 
 Taking `.nsi` *files* is a third thing and needs a parser that does not
 exist: `nsi-intermediate` writes streams and does not read them, and

@@ -5,13 +5,23 @@
 How a rendered image reaches the application that asked for it, when
 that application is an ɴsɪ consumer and the renderer is MoonRay.
 
-The two ends do not meet on their own. **MoonRay has no display-driver
-interface**: it writes files through its own `RenderOutputDriver`, and
-an interactive consumer instead *snapshots* buffers off a live
-`RenderContext` — `snapshotRenderBuffer` for a whole frame,
-`snapshotDelta` for the pixels that changed since the last one.
-**An ɴsɪ consumer expects the other shape**: an `outputdriver` node,
-and buckets arriving as they are rendered.
+**MoonRay delivers pixels progressively. It just does not push
+them.** `RenderMode::PROGRESSIVE` puts samples on screen as soon as
+they exist (`research.md` F5), and a consumer collects them by
+*pulling*: `snapshotRenderBuffer` for a whole frame, `snapshotDelta`
+plus `ActivePixels` for only what changed since the last call, paced
+by `isFrameReadyForDisplay` / `areCoarsePassesComplete` /
+`isFrameComplete`. `moonray_gui` is a loop around exactly that. Files
+come from `RenderOutputDriver` and are a separate, batch-side thing.
+
+**An ɴsɪ consumer expects a push**: an `outputdriver` node, and
+buckets arriving at its callbacks as they are rendered.
+
+So the two ends do not meet on their own — but the gap is pull-versus-
+push, not a missing capability. Nothing needs changing inside MoonRay:
+the adapter is a snapshot loop on this side, turning each delta into a
+`callback.write`. What it needs is the renderer running **in process**,
+because a spawned batch binary has no `RenderContext` to snapshot.
 
 `nsi-ffi-wrap`'s `output` feature is the meeting point, and it is
 already Rust on both sides. An application creates an `outputdriver`
@@ -34,7 +44,7 @@ recorded below.
 | The channel names come from the image, not a guess | **Covered** | MoonRay names channels after the ɴsɪ output layer — `Ci.R`, `Ci.G`, `Ci.B` for a beauty pass with no alpha. A reader insisting on `R`,`G`,`B`,`A` finds *no layer at all*, which is what the first version did | `display::deliver_file` reads all channels of the first valid layer and builds the `PixelFormat` from their names | -- |
 | A driver that writes a file is left alone | **Covered** | `display.rs` — `Callbacks::of` returns `None` for a node carrying no callback references | `display::tests::a_file_driver_has_no_callbacks` | -- |
 | A malformed bucket is refused before the closure | **Covered** | `Callbacks::write` checks `pixels.len()` against `x.len() * y.len() * channels()`; an over-read would otherwise happen inside the application's code | `display::tests::a_short_bucket_is_refused` | -- |
-| Pixels arrive *while* the render runs | Open | `RenderContext::snapshotDelta` plus `ActivePixels`, and `isFrameReadyForDisplay` / `areCoarsePassesComplete`, are what a converging viewport reads | None — batch MoonRay produces one finished image, so one bucket covering the frame is delivered from the file it wrote | The in-process `RenderContext` (`002` `R1`–`R3`). `T5.3` |
+| Pixels arrive *while* the render runs | Open | MoonRay supplies this already, pull-shaped: `RenderMode::PROGRESSIVE` (`research.md` F5) with `snapshotDelta` plus `ActivePixels`, paced by `isFrameReadyForDisplay` / `areCoarsePassesComplete`. Names read from `rndr/RenderContext.h` on a MoonRay built here; that tree is gone with the container, so re-check them against a fresh build before writing code against them | None — this backend spawns a batch binary, which has no `RenderContext` to snapshot, so one bucket covering the frame is delivered from the file it wrote | The in-process `RenderContext` (`002` `R1`–`R3`), then a snapshot loop feeding `callback.write`. **No MoonRay-side change.** `T5.3` |
 | A driver reached through `dlopen` gets pixels | Open | A `Box<dyn FnWrite>` is a trait object whose vtable belongs to the compilation that made it | None | Register through `DspyRegisterDriver` and deliver over the `extern "C"` entry points instead. `T5.2` |
 | A driver that says stop, stops | Open | `Error::Stop` is what a closure returns to abort a render | None — `deliver_file` discards the returned `Error`, which is harmless for one final bucket and wrong for a progressive one | Honour the return value once delivery is progressive. `T5.3` |
 

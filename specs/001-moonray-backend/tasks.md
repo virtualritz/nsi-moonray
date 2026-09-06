@@ -105,9 +105,14 @@ Rust on both sides, so **no ndspy marshalling is involved**.
       frame, read back off the file MoonRay wrote: the application sees
       a finished render rather than a converging one, and a closure
       returning `Error::Stop` is ignored because there is nothing left
-      to stop. `snapshotDelta` against a live `RenderContext` is the
-      real thing; it needs the in-process renderer, so it lives with
-      [`002`](../002-interactive-updates/tasks.md).
+      to stop. **Not a MoonRay limitation** -- it renders progressively
+      already (`research.md` F5), it just wants to be *pulled*
+      (`snapshotDelta` + `ActivePixels`) where ɴsɪ pushes. The adapter
+      is a snapshot loop on this side; what it needs is a
+      `RenderContext` to snapshot, which a spawned batch binary does
+      not have. So this waits on
+      [`002`](../002-interactive-updates/tasks.md) `R1`-`R3` and on
+      nothing upstream.
 
 ## Needs MoonRay Installed
 

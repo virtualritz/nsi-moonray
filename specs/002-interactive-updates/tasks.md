@@ -31,7 +31,11 @@ Nothing built. Ordered so that each step is checkable on its own.
       `snapshotDelta` against a live `RenderContext` and its
       `ActivePixels`, instead of one bucket read back off the file a
       batch render wrote — and honouring a closure that answers
-      `Error::Stop`, which today has nothing left to stop. `T5.3`.
+      `Error::Stop`, which today has nothing left to stop. MoonRay
+      already renders progressively; the only reason this backend
+      cannot follow along is that it *spawns* the renderer, and a
+      separate process has no `RenderContext` to snapshot. `R1` is the
+      unblock. `T5.3`.
 
 ## Incremental Apply
 
