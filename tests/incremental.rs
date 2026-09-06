@@ -604,3 +604,61 @@ fn adding_geometry_shows_up_in_the_cost_counters() {
          counters cannot support `I5`: {before:?} then {after:?}"
     );
 }
+
+/// **`I2`.** Turning geometry off, the cheap way.
+///
+/// ɴsɪ hides a shape by severing its `objects` connection. That could
+/// become a `Layer` edit or a deleted object; `research.md` F3 says it
+/// should become a **visibility** change instead, because MoonRay
+/// declares every `visible_*` attribute `FLAGS_GEOM_RELOAD_BVH_ONLY` —
+/// one cost tier cheaper, for the same image.
+///
+/// Keeping the shape in the scene and turning it off is also what keeps
+/// this a *narrow* edit: dropping it from the `GeometrySet` and the
+/// `Layer` would be a change of membership, which forces a full
+/// re-apply.
+#[test]
+fn disconnecting_a_shape_turns_it_off_without_a_rebuild() {
+    use nsi_moonray::session::Session;
+
+    let dso = dso_path();
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (64usize, 48usize);
+    let mut session = Session::new(scene(width as i32, height as i32), &dso)
+        .expect("an interactive render");
+    session.wait();
+    let before = session.render().snapshot().expect("a frame").2;
+
+    // Sever the transform's connection to `.root`, which is how an
+    // application hides a layer.
+    session
+        .scene_mut()
+        .disconnect("xform", None, ".root", "objects")
+        .expect("a recordable edit");
+
+    let rebuilt = session.synchronize();
+    session.wait();
+    let after = session.render().snapshot().expect("a frame").2;
+
+    let centre = width / 2;
+    assert!(
+        column(&before, width, height, centre) > 0.0,
+        "the quad should start visible"
+    );
+    assert!(
+        column(&after, width, height, centre)
+            < column(&before, width, height, centre) * 0.5,
+        "the quad should be gone: {} then {}",
+        column(&before, width, height, centre),
+        column(&after, width, height, centre)
+    );
+
+    assert!(
+        !rebuilt,
+        "hiding a shape must not force a whole-scene re-apply -- that \
+         is the difference between a BVH rebuild and a re-tessellation"
+    );
+}

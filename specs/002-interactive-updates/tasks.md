@@ -82,8 +82,16 @@ whether it embeds this crate or `dlopen`s it.
       across -- two tests asserted it was and both failed. See
       `research.md` F6; it is still called, and nothing claims more
       than that.
-- [ ] I2 Geometry off through **visibility**, not a `Layer` edit or a
+- [x] I2 Geometry off through **visibility**, not a `Layer` edit or a
       delete: `research.md` F3 says that is one cost tier cheaper.
+      All nine `visible_*` attributes, read from `Geometry.cc` --
+      setting only `visible_in_camera` leaves a shape casting shadows
+      and appearing in reflections, which reads as a lighting bug.
+      `disconnecting_a_shape_turns_it_off_without_a_rebuild`.
+      **This found a real bug**: the flush walks every recorded node
+      rather than only the reachable ones, so a shape disconnected from
+      `.root` went on rendering, at identity. Correct scene, successful
+      render, shape that should be gone sitting at the origin.
 - [~] I3 A moved transform. `a_session_moves_a_shape` renders the
       quad in its new place through one synchronise, and
       `apply_affected` re-sends only what upstream's `Affected` named.

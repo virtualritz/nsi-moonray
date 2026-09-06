@@ -241,6 +241,16 @@ says so in its own doc. This backend calls none of it.
 - [ ] T6.6 Render an instanced scene. The mapping is asserted as text;
       what it looks like is not. This is also what settles `T6.2`.
 
+## Cost Of The Choices Above
+
+- [ ] T7.1 A detached shape is emitted and turned off rather than left
+      out, so the first flush hands MoonRay geometry it will never
+      draw -- tessellated, and in the accelerator. Right for an
+      interactive session, where it makes a hide an attribute edge
+      rather than a structural one; waste for a batch render that will
+      never show it. The flush knows which it is doing only if it is
+      told, so this wants a flag rather than a guess.
+
 ## Not Now
 
 - [ ] TN.1 Progressive rendering. MoonRay has `PROGRESSIVE`,

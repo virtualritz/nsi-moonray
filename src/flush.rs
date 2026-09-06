@@ -91,6 +91,28 @@ const LIGHT_SET: &str = "/nsi/lights";
 /// shaded scene from rendering as MoonRay's untextured default.
 const MATERIAL: &str = "UsdPreviewSurface";
 
+/// Every way MoonRay can see a piece of geometry.
+///
+/// Read from `scene_rdl2/lib/scene/rdl2/Geometry.cc` rather than
+/// guessed: setting only `visible_in_camera` leaves a shape casting
+/// shadows and appearing in reflections, which looks like a lighting
+/// bug rather than a visibility one.
+///
+/// All nine are declared `FLAGS_GEOM_RELOAD_BVH_ONLY` (`002`
+/// `research.md` F3), which is the point -- turning geometry off this
+/// way costs an accelerator rebuild rather than a re-tessellation.
+const VISIBILITY: [&str; 9] = [
+    "visible_in_camera",
+    "visible_shadow",
+    "visible_diffuse_reflection",
+    "visible_diffuse_transmission",
+    "visible_glossy_reflection",
+    "visible_glossy_transmission",
+    "visible_mirror_reflection",
+    "visible_mirror_transmission",
+    "visible_volume",
+];
+
 /// `PerspectiveCamera`'s default film-back width in millimetres, which
 /// the focal length is derived against.
 const FILM_WIDTH_APERTURE: f32 = 24.0;
@@ -153,12 +175,20 @@ pub fn flush(scene: &Scene) -> Flushed {
     for (handle, node) in scene.nodes() {
         match node.node_type.as_str() {
             "mesh" | "subdivisionmesh" => {
-                objects.push(mesh(
+                let shape = mesh(
                     scene,
                     handle,
                     prototypes.get(handle).map(String::as_str),
                     &mut flushed,
-                ));
+                );
+                // A prototype does not reach `.root` and is not
+                // detached: its instancer is what places it.
+                let placed = prototypes.contains_key(handle);
+                objects.push(if !placed && detached(scene, handle) {
+                    hidden(shape)
+                } else {
+                    shape
+                });
                 geometries.push(Reference::new(MESH, handle));
 
                 // Every mesh gets a row, bound or not: MoonRay renders
@@ -183,7 +213,11 @@ pub fn flush(scene: &Scene) -> Flushed {
 
             "instances" => {
                 if let Some(object) = instancer(scene, handle, &mut flushed) {
-                    objects.push(object);
+                    objects.push(if detached(scene, handle) {
+                        hidden(object)
+                    } else {
+                        object
+                    });
                     geometries.push(Reference::new(INSTANCER, handle));
                     // An instancer needs a `Layer` row like any other
                     // geometry: MoonRay renders what the `Layer` names,
@@ -539,6 +573,45 @@ fn instancer(
 /// which has one matrix per instance and none of its own. Each of those
 /// is reported and the object is left where it is, because ɴsɪ always
 /// returns an image.
+/// Turn a shape off, every way MoonRay can see one.
+///
+/// **ɴsɪ turns geometry off by severing its `objects` connection**, and
+/// that is what an application does when a layer is hidden. The flush
+/// walks every recorded node rather than only the reachable ones, so
+/// without this a detached shape keeps rendering -- and at identity,
+/// since `world_transform` refuses for it. It is the quietest kind of
+/// wrong: the scene is correct, the render succeeds, and a shape that
+/// should be gone is sitting at the origin.
+///
+/// Turned off rather than left out on purpose (`002` `research.md`
+/// F3). Omitting it would make an interactive disconnect a change of
+/// *membership* -- the `GeometrySet` and the `Layer` -- which is a
+/// structural edit and forces a full re-apply. Writing the visibility
+/// flags instead keeps the scene's shape constant, so the same edit is
+/// nine attribute writes on an object MoonRay already has, and costs
+/// an accelerator rebuild rather than a re-tessellation.
+///
+/// The cost of that choice is a first flush that hands MoonRay
+/// geometry it will never draw. `T7.1`.
+fn hidden(object: Object) -> Object {
+    VISIBILITY.iter().fold(object, |object, attribute| {
+        object.set(*attribute, Value::Bool(false))
+    })
+}
+
+/// Whether a node reaches `.root`, and so is in the scene at all.
+///
+/// A prototype under an `instances` node is *in* the scene without
+/// reaching `.root` directly -- upstream answers `Instanced` rather
+/// than `Detached` for it, which is the distinction that keeps a crowd
+/// from being hidden wholesale.
+fn detached(scene: &Scene, handle: &str) -> bool {
+    matches!(
+        scene.world_transform(handle),
+        Err(nsi_intermediate::ResolveError::Detached { .. })
+    )
+}
+
 fn with_transform(
     object: Object,
     scene: &Scene,
@@ -1539,6 +1612,45 @@ mod tests {
               x, 0.0, 0.0, 1.0,
         ];
         matrix
+    }
+
+    /// **A shape disconnected from `.root` is not in the scene.**
+    ///
+    /// ɴsɪ's way of turning geometry off is to sever its `objects`
+    /// connection, and it is what an application does when a layer is
+    /// hidden. The flush walks every recorded node rather than only
+    /// the reachable ones, so without this a detached shape keeps
+    /// rendering -- and at identity, since `world_transform` refuses
+    /// for it.
+    #[test]
+    fn a_detached_shape_is_not_rendered() {
+        let mut scene = triangle();
+        scene
+            .disconnect("tri", None, ".root", "objects")
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        // It keeps its row and its place in the set, and is turned
+        // *off*: that keeps the scene's shape constant, so an
+        // interactive disconnect is an attribute edit rather than a
+        // change of membership. `002` `research.md` F3.
+        assert!(rdla.contains("[\"visible_in_camera\"] = false"), "{rdla}");
+        assert!(rdla.contains("[\"visible_shadow\"] = false"), "{rdla}");
+        assert!(
+            rdla.contains("[\"visible_mirror_reflection\"] = false"),
+            "every way of seeing it must be off, or it casts shadows \
+             and appears in reflections -- which reads as a lighting \
+             bug, not a visibility one\n{rdla}"
+        );
+    }
+
+    /// A shape that *is* connected is not turned off.
+    #[test]
+    fn a_connected_shape_keeps_its_visibility() {
+        let rdla = flush(&triangle()).to_rdla();
+        assert!(!rdla.contains("visible_in_camera"), "{rdla}");
     }
 
     /// A scene with no camera still gets one.
