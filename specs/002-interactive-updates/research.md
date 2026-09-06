@@ -264,6 +264,27 @@ it is the measurement that is not there. The likely cause is that the
 timers are gated on stats logging a library consumer does not enable,
 but that was not chased down.
 
+Three things were tried and ruled out:
+
+- **A subdivision surface** rather than a polygon mesh, in case
+  polygons never reach `GeometryManager::tessellate`. No change.
+- **`log_info` on the scene variables**, in case the timers are gated
+  on stats logging. No change -- and note that what *is* gated on the
+  log flags is `reportGeometryTessellationTime`, the reporting, not
+  the accumulation (`RenderContext.cc:2006`).
+- **Checking the shape actually arrived.** It does: the left of frame
+  goes from `0` to `11.2` when the second shape is added, so the
+  incremental path is correct and it is only the measurement that is
+  missing. This was worth checking rather than assuming -- the first
+  version of the check asked whether the left column was non-zero,
+  which the environment light satisfies on its own.
+
+The next thing to look at is `RenderContext.cc:2001`: `loadGeometries`
+-- which is where the stats are copied across from the
+`GeometryManager` -- runs only `if (geomChangeFlag != ChangeFlag::NONE)`.
+Even the *first* frame reports `load_procedurals: 0.0` here, so
+something more basic than the incremental path is not wiring these up.
+
 `Render::cost` is kept, because the fields are real and the accessor is
 right. What is *not* kept is an assertion built on it: a test saying "a
 shader edit costs no geometry work" would pass because nothing ever

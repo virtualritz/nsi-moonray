@@ -551,6 +551,7 @@ fn adding_geometry_shows_up_in_the_cost_counters() {
     session.wait();
 
     let before = session.render().cost().expect("cost counters");
+    let before_pixels = session.render().snapshot().expect("a frame").2;
 
     let nsi = session.scene_mut();
     nsi.create("second", "mesh").unwrap();
@@ -585,9 +586,15 @@ fn adding_geometry_shows_up_in_the_cost_counters() {
     // The shape does arrive -- this part passes. It is the counters
     // that do not move.
     let pixels = session.render().snapshot().expect("a frame").2;
+    let (before_left, after_left) = (
+        column(&before_pixels, 64, 48, 8),
+        column(&pixels, 64, 48, 8),
+    );
+    eprintln!("left column {before_left} -> {after_left}");
     assert!(
-        column(&pixels, 64, 48, 8) > 0.0,
-        "the second shape should be rendering on the left"
+        after_left > before_left * 1.1,
+        "the second shape must brighten the left of frame; \
+         {before_left} -> {after_left}"
     );
 
     let after = session.render().cost().expect("cost counters");
