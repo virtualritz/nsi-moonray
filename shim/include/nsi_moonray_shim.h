@@ -170,8 +170,23 @@ int nmr_context_write_ascii(NmrContext* context, const char* path);
 
 typedef struct NmrRender NmrRender;
 
-// A render context. `threads` of 0 means every core.
-NmrRender* nmr_render_new(const char* dso_path, unsigned threads);
+// How the frame is rendered. `moonray/rendering/rndr/Types.h`.
+//
+// `BATCH` renders each tile to completion before moving on, which is
+// what a file-writing render wants and what makes a viewport look
+// frozen. `PROGRESSIVE` puts samples up as they arrive, which is what
+// a snapshot loop is for.
+#define NMR_MODE_BATCH 0
+#define NMR_MODE_PROGRESSIVE 1
+// Stops path tracing and renders a simplified frame -- something on
+// screen immediately, then converge.
+#define NMR_MODE_PROGRESSIVE_FAST 2
+// A new frame every n milliseconds, with no refinement between.
+#define NMR_MODE_REALTIME 3
+
+// A render context. `threads` of 0 means every core, `mode` one of the
+// `NMR_MODE_*` above.
+NmrRender* nmr_render_new(const char* dso_path, unsigned threads, int mode);
 void nmr_render_free(NmrRender* render);
 
 // The last thing MoonRay complained about, or null.
@@ -196,6 +211,12 @@ int nmr_render_stop(NmrRender* render);
 // nothing more coming.
 int nmr_render_is_ready_for_display(const NmrRender* render);
 int nmr_render_is_frame_complete(const NmrRender* render);
+
+// Whether the coarse passes are done -- the point at which a
+// progressive frame stops looking blocky and starts refining. A
+// snapshot loop uses this to decide when the first frame is worth
+// showing, ahead of `frame_complete`.
+int nmr_render_are_coarse_passes_complete(const NmrRender* render);
 
 // The frame's dimensions, as the renderer resolved them -- which is
 // not necessarily what the scene asked for, since `res` scales it.

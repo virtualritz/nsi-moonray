@@ -101,18 +101,24 @@ Rust on both sides, so **no ndspy marshalling is involved**.
       entry points `DspyRegisterDriver` hands over -- already the
       twelfth symbol this crate exports, so the mechanism is present
       and only the delivery path is missing.
-- [ ] T5.3 **Progressive delivery.** Today one bucket covering the
-      frame, read back off the file MoonRay wrote: the application sees
-      a finished render rather than a converging one, and a closure
-      returning `Error::Stop` is ignored because there is nothing left
-      to stop. **Not a MoonRay limitation** -- it renders progressively
-      already (`research.md` F5), it just wants to be *pulled*
-      (`snapshotDelta` + `ActivePixels`) where ɴsɪ pushes. The adapter
-      is a snapshot loop on this side; what it needs is a
-      `RenderContext` to snapshot, which a spawned batch binary does
-      not have. So this waits on
-      [`002`](../002-interactive-updates/tasks.md) `R1`-`R3` and on
-      nothing upstream.
+- [x] T5.3 **Progressive delivery.** `src/stream.rs`: a snapshot loop
+      paced by `areCoarsePassesComplete` and `isFrameComplete`, giving
+      each snapshot to `callback.write` and honouring a closure that
+      answers `Error::Stop` -- which the file stopgap could not, since
+      by then there was nothing left to stop. Six buckets for a frame
+      converging in a third of a second, on the machine this was
+      written on.
+      It was never a MoonRay limitation: it renders progressively
+      already (`research.md` F5) and wants to be *pulled* where ɴsɪ
+      pushes. The only blocker was spawning, since a separate process
+      has no `RenderContext` to snapshot.
+- [ ] T5.3a **A bucket is the whole frame, not a tile.**
+      `snapshotRenderBuffer` untiles, so the rectangle that is actually
+      *new* is not something the loop can name -- and naming a
+      sub-rectangle it has not verified would be a lie an application
+      would draw. `snapshotDelta` with its `ActivePixels` is what makes
+      a real sub-rectangle possible, and it is worth having for a large
+      frame, or for one crossing a network.
 
 ## Needs MoonRay Installed
 

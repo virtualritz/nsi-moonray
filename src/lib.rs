@@ -59,6 +59,11 @@ pub mod flush;
 #[cfg(feature = "rdl2")]
 pub mod rdl2;
 pub mod render;
+// The snapshot loop that turns a converging MoonRay frame into an ɴsɪ
+// output driver's callbacks. Needs a live `RenderContext`, so it needs
+// MoonRay linked.
+#[cfg(all(feature = "rdl2", moonray))]
+pub mod stream;
 pub mod value;
 
 pub use document::{Assignment, Body, Document, Object};

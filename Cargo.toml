@@ -77,6 +77,8 @@ nsi-ffi-wrap = { path = "../nsi/crates/nsi-ffi-wrap", features = ["output"] }
 # Loads the `cdylib` in `tests/dropin.rs` the way `nsi-ffi-wrap` loads a
 # renderer: by `dlopen` and by symbol.
 libloading = "0.8"
+# For the ɴsɪ types the in-process tests build arguments with.
+nsi-trait = { path = "../nsi/crates/nsi-trait" }
 # For building `OwnedArg` values in `tests/render.rs`; the library
 # itself already depends on it.
 nsi-intermediate = { path = "../nsi/crates/nsi-intermediate" }

@@ -25,6 +25,37 @@
 use super::{Context, Error, ffi, result};
 use std::ffi::CString;
 
+/// How the frame is rendered.
+///
+/// From `moonray/rendering/rndr/Types.h`. Not a quality setting: it
+/// decides whether a snapshot part way through shows anything useful.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Each tile to completion before moving on. What a file-writing
+    /// render wants, and what makes a viewport look frozen until the
+    /// end.
+    #[default]
+    Batch,
+    /// Samples up as they arrive. What a snapshot loop is for.
+    Progressive,
+    /// Stops path tracing and renders a simplified frame -- something
+    /// on screen immediately, then converge.
+    ProgressiveFast,
+    /// A new frame every n milliseconds, no refinement between.
+    Realtime,
+}
+
+impl Mode {
+    fn code(self) -> std::ffi::c_int {
+        match self {
+            Self::Batch => 0,
+            Self::Progressive => 1,
+            Self::ProgressiveFast => 2,
+            Self::Realtime => 3,
+        }
+    }
+}
+
 /// A MoonRay renderer.
 pub struct Render {
     raw: *mut ffi::NmrRender,
@@ -50,12 +81,18 @@ impl Render {
     /// share what one is using, and the failure is an abort inside the
     /// allocator rather than anything diagnosable. Sequential use is
     /// fine: drop one and make the next.
-    pub fn new(dso_path: Option<&str>, threads: Option<u32>) -> Option<Self> {
+    pub fn new(
+        dso_path: Option<&str>,
+        threads: Option<u32>,
+        mode: Mode,
+    ) -> Option<Self> {
         let path = dso_path.and_then(|path| CString::new(path).ok());
         let pointer = path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
 
         // SAFETY: a valid NUL-terminated string or null.
-        let raw = unsafe { ffi::nmr_render_new(pointer, threads.unwrap_or(0)) };
+        let raw = unsafe {
+            ffi::nmr_render_new(pointer, threads.unwrap_or(0), mode.code())
+        };
         (!raw.is_null()).then_some(Self { raw })
     }
 
@@ -97,6 +134,16 @@ impl Render {
     pub fn ready_for_display(&self) -> bool {
         // SAFETY: a live renderer.
         unsafe { ffi::nmr_render_is_ready_for_display(self.raw) != 0 }
+    }
+
+    /// Whether the coarse passes are done.
+    ///
+    /// The point at which a progressive frame stops looking blocky and
+    /// starts refining -- when a viewport's first frame is worth
+    /// showing, well before it is complete.
+    pub fn coarse_passes_complete(&self) -> bool {
+        // SAFETY: a live renderer.
+        unsafe { ffi::nmr_render_are_coarse_passes_complete(self.raw) != 0 }
     }
 
     /// Whether nothing more is coming.

@@ -261,6 +261,7 @@ unsafe extern "C" {
     pub fn nmr_render_new(
         dso_path: *const c_char,
         threads: u32,
+        mode: c_int,
     ) -> *mut NmrRender;
     pub fn nmr_render_free(render: *mut NmrRender);
     pub fn nmr_render_error(render: *const NmrRender) -> *const c_char;
@@ -269,6 +270,9 @@ unsafe extern "C" {
     pub fn nmr_render_start(render: *mut NmrRender) -> c_int;
     pub fn nmr_render_stop(render: *mut NmrRender) -> c_int;
     pub fn nmr_render_is_ready_for_display(render: *const NmrRender) -> c_int;
+    pub fn nmr_render_are_coarse_passes_complete(
+        render: *const NmrRender,
+    ) -> c_int;
     pub fn nmr_render_is_frame_complete(render: *const NmrRender) -> c_int;
     pub fn nmr_render_resolution(
         render: *const NmrRender,

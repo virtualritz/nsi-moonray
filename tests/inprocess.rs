@@ -35,7 +35,9 @@ fn renderer(dso: &str) -> (std::sync::MutexGuard<'static, ()>, Render) {
     let guard = ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let render = Render::new(Some(dso), Some(2)).expect("a renderer");
+    let render =
+        Render::new(Some(dso), Some(2), nsi_moonray::rdl2::Mode::Progressive)
+            .expect("a renderer");
     (guard, render)
 }
 
@@ -215,4 +217,162 @@ fn a_frame_can_be_snapshotted_while_it_converges() {
     assert_eq!(pixels.len(), (width * height * 4) as usize);
 
     render.stop().expect("the frame stops");
+}
+
+/// **`T5.3`.** A converging render reaching an application's own
+/// closures — the thing spawning a process made impossible.
+///
+/// No file is written and no ndspy struct is marshalled: MoonRay's
+/// sample buffer and the application's `Fn` are a copy apart.
+#[test]
+fn a_converging_render_streams_to_the_applications_closures() {
+    use nsi_ffi_wrap::{
+        argument::CallbackPtr,
+        output::{Error, PixelFormat, WriteCallback},
+    };
+    use nsi_intermediate::HostPtr;
+    use nsi_moonray::stream::{Stopped, stream};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+
+    let buckets = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&buckets);
+    let last = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let seen = Arc::clone(&last);
+
+    let write = WriteCallback::<f32>::new(
+        move |_name,
+              _width,
+              _height,
+              _x0,
+              _x1,
+              _y0,
+              _y1,
+              _format: &PixelFormat,
+              pixels: &[f32]| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            *seen.lock().expect("not poisoned") = pixels.to_vec();
+            Error::None
+        },
+    );
+
+    let (width, height) = (64i32, 48i32);
+    let (_guard, render) = renderer(&dso);
+
+    let context = render.scene().expect("the renderer's own scene");
+    let mut nsi = scene(width, height);
+
+    // The application's driver, exactly as an ɴsɪ consumer writes it.
+    nsi.set_attribute(
+        "driver",
+        vec![OwnedArg::new(
+            "callback.write",
+            Type::Reference,
+            1,
+            0,
+            OwnedData::Reference(vec![HostPtr(write.to_ptr())]),
+        )],
+    )
+    .unwrap();
+
+    let flushed = flush(&nsi);
+    apply(&flushed.document, &context);
+
+    let callbacks = nsi_moonray::display::Callbacks::of(&nsi, "driver")
+        .expect("the callback was recorded");
+
+    render.initialize().expect("render prep");
+    render.start().expect("the frame starts");
+
+    let outcome = stream(
+        &render,
+        &callbacks,
+        "driver",
+        Some(std::time::Duration::from_secs(120)),
+    )
+    .expect("the loop runs");
+
+    assert_eq!(outcome, Stopped::Complete, "the frame should finish");
+    // Six on the machine this was written on: the loop polls every
+    // 50ms and this frame converges in about a third of a second. The
+    // *count* is not asserted because it is a property of the host, not
+    // of the code -- a fast enough machine could finish inside one
+    // poll. That progressive delivery happens at all is what
+    // `a_frame_can_be_snapshotted_while_it_converges` pins down.
+    let count = buckets.load(Ordering::SeqCst);
+    assert!(count > 0, "the closure received nothing");
+
+    let pixels = last.lock().expect("not poisoned");
+    assert_eq!(pixels.len(), (width * height * 4) as usize);
+
+    let centre =
+        ((height as usize / 2) * width as usize + width as usize / 2) * 4;
+    assert!(
+        pixels[centre..centre + 3].iter().any(|value| *value > 0.0),
+        "the closure received a black centre of frame"
+    );
+}
+
+/// A closure answering `Error::Stop` stops the render.
+///
+/// What it is for -- a viewport closing, a user cancelling -- and what
+/// the file-delivery stopgap could not honour, because by then there
+/// was nothing left to stop.
+#[test]
+fn a_callback_that_says_stop_stops_the_render() {
+    use nsi_ffi_wrap::{
+        argument::CallbackPtr,
+        output::{Error, PixelFormat, WriteCallback},
+    };
+    use nsi_intermediate::HostPtr;
+    use nsi_moonray::stream::{Stopped, stream};
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+
+    let write = WriteCallback::<f32>::new(
+        |_name,
+         _w,
+         _h,
+         _x0,
+         _x1,
+         _y0,
+         _y1,
+         _format: &PixelFormat,
+         _pixels: &[f32]| Error::Stop,
+    );
+
+    let (_guard, render) = renderer(&dso);
+    let context = render.scene().expect("a scene");
+    let mut nsi = scene(64, 48);
+    nsi.set_attribute(
+        "driver",
+        vec![OwnedArg::new(
+            "callback.write",
+            Type::Reference,
+            1,
+            0,
+            OwnedData::Reference(vec![HostPtr(write.to_ptr())]),
+        )],
+    )
+    .unwrap();
+
+    apply(&flush(&nsi).document, &context);
+    let callbacks =
+        nsi_moonray::display::Callbacks::of(&nsi, "driver").expect("recorded");
+
+    render.initialize().expect("render prep");
+    render.start().expect("the frame starts");
+
+    let outcome =
+        stream(&render, &callbacks, "driver", None).expect("the loop runs");
+
+    assert_eq!(outcome, Stopped::ByCallback);
 }

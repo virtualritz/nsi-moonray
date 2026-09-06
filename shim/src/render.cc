@@ -94,7 +94,25 @@ int guarded(NmrRender* render, Body body)
 
 extern "C" {
 
-NmrRender* nmr_render_new(const char* dso_path, unsigned threads)
+namespace {
+
+rndr::RenderMode mode_of(int mode)
+{
+    switch (mode) {
+    case NMR_MODE_PROGRESSIVE:
+        return rndr::RenderMode::PROGRESSIVE;
+    case NMR_MODE_PROGRESSIVE_FAST:
+        return rndr::RenderMode::PROGRESSIVE_FAST;
+    case NMR_MODE_REALTIME:
+        return rndr::RenderMode::REALTIME;
+    default:
+        return rndr::RenderMode::BATCH;
+    }
+}
+
+} // namespace
+
+NmrRender* nmr_render_new(const char* dso_path, unsigned threads, int mode)
 {
     bool expected = false;
     if (!renderer_live.compare_exchange_strong(expected, true)) {
@@ -114,6 +132,9 @@ NmrRender* nmr_render_new(const char* dso_path, unsigned threads)
         // in memory. `RenderContext` is happy with an empty list and
         // gives us its own `SceneContext` to fill.
         render->options.setSceneFiles({});
+        // Set before `initGlobalDriver`: it reads the mode to decide
+        // whether to size the thread-local pools for realtime.
+        render->options.setRenderMode(mode_of(mode));
 
         ensure_global_driver(render->options);
 
@@ -214,6 +235,18 @@ int nmr_render_is_ready_for_display(const NmrRender* render)
     }
     try {
         return render->context->isFrameReadyForDisplay() ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+int nmr_render_are_coarse_passes_complete(const NmrRender* render)
+{
+    if (render == nullptr || !render->context) {
+        return 0;
+    }
+    try {
+        return render->context->areCoarsePassesComplete() ? 1 : 0;
     } catch (...) {
         return 0;
     }

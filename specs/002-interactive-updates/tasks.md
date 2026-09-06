@@ -48,15 +48,14 @@ Nothing built. Ordered so that each step is checkable on its own.
       reference to its own, so a scene meant to be rendered is built
       inside the renderer rather than built separately and handed
       across.
-- [ ] R2 Progressive modes, and the render running while the
-      application carries on. `startFrame` already returns once render
-      *prep* is done, with the frame converging behind it --
-      `a_frame_can_be_snapshotted_while_it_converges` shows a snapshot
-      answering mid-flight. What is left is choosing
-      `RenderMode::PROGRESSIVE` rather than `BATCH`, and pacing with
-      `isFrameReadyForDisplay` / `areCoarsePassesComplete`.
-- [ ] R3 Pixels to a registered display driver **as the render
-      converges**. Half of this is already done and is not the hard
+- [x] R2 Progressive modes. `Mode::{Batch, Progressive,
+      ProgressiveFast, Realtime}`, set before `initGlobalDriver`
+      because that reads the mode to size the thread-local pools.
+      `startFrame` returns once render *prep* is done with the frame
+      converging behind it, which
+      `a_frame_can_be_snapshotted_while_it_converges` pins down.
+- [x] R3 Pixels to a registered display driver **as the render
+      converges**. `src/stream.rs`. Half of this is already done and is not the hard
       half: an application's `callback.open`/`write`/`finish` closures
       are reached with no ndspy marshalling at all
       ([`001`'s `display.md`](../001-moonray-backend/contracts/display.md),
