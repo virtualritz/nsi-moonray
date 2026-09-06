@@ -35,9 +35,6 @@ use crate::{
 use nsi_ffi_wrap::output::Error;
 use std::time::{Duration, Instant};
 
-/// MoonRay's render buffer is `PixelBuffer<Vec4f>`.
-const CHANNELS: usize = 4;
-
 /// How long to wait between snapshots.
 ///
 /// Not a frame rate: it is how often the loop asks whether there is
@@ -77,8 +74,9 @@ pub fn stream(
     let (width, height) = render.resolution()?;
     let (width, height) = (width as usize, height as usize);
 
-    // MoonRay's buffer is RGBA float and the names go across as the
-    // channel heuristics expect them.
+    // MoonRay's render buffer is `PixelBuffer<Vec4f>` -- RGBA float per
+    // pixel -- and the names go across lowercased, which is the
+    // spelling the channel heuristics expect.
     let format = pixel_format(&["r", "g", "b", "a"]);
 
     // SAFETY: the caller owns the closures and keeps them alive across

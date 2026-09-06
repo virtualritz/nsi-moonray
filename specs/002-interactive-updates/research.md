@@ -150,3 +150,41 @@ shim refuses a second live renderer rather than leaving the abort
 waiting, and says why. An application that wants two concurrent
 MoonRay renders needs two processes, which is a real constraint on
 what this backend can offer and is better stated than discovered.
+
+## F5: A scene with no camera crashes MoonRay
+
+`RenderContext::initialize` (`rndr/RenderContext.cc:434`):
+
+```cpp
+try {
+    std::vector<const rdl2::Camera*> cameras =
+        mSceneContext->getActiveCameras();
+    initActiveCamera(cameras[0]);
+} catch (scene_rdl2::except::KeyError& e) {
+    ...
+}
+```
+
+`SceneContext::getActiveCameras` returns an **empty vector** when the
+context holds no camera (`SceneContext.cc:245`), and `operator[]` on an
+empty vector is undefined behaviour rather than an exception -- so the
+`catch` wrapped around it never fires. The process dies with a SIGSEGV
+inside `initialize`, and in a renderer loaded by `dlopen` it takes the
+host application down with it.
+
+An ɴsɪ scene with no `perspectivecamera` connected is legal to record
+and an ordinary thing to hand a renderer -- `tests/dropin.rs` builds
+exactly one, being a test of the C entry points rather than of a
+render. So the check belongs on this side of the boundary, ahead of the
+call, and `nmr_render_initialize` refuses such a scene with a message
+instead. The C API then falls back to the spawned binary, which reports
+rather than crashing.
+
+Upstream would fix it with `.at(0)`, or by testing `empty()`. Worth
+sending.
+
+**The general shape is worth remembering**: MoonRay's own entry points
+assume a scene assembled by MoonRay's own front end. A backend feeding
+it scenes built from somewhere else will keep finding these, and each
+one is a crash rather than an error. Guard at the shim, where one check
+protects every caller.

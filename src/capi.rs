@@ -15,18 +15,38 @@
 //!                                   nsi_intermediate::Scene
 //!                                          │  flush
 //!                                          ▼
-//!                                       .rdla ──▶ moonray -in … -out …
+//!                                       Document
+//!                        apply │                 │ to_rdla
+//!                              ▼                 ▼
+//!                   MoonRay, linked          .rdla, a *dump*
+//!                              │                 │
+//!                     snapshot │                 └─▶ moonray -in …
+//!                              ▼                     (the fallback)
+//!                       callback.write
 //! ```
+//!
+//! # Which path a scene takes
+//!
+//! With the `rdl2` feature and MoonRay linked, `NSIRenderControl`
+//! `"start"` renders **in this process**: the scene goes into the
+//! renderer's own `SceneContext`, the frame converges, and each
+//! snapshot reaches the application's `outputdriver` callbacks. No file
+//! is written and no process is spawned.
+//!
+//! It falls back to spawning the `moonray` binary when there is no
+//! renderer to use -- MoonRay's `rdl2dso` not found, or a render
+//! already running, since MoonRay's driver state is global and allows
+//! one at a time. ɴsɪ always returns an image, so an application that
+//! cannot have the fast path still gets its render.
 //!
 //! # What this is not, yet
 //!
-//! A batch renderer behind an interactive interface. `NSIRenderControl`
-//! `"start"` writes the scene and runs MoonRay to completion, so
-//! `"synchronize"`, `"suspend"` and `"resume"` have nothing to act on
-//! and pixels come back as a file rather than through a display driver.
-//! Reaching MoonRay's progressive modes means linking `libmoonray`
-//! instead of spawning it; see `specs/001-moonray-backend/tasks.md`
-//! `T4.4`.
+//! Interactive. The frame is rendered to completion, so
+//! `"synchronize"`, `"suspend"` and `"resume"` still have nothing to
+//! act on -- applying an *edit* to a live scene is
+//! `specs/002-interactive-updates` `I1`-`I6`. The machinery it needs
+//! now exists: a live `SceneContext` to edit and a `RenderContext` to
+//! restart.
 //!
 //! # Safety
 //!
@@ -492,11 +512,23 @@ pub unsafe extern "C" fn NSIRenderControl(
     let arguments = unsafe { arguments(params, nparams) };
     let action = argument_string(&arguments, "action").unwrap_or_default();
 
-    // Only "start" does anything: the render is a batch, so by the time
-    // it returns there is nothing left to wait for, synchronise or
-    // suspend.
+    // Only "start" does anything on the spawned path: the render is a
+    // batch, so by the time it returns there is nothing to wait for,
+    // synchronise or suspend. The linked path answers more of these --
+    // see `render_in_process`.
     if action != "start" {
         return;
+    }
+
+    #[cfg(all(feature = "rdl2", moonray))]
+    {
+        // The linked renderer is the path; spawning is what happens
+        // when MoonRay is not where this expects it.
+        let rendered = with(ctx, |context| render_in_process(&context.scene))
+            .unwrap_or(false);
+        if rendered {
+            return;
+        }
     }
 
     with(ctx, |context| {
@@ -548,6 +580,135 @@ pub unsafe extern "C" fn NSIRenderControl(
             }
         }
     });
+}
+
+/// Render this context in this process, if MoonRay can be reached.
+///
+/// The path an application actually wants: the scene goes straight into
+/// the renderer's own `SceneContext`, the frame converges, and each
+/// snapshot reaches the application's `outputdriver` callbacks. No file
+/// is written and no process is spawned.
+///
+/// Returns `false` when there is no renderer to use -- no `rdl2dso` to
+/// point at, or one already live in this process -- and the caller
+/// falls back to spawning. ɴsɪ always returns an image: an application
+/// that cannot have the fast path should still get its render.
+#[cfg(all(feature = "rdl2", moonray))]
+pub fn render_in_process(scene: &nsi_intermediate::Scene) -> bool {
+    let Some(dso) = moonray_dso_path() else {
+        eprintln!(
+            "nsi-moonray: $NSI_MOONRAY_DSO or $MOONRAY_ROOT names \
+             MoonRay's `rdl2dso`; without it the renderer cannot be used \
+             in process and the scene is handed to the `moonray` binary \
+             instead"
+        );
+        return false;
+    };
+
+    // One renderer per process is MoonRay's own constraint -- its
+    // driver state is global (`002` `research.md` F4) -- so this can
+    // legitimately answer `None` while another render is running.
+    let Some(render) = crate::rdl2::Render::new(
+        Some(&dso),
+        None,
+        crate::rdl2::Mode::Progressive,
+    ) else {
+        eprintln!(
+            "nsi-moonray: a MoonRay render is already running in this \
+             process; this scene goes to the `moonray` binary instead"
+        );
+        return false;
+    };
+
+    let flushed = flush(scene);
+    for limitation in &flushed.limitations {
+        eprintln!("nsi-moonray: {limitation}");
+    }
+
+    // The renderer owns the scene, so this is the context the frame is
+    // rendered from rather than a copy pushed across.
+    let Some(live) = render.scene() else {
+        eprintln!("nsi-moonray: the renderer has no scene context");
+        return false;
+    };
+
+    for line in crate::apply::apply(&flushed.document, &live) {
+        eprintln!("nsi-moonray: {line}");
+    }
+
+    if let Err(error) = render.initialize() {
+        // Not a reason to give up on the scene: fall back to the
+        // spawned binary, which reports rather than crashes. A scene
+        // with no camera is the common way here (see the shim).
+        eprintln!(
+            "nsi-moonray: render prep failed in process ({}); handing \
+             the scene to the `moonray` binary instead",
+            render.error().unwrap_or_else(|| error.to_string())
+        );
+        return false;
+    }
+    if let Err(error) = render.start() {
+        eprintln!("nsi-moonray: the frame did not start: {error}");
+        return false;
+    }
+
+    let drivers: Vec<(String, Callbacks)> = scene
+        .nodes()
+        .filter(|(_, node)| node.node_type == "outputdriver")
+        .filter_map(|(handle, _)| {
+            Some((handle.clone(), Callbacks::of(scene, handle)?))
+        })
+        .collect();
+
+    match drivers.first() {
+        // An application with a viewport: stream to it.
+        Some((handle, callbacks)) => {
+            if drivers.len() > 1 {
+                eprintln!(
+                    "nsi-moonray: {} output drivers carry callbacks; only \
+                     {handle:?} is streamed to so far",
+                    drivers.len()
+                );
+            }
+            if let Err(error) =
+                crate::stream::stream(&render, callbacks, handle, None)
+            {
+                eprintln!("nsi-moonray: {handle:?} streaming: {error}");
+            }
+        }
+        // No callbacks: a batch render whose outputs are files.
+        // Converge, then stop -- and say the file is not written,
+        // rather than leave someone hunting for it.
+        None => {
+            while !render.frame_complete() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let _ = render.stop();
+            eprintln!(
+                "nsi-moonray: rendered in process, but no `outputdriver` \
+                 carries callbacks and writing the image to a file from \
+                 the linked renderer is not wired up yet, so nothing was \
+                 saved"
+            );
+        }
+    }
+
+    true
+}
+
+/// Where MoonRay's scene classes live.
+///
+/// `$NSI_MOONRAY_DSO` names the directory outright; `$MOONRAY_ROOT`
+/// names an install and `rdl2dso` is found under it.
+#[cfg(all(feature = "rdl2", moonray))]
+fn moonray_dso_path() -> Option<String> {
+    if let Some(path) = std::env::var_os("NSI_MOONRAY_DSO") {
+        return Some(path.to_string_lossy().into_owned());
+    }
+
+    let root = std::env::var_os("MOONRAY_ROOT")?;
+    let path = PathBuf::from(root).join("rdl2dso");
+    path.is_dir().then(|| path.to_string_lossy().into_owned())
 }
 
 /// Where the `.rdla` for a context goes.

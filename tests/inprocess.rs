@@ -376,3 +376,90 @@ fn a_callback_that_says_stop_stops_the_render() {
 
     assert_eq!(outcome, Stopped::ByCallback);
 }
+
+/// **The drop-in path, linked.** An application driving the ɴsɪ C
+/// entry points gets an in-process render and its pixels back, with no
+/// file written and no `moonray` process spawned.
+///
+/// This is what all of `002` is for: the same calls a consumer already
+/// makes against 3Delight, answered by a linked MoonRay.
+#[test]
+fn the_c_api_renders_in_process_and_returns_pixels() {
+    use nsi_ffi_wrap::{
+        argument::CallbackPtr,
+        output::{Error, PixelFormat, WriteCallback},
+    };
+    use nsi_intermediate::HostPtr;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    // SAFETY: single-threaded here, under the renderer lock.
+    unsafe { std::env::set_var("NSI_MOONRAY_DSO", &dso) };
+
+    let buckets = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&buckets);
+    let last = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let seen = Arc::clone(&last);
+
+    let write = WriteCallback::<f32>::new(
+        move |_name,
+              _w,
+              _h,
+              _x0,
+              _x1,
+              _y0,
+              _y1,
+              _format: &PixelFormat,
+              pixels: &[f32]| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            *seen.lock().expect("not poisoned") = pixels.to_vec();
+            Error::None
+        },
+    );
+
+    // The renderer lock, because `NSIRenderControl` makes a `Render`.
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (64i32, 48i32);
+    let mut nsi = scene(width, height);
+    nsi.set_attribute(
+        "driver",
+        vec![OwnedArg::new(
+            "callback.write",
+            Type::Reference,
+            1,
+            0,
+            OwnedData::Reference(vec![HostPtr(write.to_ptr())]),
+        )],
+    )
+    .unwrap();
+
+    // Drive the C entry point over a context holding this scene, the
+    // way `nsi-ffi-wrap` drives a renderer it loaded.
+    assert!(
+        nsi_moonray::capi::render_in_process(&nsi),
+        "the linked renderer should have taken the scene"
+    );
+
+    assert!(
+        buckets.load(Ordering::SeqCst) > 0,
+        "the C API delivered no pixels"
+    );
+
+    let pixels = last.lock().expect("not poisoned");
+    assert_eq!(pixels.len(), (width * height * 4) as usize);
+
+    let centre =
+        ((height as usize / 2) * width as usize + width as usize / 2) * 4;
+    assert!(
+        pixels[centre..centre + 3].iter().any(|value| *value > 0.0),
+        "the C API delivered a black centre of frame"
+    );
+}

@@ -192,6 +192,28 @@ int nmr_render_initialize(NmrRender* render)
         if (render->initialized) {
             return NMR_OK;
         }
+        // **A scene with no camera crashes MoonRay.**
+        // `RenderContext::initialize` does
+        //
+        //     std::vector<const Camera*> cameras = getActiveCameras();
+        //     initActiveCamera(cameras[0]);
+        //
+        // and `operator[]` on an empty vector is undefined behaviour,
+        // not an exception -- so the `catch (KeyError&)` wrapped around
+        // it never fires and the process dies with a SIGSEGV inside
+        // `initialize`. In a renderer loaded by `dlopen` that takes the
+        // host application down with it.
+        //
+        // An ɴsɪ scene with no `perspectivecamera` connected is legal
+        // to record and a perfectly ordinary thing to hand over. So the
+        // check belongs here, ahead of the call.
+        if (render->context->getSceneContext().getActiveCameras().empty()) {
+            render->error =
+                "the scene has no active camera; MoonRay reads "
+                "cameras[0] of an empty list and would crash";
+            return NMR_FAILED;
+        }
+
         std::stringstream messages;
         render->context->initialize(messages);
         render->initialized = true;
