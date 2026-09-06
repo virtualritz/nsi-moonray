@@ -46,10 +46,18 @@
 //!
 //! [`nsi-intermediate`]: https://github.com/virtualritz/nsi
 
+// Applying a `Document` to a live scene, rather than writing it out.
+// Behind the `rdl2` feature: it needs `scene_rdl2` installed, while
+// the emitter, the oracle and the flush are all checked without a
+// renderer and stay that way.
+#[cfg(feature = "rdl2")]
+pub mod apply;
 pub mod capi;
 pub mod display;
 pub mod document;
 pub mod flush;
+#[cfg(feature = "rdl2")]
+pub mod rdl2;
 pub mod render;
 pub mod value;
 

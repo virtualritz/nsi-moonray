@@ -14,6 +14,8 @@ repository = "https://github.com/virtualritz/nsi-moonray/"
 # silently ships `.specify/`, `specs/` and the handoff notes.
 include = [
     "src/**/*",
+    "shim/**/*",
+    "/build.rs",
     "/Cargo.toml",
     "/README.md",
 ]
@@ -22,6 +24,22 @@ include = [
 # `cdylib` so this can be `dlopen`ed as an ɴsɪ renderer -- see
 # `src/capi.rs`; `rlib` so the flush stays usable as a Rust library.
 crate-type = ["rlib", "cdylib"]
+
+[features]
+# Link `scene_rdl2` -- and, with it, build the scene in memory rather
+# than writing a file. Off by default because it needs `scene_rdl2`
+# installed and `$SCENE_RDL2_ROOT` pointing at it, while everything
+# else here -- the emitter, the oracle, the flush -- is checked without
+# a renderer and must stay that way.
+rdl2 = []
+
+[build-dependencies]
+# Builds `shim/src/scene.cc` when the `rdl2` feature is on. Not
+# optional: a build script sees features as `CARGO_FEATURE_*` in the
+# environment, never as a `cfg`, so it compiles either way and has to
+# name what it might use. Build-only, so it costs no runtime
+# dependency.
+cc = "1"
 
 [dependencies]
 # The intermediate representation this backend flushes, overlaid from a
