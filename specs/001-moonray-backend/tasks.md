@@ -193,10 +193,30 @@ The capability that distinguishes this backend.
       siblings; `inprocess::a_deforming_mesh_renders_blurred` counts
       the partially covered columns a smear leaves and a sharp edge
       does not.
-- [ ] T2.4 Velocity-based motion via `velocity_list_0` and
-      `motion_blur_type`, if ɴsɪ carries a velocity attribute. There is
-      no `use velocity` flag; an earlier draft of these specs was wrong
-      about that.
+- [~] T2.4 Velocity-based motion. **MoonRay's side is fully known; ɴsɪ's
+      name is not.** `RdlMesh` declares `velocity_list_0` and
+      `velocity_list_1` (`Vec3fVector`), the first documented as being
+      used "instead of vertex positions from a second motion step", and
+      `CommonAttributes.h` declares `motion_blur_type` with
+      `MotionBlurType::{STATIC, VELOCITY, FRAME_DELTA, ...}` defaulting
+      to `BEST` -- which is why the deformation mapping (`T2.3`) needs
+      no flag: `BEST` picks the two-position path when two positions
+      are what it has. There is no `use velocity` boolean; an earlier
+      draft of these specs was wrong about that.
+      What is missing is **which ɴsɪ attribute carries velocity**.
+      `nsi-intermediate` has no concept of one, and guessing a name is
+      the same failure `T1.3a` refuses: a wrong guess renders
+      plausibly, blurred by the wrong amount, and looks like a shutter
+      setting. Whoever has the spec can finish this in minutes.
+- [x] T6.4 Nested instancing. An `instances` node connected to
+      another's `sourcemodels` works through the same recursion in
+      `fillGenerateList` that stops a prototype drawing on its own --
+      nothing extra to map. `inprocess::instancers_nest` places two
+      copies of a two-copy instancer and counts four runs of lit
+      columns, which one collapsed level would not give.
+      `instance_level` is left unset: its own comment says it adds a
+      shading primitive attribute, not that it is needed for the
+      nesting to work.
 - [x] T2.5 Report, never flatten, a scene with more than two motion
       samples on one attribute. rdl2 has exactly two timesteps.
       `flush::tests::more_than_two_motion_samples_are_reported` for a
@@ -213,8 +233,19 @@ The capability that distinguishes this backend.
       render of the wrong thing. Creases and corners cross too
       (`subdivision.crease*` / `corner*` to `subd_crease_*` /
       `subd_corner_*`), as does `clockwisewinding` to `orientation`.
-- [ ] T3.2 Confirm limit-surface evaluation and view-adaptive
-      tessellation are reached, not bypassed.
+- [x] T3.2 Confirm limit-surface evaluation is reached, not bypassed.
+      `inprocess::subdivision_reaches_the_limit_surface` renders a
+      **cube** as a polygon mesh and as a Catmull-Clark surface and
+      compares coverage: the limit surface rounds inward, so it covers
+      measurably fewer pixels.
+      A cube because the first version used a planar 2x2 grid and both
+      renders covered exactly 3598 pixels -- a planar cage subdivides
+      to itself, and with sharp boundaries the outline is preserved
+      exactly. The subject has to be closed and non-planar for the
+      limit surface to differ at the silhouette.
+      View-adaptive tessellation is a separate question and is not
+      asserted: it would need the tessellation counts at two camera
+      distances.
 
 ## User Story 4: Instancing (P1)
 
@@ -259,9 +290,6 @@ says so in its own doc. This backend calls none of it.
       touches transform blur too and needs its own render.
       Only translation either way; a rotating instance needs the
       decomposed form and `use_rotation_motion_blur`.
-- [ ] T6.4 Nested instancing. MoonRay's `instance_level` goes to `4`
-      and ɴsɪ nests `instances` under `instances`. Confirm the depth
-      maps, and report past four rather than flattening.
 - [x] T6.5 **Assert it is instanced, not expanded.**
       `a_prototype_is_referenced_once_not_expanded` counts the
       prototype's declarations, because a flattened scene renders an

@@ -833,3 +833,229 @@ fn a_deforming_mesh_renders_blurred() {
         partial(&blurred)
     );
 }
+
+/// **`T6.4`.** Instancers nest.
+///
+/// ɴsɪ connects an `instances` node to another's `sourcemodels`, and
+/// MoonRay's `fillGenerateList` walks `references` recursively — so
+/// the nesting works through the same mechanism that stops a prototype
+/// drawing on its own, with nothing extra to map.
+///
+/// Two inner copies placed by two outer instances is four shapes from
+/// one mesh, which is the memory win the whole mapping exists for.
+#[test]
+fn instancers_nest() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (96usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+    nsi.disconnect("quad", None, ".root", "objects").unwrap();
+
+    // One small prototype.
+    nsi.create("proto", "mesh").unwrap();
+    nsi.set_attribute(
+        "proto",
+        vec![
+            arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
+            arg(
+                "P",
+                Type::Point,
+                OwnedData::F32(vec![
+                    -0.4, -0.4, 0.0, 0.4, -0.4, 0.0, 0.4, 0.4, 0.0, -0.4, 0.4,
+                    0.0,
+                ]),
+            ),
+        ],
+    )
+    .unwrap();
+
+    // Inner instancer: two copies, close together.
+    nsi.create("inner", "instances").unwrap();
+    nsi.connect("proto", None, "inner", "sourcemodels").unwrap();
+    let mut inner = instance_at(-0.7, 0.0);
+    inner.extend(instance_at(0.7, 0.0));
+    nsi.set_attribute(
+        "inner",
+        vec![arg(
+            "transformationmatrices",
+            Type::MatrixF64,
+            OwnedData::F64(inner),
+        )],
+    )
+    .unwrap();
+
+    // Outer instancer: two copies of the *inner instancer*, far apart.
+    nsi.create("outer", "instances").unwrap();
+    nsi.connect("outer", None, ".root", "objects").unwrap();
+    nsi.connect("inner", None, "outer", "sourcemodels").unwrap();
+    let mut outer = instance_at(-3.0, -8.0);
+    outer.extend(instance_at(3.0, -8.0));
+    nsi.set_attribute(
+        "outer",
+        vec![arg(
+            "transformationmatrices",
+            Type::MatrixF64,
+            OwnedData::F64(outer),
+        )],
+    )
+    .unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let pixels = session.render().snapshot().expect("a frame").2;
+
+    // Four shapes: two clusters of two. Count the runs of lit columns —
+    // one nesting level would give two, and none would give one.
+    let lit: Vec<bool> = (0..width)
+        .map(|x| column(&pixels, width, height, x) > 0.0)
+        .collect();
+    let clusters = lit
+        .iter()
+        .enumerate()
+        .filter(|(x, on)| **on && (*x == 0 || !lit[x - 1]))
+        .count();
+
+    assert_eq!(
+        clusters, 4,
+        "two outer instances of a two-instance inner instancer is four \
+         shapes; {clusters} run(s) of lit columns were found, which \
+         means the nesting collapsed"
+    );
+}
+
+/// **`T3.2`.** Subdivision reaches the limit surface, not the cage.
+///
+/// `is_subd` being set is asserted as text elsewhere. This is that
+/// MoonRay *acts* on it: a cube's Catmull-Clark limit surface rounds
+/// inward toward a sphere, so the same cage covers measurably fewer
+/// pixels subdivided than as a polygon mesh.
+///
+/// A **cube**, not a flat grid. The first version of this used a
+/// planar 2x2 grid and both renders covered exactly 3598 pixels — a
+/// planar cage subdivides to itself, and with sharp boundaries the
+/// outline is preserved exactly. The subject has to be closed and
+/// non-planar for the limit surface to differ at the silhouette.
+///
+/// The failure this catches is the quiet one — a subdivision surface
+/// rendered as its faceted cage is a perfectly good render of the
+/// wrong thing, and it is what this backend did before
+/// `subdivision.scheme` was understood to be an attribute rather than
+/// a node type.
+#[test]
+fn subdivision_reaches_the_limit_surface() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (96usize, 96usize);
+
+    // A coarse cage: the coarser it is, the further the limit surface
+    // pulls in from it, and the clearer the difference.
+    let cage = |subdivided: bool| {
+        let mut nsi = scene(width as i32, height as i32);
+        nsi.disconnect("quad", None, ".root", "objects").unwrap();
+
+        nsi.create("shape", "mesh").unwrap();
+        // A cube: closed, so the limit surface has no boundary to
+        // pin it to the cage, and it rounds toward a sphere.
+        let c = 1.2f32;
+        let z = -6.0f32;
+        let mut attributes = vec![
+            arg(
+                "nvertices",
+                Type::I32,
+                OwnedData::I32(vec![4, 4, 4, 4, 4, 4]),
+            ),
+            arg(
+                "P.indices",
+                Type::I32,
+                OwnedData::I32(vec![
+                    0, 1, 2, 3, // back
+                    4, 7, 6, 5, // front
+                    0, 4, 5, 1, // bottom
+                    3, 2, 6, 7, // top
+                    0, 3, 7, 4, // left
+                    1, 5, 6, 2, // right
+                ]),
+            ),
+            arg(
+                "P",
+                Type::Point,
+                OwnedData::F32(vec![
+                    -c,
+                    -c,
+                    z - c,
+                    c,
+                    -c,
+                    z - c,
+                    c,
+                    c,
+                    z - c,
+                    -c,
+                    c,
+                    z - c,
+                    -c,
+                    -c,
+                    z + c,
+                    c,
+                    -c,
+                    z + c,
+                    c,
+                    c,
+                    z + c,
+                    -c,
+                    c,
+                    z + c,
+                ]),
+            ),
+        ];
+        if subdivided {
+            attributes.push(OwnedArg::new(
+                "subdivision.scheme",
+                Type::String,
+                1,
+                0,
+                OwnedData::String(vec![b"catmull-clark".to_vec()]),
+            ));
+        }
+        nsi.set_attribute("shape", attributes).unwrap();
+        nsi.connect("shape", None, ".root", "objects").unwrap();
+
+        let mut session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        session.render().snapshot().expect("a frame").2
+    };
+
+    let covered =
+        |pixels: &[f32]| pixels.chunks_exact(4).filter(|p| p[0] > 0.0).count();
+
+    let polygon = covered(&cage(false));
+    let subdivided = covered(&cage(true));
+
+    assert!(polygon > 0, "the polygon cage should render at all");
+    assert!(
+        subdivided < polygon,
+        "a Catmull-Clark limit surface pulls in from its cage, so it \
+         must cover fewer pixels. Equal coverage means the cage was \
+         rendered and `is_subd` was ignored: {polygon} polygon, \
+         {subdivided} subdivided"
+    );
+    assert!(
+        subdivided > polygon / 3,
+        "it should round in, not vanish: {polygon} polygon, \
+         {subdivided} subdivided"
+    );
+}
