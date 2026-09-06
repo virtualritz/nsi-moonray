@@ -280,6 +280,32 @@ macro_rules! tuple {
     };
 }
 
+/// A setter for a vector of scalars.
+///
+/// Separate from [`vector!`] because there is no shape to check: one
+/// element is one value, so every slice length is valid.
+macro_rules! scalar_vector {
+    ($name:ident, $shim:ident, $type:ty) => {
+        pub fn $name(
+            &self,
+            attribute: &str,
+            values: &[$type],
+        ) -> Result<(), Error> {
+            let attribute = Object::name(attribute)?;
+            // SAFETY: the count is the slice's own length, so the shim
+            // reads exactly what is there.
+            result(unsafe {
+                ffi::$shim(
+                    self.object.raw,
+                    attribute.as_ptr(),
+                    values.as_ptr(),
+                    values.len(),
+                )
+            })
+        }
+    };
+}
+
 /// A setter that takes a flat buffer of components.
 macro_rules! vector {
     ($name:ident, $shim:ident, $type:ty, $components:literal) => {
@@ -290,6 +316,8 @@ macro_rules! vector {
             values: &[$type],
         ) -> Result<(), Error> {
             let attribute = Object::name(attribute)?;
+            // A buffer that is not a whole number of elements would
+            // otherwise write the right length and the wrong contents.
             if values.len() % $components != 0 {
                 return Err(Error::BadArgument);
             }
@@ -324,10 +352,10 @@ impl Update<'_> {
     tuple!(set_mat4f, nmr_set_mat4f, f32, 16);
     tuple!(set_mat4d, nmr_set_mat4d, f64, 16);
 
-    vector!(set_int_vector, nmr_set_int_vector, i32, 1);
-    vector!(set_long_vector, nmr_set_long_vector, i64, 1);
-    vector!(set_float_vector, nmr_set_float_vector, f32, 1);
-    vector!(set_double_vector, nmr_set_double_vector, f64, 1);
+    scalar_vector!(set_int_vector, nmr_set_int_vector, i32);
+    scalar_vector!(set_long_vector, nmr_set_long_vector, i64);
+    scalar_vector!(set_float_vector, nmr_set_float_vector, f32);
+    scalar_vector!(set_double_vector, nmr_set_double_vector, f64);
     vector!(set_rgb_vector, nmr_set_rgb_vector, f32, 3);
     vector!(set_vec2f_vector, nmr_set_vec2f_vector, f32, 2);
     vector!(set_vec3f_vector, nmr_set_vec3f_vector, f32, 3);

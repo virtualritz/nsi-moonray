@@ -363,3 +363,139 @@ fn a_created_node_falls_back_and_reports() {
         "the fallback must say why: {report:?}"
     );
 }
+
+/// **The synchronise loop.** What an application's viewport does:
+/// start an interactive render, move something, synchronise, and see
+/// the image change — without rebuilding the scene.
+///
+/// This is the shape the whole of `002` was for, and it is only
+/// possible because MoonRay is linked: a spawned process has no scene
+/// to edit and no frame to restart. `capi` is a thin shim over the
+/// same `Session`, so this is the path an ɴsɪ consumer takes too.
+#[test]
+fn a_session_runs_a_synchronise_loop() {
+    use nsi_ffi_wrap::{
+        argument::CallbackPtr,
+        output::{Error, PixelFormat, WriteCallback},
+    };
+    use nsi_intermediate::HostPtr;
+    use nsi_moonray::session::Session;
+    use std::sync::{Arc, Mutex};
+
+    let dso = dso_path();
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let last = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let seen = Arc::clone(&last);
+    let write = WriteCallback::<f32>::new(
+        move |_name,
+              _w,
+              _h,
+              _x0,
+              _x1,
+              _y0,
+              _y1,
+              _format: &PixelFormat,
+              pixels: &[f32]| {
+            *seen.lock().expect("not poisoned") = pixels.to_vec();
+            Error::None
+        },
+    );
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+    nsi.set_attribute(
+        "driver",
+        vec![OwnedArg::new(
+            "callback.write",
+            Type::Reference,
+            1,
+            0,
+            OwnedData::Reference(vec![HostPtr(write.to_ptr())]),
+        )],
+    )
+    .unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("an interactive render");
+
+    session.wait();
+    let before = last.lock().expect("not poisoned").clone();
+    assert_eq!(before.len(), width * height * 4, "no first frame");
+
+    // The edit: turn the surface green.
+    session
+        .scene_mut()
+        .set_attribute(
+            "surface",
+            vec![arg(
+                "diffuseColor",
+                Type::Color,
+                OwnedData::F32(vec![0.0, 1.0, 0.0]),
+            )],
+        )
+        .unwrap();
+
+    let rebuilt = session.synchronize();
+    assert!(
+        !rebuilt,
+        "a shader parameter must not force a whole-scene re-apply"
+    );
+
+    session.wait();
+    let after = last.lock().expect("not poisoned").clone();
+
+    let [red_before, green_before, _] = channels(&before);
+    let [red_after, green_after, _] = channels(&after);
+
+    assert!(
+        red_before > green_before * 2.0,
+        "the viewport starts red: {red_before} vs {green_before}"
+    );
+    assert!(
+        green_after > red_after * 2.0,
+        "one synchronise must turn the viewport green: {red_after} vs \
+         {green_after}"
+    );
+}
+
+/// A moved transform, through the same loop.
+#[test]
+fn a_session_moves_a_shape() {
+    use nsi_moonray::session::Session;
+
+    let dso = dso_path();
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (64usize, 48usize);
+    let mut session = Session::new(scene(width as i32, height as i32), &dso)
+        .expect("an interactive render");
+
+    session.wait();
+    let before = session.render().snapshot().expect("a frame").2;
+
+    session
+        .scene_mut()
+        .set_attribute("xform", vec![translate(-1.5)])
+        .unwrap();
+    assert!(!session.synchronize(), "a transform is a narrow edit");
+    session.wait();
+
+    let after = session.render().snapshot().expect("a frame").2;
+
+    let centre = width / 2;
+    let left = width / 6;
+    assert!(
+        column(&after, width, height, centre)
+            < column(&before, width, height, centre),
+        "the centre should dim as the quad leaves it"
+    );
+    assert!(
+        column(&after, width, height, left)
+            > column(&before, width, height, left),
+        "the left should brighten as the quad arrives"
+    );
+}

@@ -62,6 +62,11 @@ pub mod render;
 // The snapshot loop that turns a converging MoonRay frame into an ɴsɪ
 // output driver's callbacks. Needs a live `RenderContext`, so it needs
 // MoonRay linked.
+// An interactive render: a scene that keeps being edited and a
+// renderer that keeps what it already built. `capi` is a thin shim
+// over this.
+#[cfg(all(feature = "rdl2", moonray))]
+pub mod session;
 #[cfg(all(feature = "rdl2", moonray))]
 pub mod stream;
 pub mod value;

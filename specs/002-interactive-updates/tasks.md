@@ -71,17 +71,33 @@ Nothing built. Ordered so that each step is checkable on its own.
 
 ## Incremental Apply
 
-- [ ] I1 Apply one attribute edit inside `beginUpdate`/`endUpdate`,
-      `setSceneUpdated`, restart. Assert the image changed.
+Driven by `Session` (`src/session.rs`), which is where the loop lives;
+`capi` is a thin shim over it, so an application reaches the same code
+whether it embeds this crate or `dlopen`s it.
+
+- [x] I1 Apply one attribute edit, restart, assert the *image*
+      changed. `Session::synchronize`; `tests/incremental.rs`. A shader
+      parameter and a transform both cross.
+      `setSceneUpdated` turned out **not** to be what carries these
+      across -- two tests asserted it was and both failed. See
+      `research.md` F6; it is still called, and nothing claims more
+      than that.
 - [ ] I2 Geometry off through **visibility**, not a `Layer` edit or a
       delete: `research.md` F3 says that is one cost tier cheaper.
-- [ ] I3 A moved transform touches only its own geometry.
+- [~] I3 A moved transform. `a_session_moves_a_shape` renders the
+      quad in its new place through one synchronise, and
+      `apply_affected` re-sends only what upstream's `Affected` named.
+      What is *not* asserted is that the other geometry was untouched
+      -- that is `I5`, and an image cannot show it.
 - [ ] I4 Deformation: `P` changes, and only that mesh regenerates.
 - [ ] I5 Assert the *cost*, not only the pixels. MoonRay logs what it
       regenerated; a test that only checks the image passes on a full
       rebuild.
-- [ ] I6 Fall back to a full rebuild for anything not mapped, and
-      report it. Never fail a synchronise.
+- [x] I6 Fall back to a full re-apply for anything not narrowable,
+      and report it. `Affected::everything` (an edit to `.root` or
+      `.global`) and any node created or deleted -- set and layer
+      membership is not carried by any one object.
+      `a_created_node_falls_back_and_reports`.
 
 ## Upstream — **done**
 

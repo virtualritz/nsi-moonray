@@ -81,6 +81,41 @@ struct Context {
     /// Where the `.rdla` was written, kept so a failed render can say
     /// what to look at.
     scene_file: Option<PathBuf>,
+    /// The live renderer, for an interactive render.
+    ///
+    /// Kept across calls because that is what makes a synchronise
+    /// possible at all: the scene MoonRay is holding, its tessellation
+    /// and its acceleration structures all belong to this, and
+    /// dropping it between edits would throw away exactly what an
+    /// interactive render exists to reuse.
+    ///
+    /// The scene moves *into* it at `"start"` and back out at
+    /// `"stop"`, because an interactive render and a recording scene
+    /// are the same scene -- an edit has to reach the thing being
+    /// rendered, not a copy of it.
+    #[cfg(all(feature = "rdl2", moonray))]
+    session: Option<crate::session::Session>,
+}
+
+impl Context {
+    /// The scene edits land in.
+    ///
+    /// **One scene, in one place.** While an interactive render is
+    /// running the scene lives inside the [`Session`], because an edit
+    /// has to reach the thing being rendered rather than a copy of it
+    /// -- and because the change journal a synchronise reads is the
+    /// journal of *that* scene. Recording into the other one would
+    /// leave every edit invisible and the journal empty, with nothing
+    /// anywhere reporting it.
+    ///
+    /// [`Session`]: crate::session::Session
+    fn scene_mut(&mut self) -> &mut Scene {
+        #[cfg(all(feature = "rdl2", moonray))]
+        if let Some(session) = self.session.as_mut() {
+            return session.scene_mut();
+        }
+        &mut self.scene
+    }
 }
 
 static CONTEXTS: LazyLock<Mutex<HashMap<NsiContext, Context>>> =
@@ -269,6 +304,23 @@ const fn components(type_tag: Type) -> usize {
 }
 
 /// Look up a string argument by name.
+/// An integer argument, which is how ɴsɪ carries flags like
+/// `"interactive"`.
+#[cfg(all(feature = "rdl2", moonray))]
+fn argument_int(arguments: &[OwnedArg], name: &str) -> Option<i32> {
+    arguments
+        .iter()
+        .find(|argument| argument.name == name)
+        .and_then(|argument| match &argument.data {
+            OwnedData::I32(values) => values.first().copied(),
+            // ɴsɪ lets a flag arrive as a float, and a host that sends
+            // `1.0` means the same thing as one that sends `1`.
+            OwnedData::F32(values) => values.first().map(|v| *v as i32),
+            OwnedData::F64(values) => values.first().map(|v| *v as i32),
+            _ => None,
+        })
+}
+
 fn argument_string(arguments: &[OwnedArg], name: &str) -> Option<String> {
     arguments
         .iter()
@@ -305,6 +357,8 @@ pub unsafe extern "C" fn NSIBegin(
         Context {
             scene: Scene::default(),
             scene_file: None,
+            #[cfg(all(feature = "rdl2", moonray))]
+            session: None,
         },
     );
 
@@ -336,7 +390,9 @@ pub unsafe extern "C" fn NSICreate(
         return;
     };
 
-    with(ctx, |context| context.scene.create(&handle, &node_type));
+    with(ctx, |context| {
+        context.scene_mut().create(&handle, &node_type)
+    });
 }
 
 /// # Safety
@@ -353,7 +409,7 @@ pub unsafe extern "C" fn NSIDelete(
         return;
     };
 
-    with(ctx, |context| context.scene.delete(&handle));
+    with(ctx, |context| context.scene_mut().delete(&handle));
 }
 
 /// # Safety
@@ -372,7 +428,7 @@ pub unsafe extern "C" fn NSISetAttribute(
     let arguments = unsafe { arguments(params, nparams) };
 
     with(ctx, |context| {
-        context.scene.set_attribute(&handle, arguments)
+        context.scene_mut().set_attribute(&handle, arguments)
     });
 }
 
@@ -415,7 +471,7 @@ pub unsafe extern "C" fn NSIDeleteAttribute(
     };
 
     with(ctx, |context| {
-        context.scene.delete_attribute(&handle, &name)
+        context.scene_mut().delete_attribute(&handle, &name)
     });
 }
 
@@ -476,7 +532,7 @@ pub unsafe extern "C" fn NSIDisconnect(
     let from_attr = unsafe { string(from_attr) }.filter(|s| !s.is_empty());
 
     with(ctx, |context| {
-        let _ = context.scene.disconnect(
+        let _ = context.scene_mut().disconnect(
             &from,
             from_attr.as_deref(),
             &to,
@@ -512,23 +568,79 @@ pub unsafe extern "C" fn NSIRenderControl(
     let arguments = unsafe { arguments(params, nparams) };
     let action = argument_string(&arguments, "action").unwrap_or_default();
 
-    // Only "start" does anything on the spawned path: the render is a
-    // batch, so by the time it returns there is nothing to wait for,
-    // synchronise or suspend. The linked path answers more of these --
-    // see `render_in_process`.
-    if action != "start" {
-        return;
-    }
-
     #[cfg(all(feature = "rdl2", moonray))]
     {
-        // The linked renderer is the path; spawning is what happens
-        // when MoonRay is not where this expects it.
-        let rendered = with(ctx, |context| render_in_process(&context.scene))
-            .unwrap_or(false);
-        if rendered {
-            return;
+        // ɴsɪ's own flag: a render that returns while it converges,
+        // which is what a viewport asks for. Without it a `"start"` is
+        // a batch and the other actions have nothing to act on.
+        let interactive =
+            argument_int(&arguments, "interactive").unwrap_or(0) != 0;
+
+        match action.as_str() {
+            "start" if interactive => {
+                if start_interactive(ctx) {
+                    return;
+                }
+                // No linked renderer, and a spawned batch cannot be
+                // interactive. Say so rather than silently rendering
+                // one frame and calling it a viewport.
+                eprintln!(
+                    "nsi-moonray: no linked renderer, so this \
+                     interactive render is a single batch frame"
+                );
+            }
+
+            "synchronize" => {
+                synchronize(ctx);
+                return;
+            }
+
+            // Dropping the renderer is what frees MoonRay's global
+            // driver state for the next one: it allows only one at a
+            // time (`002` `research.md` F4).
+            "stop" => {
+                with(ctx, |context| {
+                    // The scene comes back out, so the context is
+                    // still usable -- and so MoonRay's global driver
+                    // state is free for the next session, since it
+                    // allows one at a time.
+                    if let Some(session) = context.session.take() {
+                        context.scene = session.into_scene();
+                    }
+                });
+                return;
+            }
+
+            "wait" => {
+                wait_for_frame(ctx);
+                return;
+            }
+
+            "start" => {
+                // The linked renderer is the path; spawning is what
+                // happens when MoonRay is not where this expects it.
+                let rendered =
+                    with(ctx, |context| render_in_process(&context.scene))
+                        .unwrap_or(false);
+                if rendered {
+                    return;
+                }
+            }
+
+            // `"suspend"` and `"resume"` are not mapped. MoonRay has
+            // `stopFrame`/`startFrame`, but restarting loses the
+            // samples taken so far, which is not what suspending
+            // means -- and a viewport that dimmed every time it was
+            // touched would be worse than one that ignores the call.
+            _ => return,
         }
+    }
+
+    // The spawned path answers only `"start"`: the render is a batch,
+    // so by the time it returns there is nothing to wait for,
+    // synchronise or suspend.
+    if action != "start" {
+        return;
     }
 
     with(ctx, |context| {
@@ -701,6 +813,65 @@ pub fn render_in_process(scene: &nsi_intermediate::Scene) -> bool {
     }
 
     true
+}
+
+/// Begin an interactive render and return while it converges.
+///
+/// The [`Session`](crate::session::Session) stays in the context,
+/// because that is what makes a synchronise possible: MoonRay's
+/// tessellation and acceleration structures live in it, and rebuilding
+/// them per edit is exactly what an interactive render exists to avoid.
+///
+/// `false` when there is no renderer to be had, and the caller says so
+/// rather than pretending one frame is a viewport.
+#[cfg(all(feature = "rdl2", moonray))]
+fn start_interactive(ctx: NsiContext) -> bool {
+    let Some(dso) = moonray_dso_path() else {
+        return false;
+    };
+
+    with(ctx, |context| {
+        // The scene moves into the session: an interactive render and
+        // a recording scene are the same scene.
+        let scene = core::mem::take(&mut context.scene);
+        match crate::session::Session::new(scene, &dso) {
+            Some(session) => {
+                context.session = Some(session);
+                true
+            }
+            None => false,
+        }
+    })
+    .unwrap_or(false)
+}
+
+/// Apply the edits made since the last synchronise, and re-render.
+#[cfg(all(feature = "rdl2", moonray))]
+fn synchronize(ctx: NsiContext) {
+    with(ctx, |context| {
+        // Not an error to call this before starting: an application
+        // may synchronise on a timer.
+        let Some(session) = context.session.as_mut() else {
+            return;
+        };
+
+        if session.synchronize() {
+            // Worth saying. A rebuild renders correctly and slowly,
+            // which is invisible in the image and shows up only as
+            // time.
+            eprintln!("nsi-moonray: this edit needed a whole-scene re-apply");
+        }
+    });
+}
+
+/// Block until the current frame is done, delivering it.
+#[cfg(all(feature = "rdl2", moonray))]
+fn wait_for_frame(ctx: NsiContext) {
+    with(ctx, |context| {
+        if let Some(session) = context.session.as_ref() {
+            session.wait();
+        }
+    });
 }
 
 /// Write the `.rdla` dump, if one was asked for.

@@ -104,7 +104,7 @@ it.
 | MoonRay is linked, not spawned | **yes** — `tests/inprocess.rs` renders a quad through a linked `RenderContext`; no file, no process |
 | A `Document` reaches a live `SceneContext` with no file | **yes** — `src/apply.rs`, `tests/apply.rs` |
 | A scene renders through `RenderContext` in process | **yes** — `R1` |
-| One attribute edit restarts a render without re-tessellation | no |
+| One attribute edit restarts a render without re-tessellation | **half** — the edit is narrowed and the image changes (`I1`); that MoonRay re-tessellated nothing is unasserted (`I5`) |
 | Geometry turned off costs an accelerator rebuild, not a reload | no |
-| Pixels reach a display driver | no |
+| Pixels reach a display driver | **yes** — `src/stream.rs`, as the frame converges |
 | `nsi-intermediate` reports what changed | no — upstream |
