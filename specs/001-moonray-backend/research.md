@@ -295,3 +295,56 @@ Nothing here argues for expanding instances into separate objects.
 Both sides model instancing directly; flattening would throw away the
 memory win that is the entire point, and MoonRay's `instance_level`
 says it handles nesting too. `T6.1`.
+
+### F10: A moving instancer cannot use `xform_list`
+
+`RdlInstancerGeometry` declares
+
+```cpp
+sceneClass.declareAttribute<Mat4dVector>("xform_list");
+```
+
+with **no flags**, and `FLAGS_BLURRABLE` is what makes an attribute
+carry two timesteps (`Types.h:285`). So ɴsɪ's sampled
+`transformationmatrices` -- which 3Delight renders, and which
+`Scene::instance_transforms_at` exists to serve -- cannot cross as a
+`blur()` pair. The flush takes the shutter-open sample and reports the
+reduction.
+
+The route MoonRay intends is `velocities`, a `Vec3fVector` of one
+vector per instance. `InstanceProceduralLeaf.cc:344` applies it as
+
+```cpp
+positions[i] + velocities[i] * dt0
+```
+
+with
+
+```cpp
+dt0 = (motionSteps[0] - evaluationFrame) / fps;
+```
+
+so **velocities are in units per second**, and ɴsɪ's motion times are
+in whatever unit the scene's shutter uses -- which this crate has no
+way to confirm from here.
+
+**The conversion does not have to guess, though.** Setting
+`evaluation_frame` to the first ɴsɪ sample time and `motion_steps` to
+the two sample times makes `fps` cancel:
+
+```
+velocity = (p1 - p0) / (t1 - t0)          [per ɴsɪ time unit]
+p(t1)    = p0 + velocity * (t1 - t0)      [since evaluationFrame = t0]
+         = p1
+```
+
+The unit only has to be *consistent*, not known. That is the mapping
+`T6.3` should take, and it needs `motion_steps` on `SceneVariables` to
+be written from the scene's own sample times rather than left at its
+`{-1, 0}` default -- which is a change that touches transform blur too,
+and wants its own render to confirm.
+
+**Only translation.** `velocities` is a position offset; an instance
+that rotates or scales across the shutter needs the decomposed form
+(`method` 0, with `orientations` and `use_rotation_motion_blur`).
+Reporting that is part of the task.
