@@ -60,10 +60,13 @@ are corrections rather than churn:
   attribute that is not motion data sets it for the whole shutter, so
   reading `attrs` answers "not set" for something the renderer honours.
   Use `Node::effective`, which is what the resolver reads.
-- **An ɴsɪ string is bytes, not `String`.** A file name need not be
-  UTF-8, and 3Delight round-trips a high byte unchanged; storing
-  `String` would replace it at recording time, where nothing later
-  could undo it.
+- **An ɴsɪ string is bytes, not `String`.** The spec says UTF-8 --
+  3Delight has agreed to write that down -- but the C API takes a
+  `const char*`, and a promise does not stop a caller handing over
+  something else. Recording bytes and converting lossily where text is
+  actually needed keeps a malformed name a mangled name rather than a
+  panic at the boundary, which is what "always returns an image"
+  requires.
 
 ## The Dependency, And Why It Is A Path
 
@@ -98,8 +101,39 @@ Two shapes, and neither asks this repository to build MoonRay:
 
   What it is not yet: interactive. `"start"` runs MoonRay to
   completion, so `"synchronize"`, `"suspend"` and `"resume"` have
-  nothing to act on and a display driver receives a file rather than
-  pixels.
+  nothing to act on, and a display driver sees a finished render
+  rather than a converging one.
+
+## Pixels Reach The Application, Without ndspy
+
+MoonRay has no display-driver interface — it writes files, and an
+interactive consumer *snapshots* buffers off a `RenderContext`. An ɴsɪ
+consumer expects the other shape. They meet in `nsi-ffi-wrap`'s
+`output` feature, which is Rust on both sides: an application hands
+over `callback.open`, `callback.write` and `callback.finish` as
+`Reference` attributes on an `outputdriver`, and `src/display.rs`
+calls them. **No ndspy struct is marshalled anywhere in between.**
+
+Three things worth knowing before touching it, each of which cost a
+debugging session:
+
+- **`Reference` must survive recording.** It never reaches MoonRay,
+  which is exactly why `capi.rs` dropped it — and dropping it leaves
+  an application with a driver, a perfect render, and an empty
+  viewport. No error anywhere.
+- **MoonRay does not write `RGBA`.** It names channels after the ɴsɪ
+  output layer: `Ci.R`, `Ci.G`, `Ci.B`. A reader asking for an RGBA
+  layer fails with "no layer matched", which reads like a broken file
+  and is a broken read.
+- **A trait object's vtable belongs to its compilation.** Calling
+  `Box<dyn FnWrite>` is sound where the application and this backend
+  share one `nsi-ffi-wrap`. A separately built `cdylib` reached by
+  `dlopen` is a different compilation, and the safe route there is the
+  `extern "C"` entry points `DspyRegisterDriver` hands over. `T5.2`.
+
+Delivery is still one bucket at the end, read back off the file.
+`snapshotDelta` against a live `RenderContext` is the real thing and
+needs the in-process renderer, so it sits with `002`. `T5.3`.
 
 Taking `.nsi` *files* is a third thing and needs a parser that does not
 exist: `nsi-intermediate` writes streams and does not read them, and

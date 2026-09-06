@@ -22,8 +22,16 @@ Nothing built. Ordered so that each step is checkable on its own.
       buffer. No file.
 - [ ] R2 Progressive modes, and the render running while the
       application carries on.
-- [ ] R3 Pixels to a registered display driver, which is what
-      `DspyRegisterDriver` has nothing to do with today.
+- [ ] R3 Pixels to a registered display driver **as the render
+      converges**. Half of this is already done and is not the hard
+      half: an application's `callback.open`/`write`/`finish` closures
+      are reached with no ndspy marshalling at all
+      ([`001`'s `display.md`](../001-moonray-backend/contracts/display.md),
+      `T5.1`). What is missing is the source of the pixels —
+      `snapshotDelta` against a live `RenderContext` and its
+      `ActivePixels`, instead of one bucket read back off the file a
+      batch render wrote — and honouring a closure that answers
+      `Error::Stop`, which today has nothing left to stop. `T5.3`.
 
 ## Incremental Apply
 

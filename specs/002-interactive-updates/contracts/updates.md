@@ -15,7 +15,7 @@ and getting MoonRay to redraw from what it already has.
 | One attribute edit restarts without re-tessellation | Open | None | None | Edit a shader parameter; assert the pixels change **and** that MoonRay reports no geometry regenerated. Pixels alone would pass on a full rebuild. |
 | Geometry turned off costs a BVH rebuild only | Open | `Geometry`'s visibility attributes are `FLAGS_GEOM_RELOAD_BVH_ONLY` (`research.md` F3) | None | Disconnect a shape; assert it leaves the image and that the other shape was not regenerated. |
 | A moved transform rebuilds only its own geometry | Open | None | None | Move one of two shapes; assert the other is untouched. |
-| Pixels reach a display driver | Open | None | None | Register a driver through `DspyRegisterDriver` and assert it receives samples. |
+| Pixels reach a display driver | **Partial** | `display.rs` -- an application's `callback.open`/`write`/`finish` closures are called directly, with no ndspy marshalling; see [`001`'s `display.md`](../../001-moonray-backend/contracts/display.md) | `render::an_applications_callback_receives_the_rendered_pixels` -- but from the file a batch render wrote, so one bucket at the end | `snapshotDelta` against a live `RenderContext`, delivering buckets as they converge and honouring a closure that returns `Error::Stop`. `T5.3` |
 | An unsupported edit falls back and says so | Open | None | None | ɴsɪ always returns an image: an edit that cannot be applied incrementally must trigger a full rebuild and report it, never fail the synchronise. |
 
 ## Invariants

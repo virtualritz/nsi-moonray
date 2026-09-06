@@ -176,10 +176,12 @@ unsafe fn argument(param: &FfiParam) -> Option<OwnedArg> {
                 std::slice::from_raw_parts(param.data as *const i64, scalars)
                     .to_vec(),
             ),
-            // Bytes, not `String`: an ɴsɪ string is whatever the C
-            // API was handed, and a file name is not required to be
-            // UTF-8. Repairing it here would lose the original at
-            // recording time, where no later care could undo it.
+            // Bytes, not `String`. The spec says an ɴsɪ string is
+            // UTF-8 -- 3Delight has agreed to write that down -- but
+            // the C API is handed a `const char*`, and a caller that
+            // hands over something else is not stopped by a promise.
+            // Recording the bytes keeps that a reporting problem
+            // later rather than a panic at the boundary.
             Type::String => OwnedData::String(
                 std::slice::from_raw_parts(
                     param.data as *const *const c_char,

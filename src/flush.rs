@@ -384,9 +384,10 @@ fn mesh(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     // alone renders every subdivision surface faceted -- and silently,
     // since a polygon mesh of the same cage is a perfectly good render
     // of the wrong thing.
-    // An ɴsɪ string is bytes, not `String`: the C API was handed
-    // whatever the host had, and a file name need not be UTF-8. Only
-    // the values compared against a known spelling are read as text.
+    // An ɴsɪ string is recorded as bytes even though the spec calls
+    // it UTF-8, so reading one as text is a lossy conversion by
+    // choice: a malformed name should render with a mangled name, not
+    // fail to render.
     let scheme = match node.effective("subdivision.scheme").map(|a| &a.data) {
         Some(OwnedData::String(values)) => values
             .first()

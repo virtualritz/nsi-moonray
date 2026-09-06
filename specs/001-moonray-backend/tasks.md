@@ -53,9 +53,10 @@ whoever renders to have it installed.
       loadable: `src/capi.rs` exports all twelve symbols, records into
       `nsi_intermediate::Scene`, and on `NSIRenderControl "start"`
       writes the `.rdla` and runs MoonRay. `tests/dropin.rs` `dlopen`s
-      the artefact and drives a scene through it. Still batch, so
-      display drivers get nothing (`T4.4`) and `NSIEvaluate` is a
-      no-op (`T4.3`).
+      the artefact and drives a scene through it. A display driver's
+      callbacks are called (`T5.1`), but with one bucket at the end
+      rather than as the render converges (`T5.3`), and `NSIEvaluate`
+      is a no-op (`T4.3`).
       `nsi-ffi-wrap` loads a renderer through `dlopen` and looks up
       eleven C entry points -- `NSIBegin`, `NSIEnd`, `NSICreate`,
       `NSIDelete`, `NSISetAttribute`, `NSISetAttributeAtTime`,
@@ -77,6 +78,36 @@ whoever renders to have it installed.
       batch render cannot stream samples back, so this is what
       progressive rendering and the pixel-streaming driver both need.
       See `TN.1`.
+
+## Getting Pixels Out
+
+Contract: [`contracts/display.md`](contracts/display.md). MoonRay has
+no display-driver interface and an ɴsɪ consumer expects one;
+`nsi-ffi-wrap`'s `output` feature is where the two meet, and it is
+Rust on both sides, so **no ndspy marshalling is involved**.
+
+- [x] T5.1 **Deliver pixels to an application's closures.** An
+      `outputdriver` carries `callback.open`, `callback.write` and
+      `callback.finish` as `Reference` attributes; `display.rs` reads
+      them and calls them. `capi.rs` was dropping every `Type::Reference`
+      before this, so a driver that asked for closures got a perfect
+      render and an empty viewport, with no error anywhere.
+      `render::an_applications_callback_receives_the_rendered_pixels`
+      asserts the closure receives the pixels.
+- [ ] T5.2 The `dlopen` route. A `Box<dyn FnWrite>` is a trait object
+      whose vtable belongs to the compilation that made it, so `T5.1`
+      holds only where the application and this backend share one
+      `nsi-ffi-wrap`. A separately built `cdylib` needs the `extern "C"`
+      entry points `DspyRegisterDriver` hands over -- already the
+      twelfth symbol this crate exports, so the mechanism is present
+      and only the delivery path is missing.
+- [ ] T5.3 **Progressive delivery.** Today one bucket covering the
+      frame, read back off the file MoonRay wrote: the application sees
+      a finished render rather than a converging one, and a closure
+      returning `Error::Stop` is ignored because there is nothing left
+      to stop. `snapshotDelta` against a live `RenderContext` is the
+      real thing; it needs the in-process renderer, so it lives with
+      [`002`](../002-interactive-updates/tasks.md).
 
 ## Needs MoonRay Installed
 
