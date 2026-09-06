@@ -214,9 +214,50 @@ problem:
    tools package fixes the first; the second is satisfied by the
    directory merely existing.
 
-And one that is not a bite so much as a missing `PATH`: MoonRay's DSO
-build shells out to `rdl2_json_exporter`, which `scene_rdl2` installed
-into `$PREFIX/bin`.
+### And Two Paths, Not One
+
+MoonRay's DSO build shells out to `rdl2_json_exporter`, which
+`scene_rdl2` installed into `$PREFIX/bin`. Putting that on `PATH` is
+not enough -- the loader then cannot resolve the library it needs, and
+the build dies partway through the DSOs with
+
+```
+rdl2_json_exporter: error while loading shared libraries:
+libscene_rdl2.so: cannot open shared object file
+```
+
+`$PREFIX/lib` is on no default search path, so **both** are needed:
+
+```bash
+export PATH=$PREFIX/bin:$PATH
+export LD_LIBRARY_PATH=$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+```
+
+Worth knowing that this one appears *late*: everything configures, the
+libraries build, and the first DSO to need a JSON export is where it
+stops.
+
+## Building The Shim
+
+The `extern "C"` surface over `scene_rdl2` that lets a scene be built
+in memory rather than written to a file. `build.rs` drives it for the
+crate; this is how it is built and checked on its own:
+
+```bash
+cmake -S shim -B build-shim -DSCENE_RDL2_ROOT=$PREFIX
+cmake --build build-shim -j"$(nproc)"
+
+# Drives every setter through rdl2's own `ExtensiveObject`, which
+# declares an attribute of every type, and writes the result out.
+./build-shim/shim_smoke \
+    /path/to/build-rdl2/tests/lib/scene/rdl2 out.rdla
+```
+
+The smoke test is not decoration. It is what proved the calls work
+against the real library rather than merely compiling against its
+headers -- including that a missing attribute and a mistyped one come
+back as *different* codes, which is what a useful limitation report
+depends on.
 
 ## Building The Crate
 
