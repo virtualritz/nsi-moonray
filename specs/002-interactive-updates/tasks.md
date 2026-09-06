@@ -116,14 +116,19 @@ whether it embeds this crate or `dlopen`s it.
       MoonRay's own `updateScene` entry points call, while
       `Geometry::requiresGeometryUpdate` does not consult the flag at
       all. Two ways out, `I7` and an upstream ask.
-- [ ] I7 Take the `updateScene(manifest, payload)` path instead of
-      editing objects in place: a binary rdl2 delta, which is what
-      MoonRay's incremental machinery is built around and what reaches
-      the BVH-only tier (`research.md` F4, F9). It costs a
-      serialise-deserialise per edit, which is precisely what editing
-      in place was chosen to avoid -- so this is a measurement, not a
-      rewrite: `a_synchronise_is_measured_not_assumed` is where the
-      answer shows up.
+- [ ] I7 **Nothing to do here; the fix is upstream.** A first reading
+      suggested moving to the `updateScene(manifest, payload)` delta
+      path to reach the BVH-only tier. That was wrong:
+      `checkGeometryChangesRequireReload`'s answer is *returned to the
+      caller* for a distributed renderer to act on, and skips no work
+      itself, so both paths share the same lists (`research.md` F9).
+      Consulting `updateOnlyRequiresBVHRebuild()` in
+      `Geometry::requiresGeometryUpdate` is the whole fix, and the
+      lists are separate in exactly the way that makes it safe: the
+      geometry stays in `mChangedOrDeformedGeometries`, so the BVH
+      still rebuilds, while `updateRequired()` goes false so it is not
+      regenerated. Report written; `a_synchronise_is_measured_not_assumed`
+      is where a fix shows up.
 - [x] I6 Fall back to a full re-apply for anything not narrowable,
       and report it. `Affected::everything` (an edit to `.root` or
       `.global`) and any node created or deleted -- set and layer

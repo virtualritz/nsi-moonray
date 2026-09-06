@@ -90,7 +90,18 @@ if (!attribute->updateRequiresGeomReload() ||
 }
 ```
 
-— the same two lines MoonRay already uses. I have not sent a PR because I am not sure whether `requiresGeometryUpdate`'s callers rely on the geometry staying in the changed list for the BVH rebuild to happen; MoonRay's comment says "the geometry stays in the changed-geometry list" for that case, which suggests the rebuild is driven from elsewhere and this is safe, but that is your call rather than mine.
+— the same two lines MoonRay already uses.
+
+As far as I can tell this is safe, because regeneration and the BVH rebuild are driven by *different* lists:
+
+- `mChangedOrDeformedGeometries` being non-empty is what triggers the BVH rebuild (`moonray`, `GeometryManager.cc:1117` returns early only when it is empty).
+- `Layer::getChangedGeometryToRootShaders` is what drives regeneration, and it filters that same list by `geom->updateRequired()` (`Layer.cc:775`) — which is what `requiresGeometryUpdate` sets through `mAttributeTreeChanged`.
+
+`Layer.cc:766` describes exactly the behaviour the fix would produce:
+
+> An attribute that requires a geometry update changes. Note that if an attribute changes that does not require a geometry update, special care is taken to set the `mAttributeTreeChanged` flag to false.
+
+So the geometry would stay in `mChangedOrDeformedGeometries` and its BVH would still be rebuilt, while `updateRequired()` went false and it would not be regenerated. That said, you know the invariants here and I do not — happy to send a PR if the shape looks right to you.
 
 ## Context
 

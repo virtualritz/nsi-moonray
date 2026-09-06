@@ -337,19 +337,40 @@ file entry points -- and we edit the `SceneContext` directly and call
 `setSceneUpdated`, so it never runs for us. `updateOnlyRequiresBVHRebuild`
 has exactly one caller in either repository.
 
-### Two ways out
+### One way out, and it is upstream's
 
-- **Take the `updateScene(manifest, payload)` path** (`F4`): write a
-  binary rdl2 delta with `BinaryWriter::setDeltaEncoding(true)` and
-  hand it over, instead of editing objects in place. That is the path
-  MoonRay's own incremental machinery is built around, and it gets the
-  BVH-only tier for free. It also costs a serialise-deserialise per
-  edit, which is the thing editing in place was chosen to avoid --
-  so it wants measuring, not assuming.
-- **Ask upstream to consult the flag in `requiresGeometryUpdate`.**
-  The predicate already exists next to the one it does use, the
-  intent is documented in MoonRay's comment, and this is a two-line
-  change. Worth sending alongside the camera report.
+A first reading of this suggested taking the `updateScene(manifest,
+payload)` path instead -- a binary rdl2 delta, which is what MoonRay's
+own incremental machinery is built around. **That is wrong**, and the
+reason is worth writing down because it took a second look:
+`checkGeometryChangesRequireReload`'s answer is *returned to
+`updateScene`'s caller*, for a distributed renderer to decide whether
+to reload the scene across a farm. It does not itself skip any work.
+Both paths then go through the same lists.
 
-Either way this is now a number: `a_synchronise_is_measured_not_assumed`
-is where it would show up.
+Reading those lists settles where the fix belongs, and they are two
+different lists:
+
+- `mChangedOrDeformedGeometries` non-empty drives the **BVH rebuild**
+  (`GeometryManager.cc:1117` skips it only when the list is empty).
+- `Layer::getChangedGeometryToRootShaders` drives **regeneration**, and
+  it filters that same list by `geom->updateRequired()`
+  (`Layer.cc:775`) -- which is what `requiresGeometryUpdate` sets, via
+  `mAttributeTreeChanged`.
+
+`Layer.cc:766` says the intent outright:
+
+> An attribute that requires a geometry update changes. **Note that if
+> an attribute changes that does not require a geometry update, special
+> care is taken to set the `mAttributeTreeChanged` flag to false.**
+
+So consulting `updateOnlyRequiresBVHRebuild()` in
+`requiresGeometryUpdate` leaves the geometry in
+`mChangedOrDeformedGeometries` -- the BVH still rebuilds -- while
+`updateRequired()` goes false and it is not regenerated. That is
+exactly the behaviour MoonRay's own comment describes, and it is a
+two-line change in one place. Written up in
+`upstream/scene_rdl2-bvh-only-flag-ignored.md`.
+
+Nothing to do on this side. `a_synchronise_is_measured_not_assumed` is
+where a fix would show up.
