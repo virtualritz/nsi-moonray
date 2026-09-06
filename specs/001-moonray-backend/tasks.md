@@ -181,14 +181,27 @@ The capability that distinguishes this backend.
 - [x] T2.2 Transform motion to `node_xform` blur samples. A moving quad
       renders blurred; `tests/render.rs` counts the partially covered
       columns a smear leaves and a sharp edge does not.
-- [ ] T2.3 Deformation motion to `RdlMeshGeometry`'s
-      `vertex_list_1`.
+- [x] T2.3 Deformation motion to `RdlMeshGeometry`'s
+      `vertex_list_1`. rdl2 carries this as **two attributes**, not as
+      a `blur()` pair -- that form is for scalars and matrices.
+      More than two samples takes the **ends**, so the extent of the
+      motion survives; keeping the first two would shorten every blur
+      in the scene and read as a shutter setting. A changing vertex
+      count is not deformation and cannot be interpolated: the first
+      sample is used and it is reported.
+      `flush::tests::a_deforming_mesh_gets_two_vertex_lists` and three
+      siblings; `inprocess::a_deforming_mesh_renders_blurred` counts
+      the partially covered columns a smear leaves and a sharp edge
+      does not.
 - [ ] T2.4 Velocity-based motion via `velocity_list_0` and
       `motion_blur_type`, if ɴsɪ carries a velocity attribute. There is
       no `use velocity` flag; an earlier draft of these specs was wrong
       about that.
-- [ ] T2.5 Report, never flatten, a scene with more than two motion
+- [x] T2.5 Report, never flatten, a scene with more than two motion
       samples on one attribute. rdl2 has exactly two timesteps.
+      `flush::tests::more_than_two_motion_samples_are_reported` for a
+      transform and `more_than_two_deformation_samples_are_reported`
+      for `P`.
 
 ## User Story 3: Subdivision (P2)
 

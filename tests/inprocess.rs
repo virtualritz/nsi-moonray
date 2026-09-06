@@ -733,3 +733,103 @@ fn a_prototypes_own_transform_is_applied_once() {
         at(30)
     );
 }
+
+/// **`T2.3`, rendered.** A deforming mesh smears.
+///
+/// The emission is asserted as text in `flush::tests`; this is that it
+/// reaches the image. A smear leaves partially covered columns where a
+/// sharp edge leaves none, which is the same measure the transform-blur
+/// test uses.
+#[test]
+fn a_deforming_mesh_renders_blurred() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (64usize, 48usize);
+
+    // The same quad, once static and once deforming across the shutter.
+    let quad_at = |x: f32| {
+        vec![
+            x - 1.0,
+            -1.0,
+            -6.0,
+            x + 1.0,
+            -1.0,
+            -6.0,
+            x + 1.0,
+            1.0,
+            -6.0,
+            x - 1.0,
+            1.0,
+            -6.0,
+        ]
+    };
+
+    let frame_of = |deforming: bool| {
+        let mut nsi = scene(width as i32, height as i32);
+        nsi.disconnect("quad", None, ".root", "objects").unwrap();
+
+        nsi.create("shape", "mesh").unwrap();
+        nsi.set_attribute(
+            "shape",
+            vec![
+                arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+                arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
+            ],
+        )
+        .unwrap();
+        nsi.connect("shape", None, ".root", "objects").unwrap();
+
+        if deforming {
+            for (time, x) in [(0.0, -1.0f32), (1.0, 1.0f32)] {
+                nsi.set_attribute_at_time(
+                    "shape",
+                    time,
+                    vec![arg("P", Type::Point, OwnedData::F32(quad_at(x)))],
+                )
+                .unwrap();
+            }
+        } else {
+            nsi.set_attribute(
+                "shape",
+                vec![arg("P", Type::Point, OwnedData::F32(quad_at(-1.0)))],
+            )
+            .unwrap();
+        }
+
+        let session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        session.render().snapshot().expect("a frame").2
+    };
+
+    // Columns that are lit but not fully lit — the signature of an edge
+    // that moved across them.
+    let partial = |pixels: &[f32]| {
+        let brightest = (0..width)
+            .map(|x| column(pixels, width, height, x))
+            .fold(0.0f32, f32::max);
+        (0..width)
+            .filter(|x| {
+                let light = column(pixels, width, height, *x);
+                light > brightest * 0.05 && light < brightest * 0.95
+            })
+            .count()
+    };
+
+    let sharp = frame_of(false);
+    let blurred = frame_of(true);
+
+    assert!(
+        partial(&blurred) > partial(&sharp),
+        "a deforming quad should leave more partially covered columns \
+         than a static one: {} sharp, {} blurred",
+        partial(&sharp),
+        partial(&blurred)
+    );
+}

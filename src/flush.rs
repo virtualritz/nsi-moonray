@@ -652,6 +652,73 @@ fn instancer(
 /// which has one matrix per instance and none of its own. Each of those
 /// is reported and the object is left where it is, because ɴsɪ always
 /// returns an image.
+/// A mesh's two deformation samples, if it has any.
+///
+/// **`P` sampled over time is deformation blur.** rdl2 carries it as
+/// two separate attributes -- `vertex_list_0` and `vertex_list_1` --
+/// rather than as a `blur()` pair, which is why this returns them
+/// separately instead of going through [`Value::Blur`].
+///
+/// `None` for a mesh whose `P` was set once, which is the ordinary
+/// case: there is nothing to blur and `vertex_list_1` is left unset.
+///
+/// More than two samples cannot be carried -- rdl2 has exactly two
+/// timesteps -- so the first and last are taken and the reduction is
+/// *reported*. Keeping the ends rather than the first two is what
+/// preserves the extent of the motion, which is what a smear looks
+/// like; quietly keeping the first two would shorten every blur in the
+/// scene and look like a shutter setting.
+fn deformation(
+    scene: &Scene,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Option<(Value, Value)> {
+    let samples = scene.attribute_samples(handle, "P").ok()?;
+    if samples.len() < 2 {
+        return None;
+    }
+
+    if samples.len() > 2 {
+        flushed.limitations.push(format!(
+            "mesh {handle:?} has {} motion samples on \"P\"; rdl2 has \
+             two timesteps, so the first and last were taken and the \
+             rest dropped",
+            samples.len()
+        ));
+    }
+
+    let points = |argument: &nsi_intermediate::OwnedArg| match &argument.data {
+        OwnedData::F32(values) if values.len() % 3 == 0 => Some(Value::Vector(
+            values
+                .chunks_exact(3)
+                .map(|p| Value::Vec3f([p[0], p[1], p[2]]))
+                .collect(),
+        )),
+        _ => None,
+    };
+
+    let begin = points(samples.first()?.1)?;
+    let end = points(samples.last()?.1)?;
+
+    // A mesh whose vertex count changes between samples is not
+    // deformation, and MoonRay cannot interpolate it. Rendering the
+    // first sample unblurred is the honest answer.
+    if let (Value::Vector(a), Value::Vector(b)) = (&begin, &end)
+        && a.len() != b.len()
+    {
+        flushed.limitations.push(format!(
+            "mesh {handle:?} has {} vertices at its first motion sample \
+             and {} at its last; that is not deformation and cannot be \
+             blurred, so the first sample is used",
+            a.len(),
+            b.len()
+        ));
+        return Some((begin.clone(), begin));
+    }
+
+    Some((begin, end))
+}
+
 /// Turn a shape off, every way MoonRay can see one.
 ///
 /// **ɴsɪ turns geometry off by severing its `objects` connection**, and
@@ -823,21 +890,30 @@ fn mesh(
             .push(format!("mesh {handle:?} has no \"P.indices\"")),
     }
 
-    match node.effective("P").map(|arg| &arg.data) {
-        Some(OwnedData::F32(points)) if points.len() % 3 == 0 => {
-            object = object.set(
-                "vertex_list_0",
-                Value::Vector(
-                    points
-                        .chunks_exact(3)
-                        .map(|p| Value::Vec3f([p[0], p[1], p[2]]))
-                        .collect(),
-                ),
-            );
+    // Deformation blur first: `P` sampled over time is `vertex_list_0`
+    // and `vertex_list_1`, and reading the static value of a moving
+    // mesh would be the silent flattening this backend exists to
+    // avoid. `T2.3`.
+    let deformed = deformation(scene, handle, flushed);
+    if let Some((begin, end)) = deformed {
+        object = object.set("vertex_list_0", begin).set("vertex_list_1", end);
+    } else {
+        match node.effective("P").map(|arg| &arg.data) {
+            Some(OwnedData::F32(points)) if points.len() % 3 == 0 => {
+                object = object.set(
+                    "vertex_list_0",
+                    Value::Vector(
+                        points
+                            .chunks_exact(3)
+                            .map(|p| Value::Vec3f([p[0], p[1], p[2]]))
+                            .collect(),
+                    ),
+                );
+            }
+            _ => flushed
+                .limitations
+                .push(format!("mesh {handle:?} has no float \"P\"")),
         }
-        _ => flushed
-            .limitations
-            .push(format!("mesh {handle:?} has no float \"P\"")),
     }
 
     // ɴsɪ marks a subdivision surface with an *attribute* on a `mesh`,
@@ -1691,6 +1767,131 @@ mod tests {
               x, 0.0, 0.0, 1.0,
         ];
         matrix
+    }
+
+    /// **`T2.3`.** `P` sampled over time becomes two vertex lists.
+    ///
+    /// rdl2 carries deformation as `vertex_list_0` and
+    /// `vertex_list_1`, not as a `blur()` pair -- the oracle's
+    /// `blur(a, b)` form is for scalars and matrices.
+    #[test]
+    fn a_deforming_mesh_gets_two_vertex_lists() {
+        let mut scene = triangle();
+        for (time, y) in [(0.0, 1.0f32), (1.0, 3.0f32)] {
+            scene
+                .set_attribute_at_time(
+                    "tri",
+                    time,
+                    vec![arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, y, 0.0,
+                        ]),
+                    )],
+                )
+                .expect("a recordable edit");
+        }
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(
+            rdla.contains("[\"vertex_list_0\"] = { Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)}"),
+            "{rdla}"
+        );
+        assert!(
+            rdla.contains("[\"vertex_list_1\"] = { Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 3, 0)}"),
+            "the second sample must be its own attribute\n{rdla}"
+        );
+    }
+
+    /// A mesh whose `P` was set once has no second list.
+    #[test]
+    fn a_static_mesh_has_one_vertex_list() {
+        let rdla = flush(&triangle()).to_rdla();
+        assert!(rdla.contains("vertex_list_0"), "{rdla}");
+        assert!(!rdla.contains("vertex_list_1"), "{rdla}");
+    }
+
+    /// More than two samples is a reduction, and it is reported.
+    #[test]
+    fn more_than_two_deformation_samples_are_reported() {
+        let mut scene = triangle();
+        for (time, y) in [(0.0, 1.0f32), (0.5, 2.0), (1.0, 3.0)] {
+            scene
+                .set_attribute_at_time(
+                    "tri",
+                    time,
+                    vec![arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, y, 0.0,
+                        ]),
+                    )],
+                )
+                .expect("a recordable edit");
+        }
+
+        let flushed = flush(&scene);
+
+        // The *ends*, so the extent of the motion survives. Keeping
+        // the first two would shorten every blur in the scene.
+        assert!(
+            flushed.to_rdla().contains("Vec3(0, 3, 0)"),
+            "{}",
+            flushed.to_rdla()
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("3 motion samples")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// A changing vertex count is not deformation, and MoonRay cannot
+    /// interpolate it.
+    #[test]
+    fn a_changing_vertex_count_is_reported_not_blurred() {
+        let mut scene = triangle();
+        scene
+            .set_attribute_at_time(
+                "tri",
+                0.0,
+                vec![arg(
+                    "P",
+                    Type::Point,
+                    OwnedData::F32(vec![
+                        0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+        scene
+            .set_attribute_at_time(
+                "tri",
+                1.0,
+                vec![arg(
+                    "P",
+                    Type::Point,
+                    OwnedData::F32(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("not deformation")),
+            "{:?}",
+            flushed.limitations
+        );
     }
 
     /// **A shape disconnected from `.root` is not in the scene.**
