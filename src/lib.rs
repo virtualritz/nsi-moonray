@@ -31,6 +31,9 @@
 //!   documents.
 //! - [`render`] — handing the result to MoonRay's own renderer binary,
 //!   which is what the `mrr` command does.
+//! - [`display`] — pixels back out, through ɴsɪ's display-driver ABI.
+//!   MoonRay has none, so this calls the driver rather than being
+//!   called by one.
 //! - [`capi`] — the ɴsɪ C entry points, so this builds as a `cdylib`
 //!   that an existing ɴsɪ consumer can load in place of 3Delight.
 //!
@@ -44,6 +47,7 @@
 //! [`nsi-intermediate`]: https://github.com/virtualritz/nsi
 
 pub mod capi;
+pub mod display;
 pub mod document;
 pub mod flush;
 pub mod render;

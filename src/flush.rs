@@ -688,7 +688,7 @@ fn render_output(scene: &Scene, layer: &str, drivers: &[String]) -> Object {
 }
 
 /// The file an ɴsɪ output driver writes to.
-fn image_file(scene: &Scene, driver: &str) -> Option<String> {
+pub(crate) fn image_file(scene: &Scene, driver: &str) -> Option<String> {
     match &scene.node(driver)?.effective("imagefilename")?.data {
         OwnedData::String(files) => files
             .first()

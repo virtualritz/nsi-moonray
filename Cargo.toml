@@ -38,8 +38,24 @@ nsi-intermediate = { path = "../nsi/crates/nsi-intermediate" }
 # The ɴsɪ types the C entry points speak: `FfiParam` is layout-identical
 # to `NSIParam_t`, and `Type` carries the `NSIType_t` values.
 nsi-trait = { path = "../nsi/crates/nsi-trait" }
+# For the output-driver callbacks an application hands ɴsɪ. MoonRay has
+# no display-driver interface, so this crate calls those closures
+# itself; see `src/display.rs`. Nothing here marshals ndspy structs.
+nsi-ffi-wrap = { path = "../nsi/crates/nsi-ffi-wrap", features = ["output"] }
+# One ndspy struct, and only one: `PixelFormat::from_ndspy` takes the
+# channel list in that shape, and it is the only public way to build the
+# type the callbacks are handed. Nothing else here marshals ndspy.
+ndspy-sys = "0.2"
+# Reads the image MoonRay wrote, to hand it to an application's
+# callbacks. A stopgap: with an in-process `RenderContext` the pixels
+# come from `snapshotDelta` and never reach a file. See
+# `specs/002-interactive-updates`.
+exr = "1"
 
 [dev-dependencies]
+# The application side of the callback test: it writes the closure the
+# way an ɴsɪ consumer does.
+nsi-ffi-wrap = { path = "../nsi/crates/nsi-ffi-wrap", features = ["output"] }
 # Loads the `cdylib` in `tests/dropin.rs` the way `nsi-ffi-wrap` loads a
 # renderer: by `dlopen` and by symbol.
 libloading = "0.8"

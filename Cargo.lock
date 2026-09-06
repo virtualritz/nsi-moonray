@@ -313,6 +313,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndspy-sys"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b93d464d0026b66fd2e1bb0e625f5ada34a7ccd856312a1acc8d4e6d0a33dc2f"
+dependencies = [
+ "bindgen",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -330,6 +339,7 @@ dependencies = [
  "enum_dispatch",
  "lazy_static",
  "log",
+ "ndspy-sys",
  "nsi-sys",
  "nsi-trait",
  "null-terminated-str",
@@ -354,6 +364,8 @@ version = "0.1.0"
 dependencies = [
  "exr",
  "libloading",
+ "ndspy-sys",
+ "nsi-ffi-wrap",
  "nsi-intermediate",
  "nsi-trait",
 ]

@@ -37,8 +37,12 @@
 //! and reports, and because a crash inside a host application is the
 //! worst possible failure mode.
 
-use crate::{flush::flush, render::Render};
-use nsi_intermediate::{OwnedArg, OwnedData, Scene};
+use crate::{
+    display::{self, Callbacks},
+    flush::flush,
+    render::Render,
+};
+use nsi_intermediate::{HostPtr, OwnedArg, OwnedData, Scene};
 use nsi_trait::{FfiParam, Type};
 use std::{
     collections::HashMap,
@@ -185,10 +189,22 @@ unsafe fn argument(param: &FfiParam) -> Option<OwnedArg> {
                 .map(|pointer| bytes(*pointer))
                 .collect(),
             ),
-            // `Reference` never reaches MoonRay (`spec.md` R2), but it
-            // has to survive recording: an output-driver callback is
-            // carried this way.
-            Type::Reference => return None,
+            // `Reference` never reaches MoonRay (`spec.md` R2) and
+            // must still survive recording: an application's
+            // output-driver callbacks arrive this way, and dropping
+            // them leaves a viewport with a driver and nothing to
+            // call. ɴsɪ does not copy a `Reference` -- the pointee
+            // belongs to the caller, who keeps it alive -- so what is
+            // stored is the pointer itself.
+            Type::Reference => OwnedData::Reference(
+                std::slice::from_raw_parts(
+                    param.data as *const *const c_void,
+                    scalars,
+                )
+                .iter()
+                .map(|pointer| HostPtr(*pointer))
+                .collect(),
+            ),
             Type::Invalid => return None,
         }
     };
@@ -495,6 +511,21 @@ pub unsafe extern "C" fn NSIRenderControl(
         }
         context.scene_file = Some(path.clone());
 
+        // An application with a viewport hands its callbacks to the
+        // `outputdriver` node and expects pixels back. Collect them
+        // before the render, because the file each one wants is what
+        // the render is told to write.
+        let deliveries: Vec<(String, Callbacks, PathBuf)> = context
+            .scene
+            .nodes()
+            .filter(|(_, node)| node.node_type == "outputdriver")
+            .filter_map(|(handle, _)| {
+                let callbacks = Callbacks::of(&context.scene, handle)?;
+                let file = crate::flush::image_file(&context.scene, handle)?;
+                Some((handle.clone(), callbacks, PathBuf::from(file)))
+            })
+            .collect();
+
         if let Err(error) = Render::new(&path).run() {
             // ɴsɪ always returns an image, and when it cannot, it says
             // so and leaves the scene where someone can look at it.
@@ -502,6 +533,14 @@ pub unsafe extern "C" fn NSIRenderControl(
                 "nsi-moonray: {error}; the scene is at {}",
                 path.display()
             );
+            return;
+        }
+
+        for (handle, callbacks, image) in deliveries {
+            if let Err(error) = display::deliver_file(&callbacks, &handle, &image)
+            {
+                eprintln!("nsi-moonray: {handle:?} received no pixels: {error}");
+            }
         }
     });
 }
