@@ -91,26 +91,26 @@ renderer starts from nothing each time.
 The path has to be: an in-process `SceneContext`, edited in place. See
 `plan.md`.
 
-## What `nsi-intermediate` Does Not Do Yet
+## What `nsi-intermediate` Already Does
 
-It records a scene and answers questions about the *whole* of it. There
-is no notion of what changed since the last `NSIRenderControl`
-`"synchronize"`, which is exactly what an incremental apply needs.
+This section asked for three things upstream. All three exist:
 
-Concretely, the upstream gaps:
+- `Scene::changes()` / `take_changes()` returns a **net** `Changes`
+  record — created, deleted with the type they had, `(handle,
+  attribute)` pairs set, and edges added, removed and **re-armed**.
+  That last one is a connection whose arguments a repeated `connect`
+  replaced in place: no edge appeared or disappeared, but ɴsɪ's
+  `priority` rides on those arguments and decides which of two shaders
+  wins. A journal keyed on additions and removals misses it silently.
+- `Scene::affected(&Changes)` walks *down* from those handles and
+  returns `Affected { nodes, shaders, outputs, everything }` — the
+  inverse of the climb resolution already does, deliberately
+  over-approximate, keyed by handle.
+- Motion samples resolve: `motion_times`, `world_transform_samples`
+  and `world_transform_interpolated_at`, the last interpolating
+  element-wise and holding the ends, which is what 3Delight does.
 
-- **A journal.** Which handles were created, deleted, had attributes set
-  or deleted, and which connections were made or broken, since the last
-  synchronise — and a way to clear it.
-- **Dirty propagation through the transform tree.** An edit to one
-  `transform` changes the world matrix of everything under it.
-  `world_transform` composes that chain on demand today, which is right
-  for a full flush and useless for finding the *set* of affected
-  geometry.
-- **Dirty propagation through binding.** An edit to a `shader` affects
-  every geometry bound to it through an `attributes` node.
-
-None of this is MoonRay-specific: it is ɴsɪ graph knowledge, which is
-what `nsi-intermediate` exists to own. Mitsuba cannot edit a live scene
-at all, so nothing has forced the issue — the same way nothing forced
-motion-sample resolution until this backend needed it.
+**`Affected` splits `shaders` from `nodes` because a shader edit costs
+no geometry work.** That is MoonRay's own distinction, arrived at
+independently — F3's three cost tiers. The two models line up, and this
+backend has to be taught to use them.

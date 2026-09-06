@@ -67,11 +67,10 @@ whoever renders to have it installed.
       resolves. `DspyRegisterDriver` counts as a twelfth: `nsi-ffi-wrap`
       resolves the whole symbol table up front, so a consumer built
       with the `output` feature cannot load a library missing it.
-- [ ] T4.3 `.nsi` stream input. There is no parser for the format:
-      `nsi-intermediate` writes streams and does not read them, and
-      `nsi-stream` is the pixel-streaming driver, not a reader. The
-      parser belongs upstream next to the writer, where the Mitsuba
-      backend gets it too.
+- [~] T4.3 `.nsi` stream input. **The parser exists upstream now**:
+      `nsi-parse`, which drives `nsi_trait::Nsi` rather than producing
+      a scene type of its own -- so it feeds a `Recorder`, and through
+      it this backend, with nothing to write here but the wiring.
 - [ ] T4.4 Link `libmoonray` rather than spawning its CLI. **Moved to
       [`002`](../002-interactive-updates/tasks.md)**, which is where the
       reason for it lives. A spawned
@@ -133,9 +132,13 @@ whoever renders to have it installed.
 
 The capability that distinguishes this backend.
 
-- [ ] T2.1 Depends on `nsi-intermediate` resolving motion samples.
-      **This backend is why that task exists.**
-- [ ] T2.2 Transform motion to `node_xform` blur samples.
+- [x] T2.1 Depends on `nsi-intermediate` resolving motion samples.
+      Done upstream: `motion_times`, `world_transform_samples` and
+      `world_transform_interpolated_at`, which interpolates
+      element-wise and holds the ends, as 3Delight does.
+- [x] T2.2 Transform motion to `node_xform` blur samples. A moving quad
+      renders blurred; `tests/render.rs` counts the partially covered
+      columns a smear leaves and a sharp edge does not.
 - [ ] T2.3 Deformation motion to `RdlMeshGeometry`'s
       `vertex_list_1`.
 - [ ] T2.4 Velocity-based motion via `velocity_list_0` and

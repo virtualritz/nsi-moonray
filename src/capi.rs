@@ -73,7 +73,21 @@ fn with<R>(ctx: NsiContext, body: impl FnOnce(&mut Context) -> R) -> Option<R> {
     contexts.get_mut(&ctx).map(body)
 }
 
-/// A borrowed C string, or `None` when it is null or not UTF-8.
+/// The bytes of a C string, empty when it is null.
+///
+/// # Safety
+///
+/// `pointer` is null or points at a NUL-terminated string.
+unsafe fn bytes(pointer: *const c_char) -> Vec<u8> {
+    if pointer.is_null() {
+        return Vec::new();
+    }
+
+    // SAFETY: the caller guarantees a NUL-terminated string.
+    unsafe { CStr::from_ptr(pointer) }.to_bytes().to_vec()
+}
+
+/// A borrowed C string, or `None` when it is null.
 ///
 /// # Safety
 ///
@@ -158,13 +172,17 @@ unsafe fn argument(param: &FfiParam) -> Option<OwnedArg> {
                 std::slice::from_raw_parts(param.data as *const i64, scalars)
                     .to_vec(),
             ),
+            // Bytes, not `String`: an ɴsɪ string is whatever the C
+            // API was handed, and a file name is not required to be
+            // UTF-8. Repairing it here would lose the original at
+            // recording time, where no later care could undo it.
             Type::String => OwnedData::String(
                 std::slice::from_raw_parts(
                     param.data as *const *const c_char,
                     scalars,
                 )
                 .iter()
-                .map(|pointer| string(*pointer).unwrap_or_default())
+                .map(|pointer| bytes(*pointer))
                 .collect(),
             ),
             // `Reference` never reaches MoonRay (`spec.md` R2), but it
@@ -175,13 +193,13 @@ unsafe fn argument(param: &FfiParam) -> Option<OwnedArg> {
         }
     };
 
-    Some(OwnedArg {
+    Some(OwnedArg::new(
         name,
         type_tag,
         array_length,
-        flags: param.flags,
+        param.flags,
         data,
-    })
+    ))
 }
 
 /// The `NSIType_t` value as a type, or `None` if it is not one.
@@ -216,9 +234,11 @@ const fn components(type_tag: Type) -> usize {
 fn argument_string(arguments: &[OwnedArg], name: &str) -> Option<String> {
     arguments
         .iter()
-        .find(|a| a.name == name)
-        .and_then(|a| match &a.data {
-            OwnedData::String(values) => values.first().cloned(),
+        .find(|argument| argument.name == name)
+        .and_then(|argument| match &argument.data {
+            OwnedData::String(values) => values
+                .first()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
             _ => None,
         })
 }
@@ -580,11 +600,11 @@ mod tests {
         };
 
         let recorded = with(ctx, |context| {
-            let node = &context.scene.nodes["tri"];
+            let node = context.scene.node("tri").expect("the node exists");
             (
                 node.node_type.clone(),
                 node.attrs.contains_key("nvertices"),
-                context.scene.edges.len(),
+                context.scene.edges().count(),
             )
         })
         .expect("the context exists");
@@ -625,13 +645,14 @@ mod tests {
         };
         unsafe { NSISetAttribute(ctx, handle.as_ptr(), 1, &param) };
 
-        let scalars =
-            with(ctx, |context| match &context.scene.nodes["mesh"].attrs["P"]
+        let scalars = with(ctx, |context| {
+            match &context.scene.node("mesh").expect("the node exists").attrs["P"]
                 .data
             {
                 OwnedData::F32(values) => values.len(),
                 _ => 0,
-            });
+            }
+        });
 
         assert_eq!(scalars, Some(6));
         NSIEnd(ctx);
@@ -654,7 +675,7 @@ mod tests {
             NSIDeleteAttribute(ctx, std::ptr::null(), std::ptr::null());
         }
 
-        assert_eq!(with(ctx, |context| context.scene.nodes.len()), Some(0));
+        assert_eq!(with(ctx, |context| context.scene.nodes().count()), Some(0));
         NSIEnd(ctx);
     }
 

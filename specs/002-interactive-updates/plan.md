@@ -54,23 +54,15 @@ same image, one tier cheaper.
 feeds a display driver and what `DspyRegisterDriver` currently has
 nothing to do. Progressive modes come with it.
 
-## What Has To Change Upstream
+## What Upstream Provides
 
-`nsi-intermediate` records a scene and answers questions about all of
-it. Interactive needs it to answer *what changed*, and that is graph
-knowledge, not backend knowledge (`spec.md` R3):
+Everything this plan asked of `nsi-intermediate` is already there:
+`Scene::take_changes()` for the journal and `Scene::affected()` for the
+walk down. See `research.md`.
 
-- a journal of creates, deletes, attribute sets and connection changes
-  since the last synchronise, and a way to clear it;
-- dirty propagation down the transform tree;
-- dirty propagation through `attributes` bindings.
-
-Mitsuba cannot edit a live scene, so nothing has forced this — the same
-position motion-sample resolution was in before this backend needed it.
-
-Until it exists, this backend can only diff whole scenes. That is a
-fallback worth having (it is also how a `.nsi` file replayed into a live
-context would work) but it is not the design.
+So the remaining work is entirely here: hold a live `SceneContext`,
+and turn an `Affected` batch into the narrowest rdl2 edits that express
+it.
 
 ## Gates
 

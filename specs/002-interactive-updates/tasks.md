@@ -39,12 +39,25 @@ Nothing built. Ordered so that each step is checkable on its own.
 - [ ] I6 Fall back to a full rebuild for anything not mapped, and
       report it. Never fail a synchronise.
 
-## Upstream
+## Upstream — **done**
 
-- [ ] U1 **A journal in `nsi-intermediate`**: creates, deletes,
-      attribute sets, connection changes since the last synchronise,
-      and a way to clear it.
-- [ ] U2 Dirty propagation down the transform tree.
-- [ ] U3 Dirty propagation through `attributes` bindings.
-- [ ] U4 Until U1 exists, a whole-scene diff in this backend, so the
-      interactive path can be built and tested against something.
+All three landed in `nsi-intermediate` before this spec was a day old.
+What is left is consuming them.
+
+- [x] U1 A journal. `Scene::changes()` / `take_changes()` returns
+      `Changes`: created, deleted (with the type they had), the
+      `(handle, attribute)` pairs set, and edges added, removed **and
+      re-armed** — that last one being a connection whose arguments a
+      repeated `connect` replaced, which carries ɴsɪ's `priority` and
+      so changes which shader wins without any edge appearing or
+      disappearing. A record keyed on additions and removals misses it
+      entirely. It is a *net* record carrying no values, which is what
+      a synchronise wants.
+- [x] U2, U3 Dirty propagation. `Scene::affected(&Changes)` returns
+      `Affected { nodes, shaders, outputs, everything }`, walking down
+      the transform tree and through `attributes` bindings — the
+      inverse of the climb resolution already does.
+- [ ] U5 **Consume them.** `Affected` separates `shaders` from `nodes`
+      because a shader edit costs no geometry work — which is exactly
+      MoonRay's own distinction (`research.md` F3). The two models line
+      up; this backend has to be told to use them.

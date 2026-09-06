@@ -17,32 +17,28 @@ use nsi_trait::Type;
 use std::{fs, path::PathBuf};
 
 fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArg {
-    OwnedArg {
-        name: name.to_string(),
-        type_tag,
-        array_length: 1,
-        flags: 0,
-        data,
-    }
+    OwnedArg::new(name, type_tag, 1, 0, data)
 }
 
 /// A unit quad in the XY plane at `z`, as an ɴsɪ mesh.
 fn quad(scene: &mut Scene, handle: &str, z: f32) {
-    scene.create(handle, "mesh");
-    scene.set_attribute(
-        handle,
-        vec![
-            arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
-            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
-            arg(
-                "P",
-                Type::Point,
-                OwnedData::F32(vec![
-                    -1.0, -1.0, z, 1.0, -1.0, z, 1.0, 1.0, z, -1.0, 1.0, z,
-                ]),
-            ),
-        ],
-    );
+    scene.create(handle, "mesh").expect("a recordable edit");
+    scene
+        .set_attribute(
+            handle,
+            vec![
+                arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+                arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
+                arg(
+                    "P",
+                    Type::Point,
+                    OwnedData::F32(vec![
+                        -1.0, -1.0, z, 1.0, -1.0, z, 1.0, 1.0, z, -1.0, 1.0, z,
+                    ]),
+                ),
+            ],
+        )
+        .expect("a recordable edit");
 }
 
 /// A `shader` carrying one colour, bound to `geometry` through an
@@ -52,16 +48,20 @@ fn shade(scene: &mut Scene, geometry: &str, colour: [f32; 3]) {
     let shader = format!("{geometry}_shader");
     let attributes = format!("{geometry}_attributes");
 
-    scene.create(&shader, "shader");
-    scene.set_attribute(
-        &shader,
-        vec![arg(
-            "diffuseColor",
-            Type::Color,
-            OwnedData::F32(colour.to_vec()),
-        )],
-    );
-    scene.create(&attributes, "attributes");
+    scene.create(&shader, "shader").expect("a recordable edit");
+    scene
+        .set_attribute(
+            &shader,
+            vec![arg(
+                "diffuseColor",
+                Type::Color,
+                OwnedData::F32(colour.to_vec()),
+            )],
+        )
+        .expect("a recordable edit");
+    scene
+        .create(&attributes, "attributes")
+        .expect("a recordable edit");
     scene
         .connect(&shader, None, &attributes, "surfaceshader")
         .expect("known attribute");
@@ -89,26 +89,34 @@ fn translate(x: f64, y: f64, z: f64) -> OwnedArg {
 
 /// The camera, screen and light every scene here needs.
 fn viewing(scene: &mut Scene, width: i32, height: i32) {
-    scene.create("cam", "perspectivecamera");
-    scene.set_attribute(
-        "cam",
-        vec![arg("fov", Type::F32, OwnedData::F32(vec![45.0]))],
-    );
+    scene
+        .create("cam", "perspectivecamera")
+        .expect("a recordable edit");
+    scene
+        .set_attribute(
+            "cam",
+            vec![arg("fov", Type::F32, OwnedData::F32(vec![45.0]))],
+        )
+        .expect("a recordable edit");
 
-    scene.create("screen", "screen");
-    scene.set_attribute(
-        "screen",
-        vec![arg(
-            "resolution",
-            Type::I32,
-            OwnedData::I32(vec![width, height]),
-        )],
-    );
+    scene.create("screen", "screen").expect("a recordable edit");
+    scene
+        .set_attribute(
+            "screen",
+            vec![arg(
+                "resolution",
+                Type::I32,
+                OwnedData::I32(vec![width, height]),
+            )],
+        )
+        .expect("a recordable edit");
     scene
         .connect("screen", None, "cam", "screens")
         .expect("known attribute");
 
-    scene.create("env", "environment");
+    scene
+        .create("env", "environment")
+        .expect("a recordable edit");
 }
 
 /// Render a scene and read the image back as RGB rows.
@@ -171,21 +179,23 @@ impl Image {
 fn scene() -> Scene {
     let mut scene = Scene::default();
 
-    scene.create("tri", "mesh");
-    scene.set_attribute(
-        "tri",
-        vec![
-            arg("nvertices", Type::I32, OwnedData::I32(vec![3])),
-            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2])),
-            arg(
-                "P",
-                Type::Point,
-                OwnedData::F32(vec![
-                    -1.0, -1.0, -5.0, 1.0, -1.0, -5.0, 0.0, 1.0, -5.0,
-                ]),
-            ),
-        ],
-    );
+    scene.create("tri", "mesh").expect("a recordable edit");
+    scene
+        .set_attribute(
+            "tri",
+            vec![
+                arg("nvertices", Type::I32, OwnedData::I32(vec![3])),
+                arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2])),
+                arg(
+                    "P",
+                    Type::Point,
+                    OwnedData::F32(vec![
+                        -1.0, -1.0, -5.0, 1.0, -1.0, -5.0, 0.0, 1.0, -5.0,
+                    ]),
+                ),
+            ],
+        )
+        .expect("a recordable edit");
     scene
         .connect("tri", None, ".root", "objects")
         .expect("known attribute");
@@ -265,8 +275,12 @@ fn two_materials_land_on_the_right_two_shapes() {
         shade(&mut scene, handle, colour);
 
         let transform = format!("{handle}_xform");
-        scene.create(&transform, "transform");
-        scene.set_attribute(&transform, vec![translate(x, 0.0, -6.0)]);
+        scene
+            .create(&transform, "transform")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(&transform, vec![translate(x, 0.0, -6.0)])
+            .expect("a recordable edit");
         scene
             .connect(handle, None, &transform, "objects")
             .expect("known attribute");
@@ -316,9 +330,13 @@ fn a_transform_moves_the_shape() {
     let mut moved = Scene::default();
     viewing(&mut moved, width as i32, height as i32);
     quad(&mut moved, "quad", 0.0);
-    moved.create("xform", "transform");
+    moved
+        .create("xform", "transform")
+        .expect("a recordable edit");
     // Two units left, and back to the same depth.
-    moved.set_attribute("xform", vec![translate(-2.0, 0.0, -6.0)]);
+    moved
+        .set_attribute("xform", vec![translate(-2.0, 0.0, -6.0)])
+        .expect("a recordable edit");
     moved
         .connect("quad", None, "xform", "objects")
         .expect("known attribute");
@@ -355,5 +373,68 @@ fn a_transform_moves_the_shape() {
     assert!(
         left_after[0] > 0.0,
         "the quad should have moved left, and the pixel is {left_after:?}"
+    );
+}
+
+/// A moving transform renders blurred.
+///
+/// The capability that distinguishes this backend from the Mitsuba
+/// one, which cannot blur at all — and the assertion has to be about
+/// pixels, because emitting `blur(a, b)` and MoonRay acting on it are
+/// different claims. A blurred edge is a partially covered pixel where
+/// a sharp one is either covered or not.
+#[test]
+fn a_moving_shape_renders_blurred() {
+    if nsi_moonray::render::binary().is_err() {
+        eprintln!("skipped: no `moonray` binary");
+        return;
+    }
+
+    let (width, height) = (64usize, 48usize);
+
+    let mut still = Scene::default();
+    viewing(&mut still, width as i32, height as i32);
+    quad(&mut still, "quad", -6.0);
+    still
+        .connect("quad", None, ".root", "objects")
+        .expect("known attribute");
+    shade(&mut still, "quad", [1.0, 1.0, 1.0]);
+    let sharp = render("sharp", &still, (width, height));
+
+    let mut moving = Scene::default();
+    viewing(&mut moving, width as i32, height as i32);
+    quad(&mut moving, "quad", 0.0);
+    shade(&mut moving, "quad", [1.0, 1.0, 1.0]);
+    moving.create("xf", "transform").expect("a fresh handle");
+    for (time, x) in [(0.0, -1.5), (1.0, 1.5)] {
+        moving
+            .set_attribute_at_time("xf", time, vec![translate(x, 0.0, -6.0)])
+            .expect("a recordable edit");
+    }
+    moving
+        .connect("quad", None, "xf", "objects")
+        .expect("known attribute");
+    moving
+        .connect("xf", None, ".root", "objects")
+        .expect("known attribute");
+    let blurred = render("blurred", &moving, (width, height));
+
+    // A sharp vertical edge lands between two pixel columns; a blurred
+    // one smears across many. Counting columns that are neither empty
+    // nor fully lit along the middle row is the difference.
+    let partial = |image: &Image| {
+        (0..width)
+            .filter(|x| {
+                let value = image.at(*x, height / 2)[0];
+                value > 0.001 && value < 0.9 * image.brightest()
+            })
+            .count()
+    };
+
+    let (sharp_edge, blurred_edge) = (partial(&sharp), partial(&blurred));
+    assert!(
+        blurred_edge > sharp_edge + 2,
+        "the moving quad should smear across more columns than the still \
+         one: {blurred_edge} against {sharp_edge}"
     );
 }

@@ -46,6 +46,25 @@ and two findings in `research.md` that were simply wrong:
 This is the same discipline that made the `.nsi` emitter correct, and
 it paid the same way. Keep it: capture, then emit.
 
+## Upstream Moved, And It Answers The Hard Part
+
+`nsi-intermediate` gained a synchronise journal and dirty propagation —
+`Scene::take_changes()` and `Scene::affected()` — plus motion-sample
+resolution, a `.nsi` parser (`nsi-parse`) and much else. Three things
+`002` listed as upstream asks were already done.
+
+Two API changes bite a backend written against the old crate, and both
+are corrections rather than churn:
+
+- **`Node::attrs` is not the value.** `SetAttributeAtTime` on an
+  attribute that is not motion data sets it for the whole shutter, so
+  reading `attrs` answers "not set" for something the renderer honours.
+  Use `Node::effective`, which is what the resolver reads.
+- **An ɴsɪ string is bytes, not `String`.** A file name need not be
+  UTF-8, and 3Delight round-trips a high byte unchanged; storing
+  `String` would replace it at recording time, where nothing later
+  could undo it.
+
 ## The Dependency, And Why It Is A Path
 
 `nsi-intermediate` is overlaid from a sibling `../nsi` checkout. That

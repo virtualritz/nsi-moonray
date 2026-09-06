@@ -19,7 +19,7 @@ use crate::{
     document::{Assignment, Body, Document, Object},
     value::{Reference, Value},
 };
-use nsi_intermediate::{IDENTITY, OwnedData, Scene};
+use nsi_intermediate::{IDENTITY, Node, OwnedData, Scene};
 use nsi_trait::Type;
 
 /// MoonRay's mesh geometry, whose DSO is `moonray/dso/geometry/RdlMesh`.
@@ -95,7 +95,7 @@ pub fn flush(scene: &Scene) -> Flushed {
 
     let resolution = resolution(scene);
 
-    for (handle, node) in &scene.nodes {
+    for (handle, node) in scene.nodes() {
         match node.node_type.as_str() {
             "mesh" | "subdivisionmesh" => {
                 objects.push(mesh(scene, handle, &mut flushed));
@@ -104,7 +104,10 @@ pub fn flush(scene: &Scene) -> Flushed {
                 // Every mesh gets a row, bound or not: MoonRay renders
                 // what the `Layer` names, so geometry left out of it is
                 // simply absent from the image.
-                bindings.push((handle.clone(), material(scene, handle)));
+                bindings.push((
+                    handle.clone(),
+                    material(scene, handle, &mut flushed),
+                ));
             }
 
             "perspectivecamera" => {
@@ -129,17 +132,6 @@ pub fn flush(scene: &Scene) -> Flushed {
                 "node {handle:?} of type {other:?} has no MoonRay mapping \
                  and was skipped"
             )),
-        }
-
-        if !node.time_attrs.is_empty() {
-            // `nsi-intermediate` resolves static transforms only, so
-            // motion samples cannot be honoured yet. Reporting a sharp
-            // render is the contract; flattening it silently is not.
-            flushed.limitations.push(format!(
-                "node {handle:?} carries {} motion sample(s), which are \
-                 not resolved upstream yet; it renders sharp",
-                node.time_attrs.len()
-            ));
         }
     }
 
@@ -241,18 +233,112 @@ pub fn flush(scene: &Scene) -> Flushed {
     flushed
 }
 
+/// Put an object's resolved world transform on it, as `node_xform`.
+///
+/// `world_transform` refuses rather than guesses: a cycle, a node that
+/// never reaches `.root`, and a *prototype* under an `instances` node,
+/// which has one matrix per instance and none of its own. Each of those
+/// is reported and the object is left where it is, because ɴsɪ always
+/// returns an image.
+fn with_transform(
+    object: Object,
+    scene: &Scene,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    // Motion first: a moving object's static transform is only one of
+    // its samples, and taking it would be the silent flattening this
+    // backend exists to avoid.
+    let times = scene.motion_times(handle).unwrap_or_default();
+    if times.len() >= 2 {
+        return match blurred_transform(scene, handle, &times, flushed) {
+            Some(object_with_blur) => {
+                object.set("node_xform", object_with_blur)
+            }
+            None => object,
+        };
+    }
+
+    match scene.world_transform(handle) {
+        Ok(transform) if transform == IDENTITY => object,
+        Ok(transform) => object.set("node_xform", Value::Mat4d(transform)),
+        Err(error) => {
+            flushed.limitations.push(format!(
+                "{handle:?} has no single world transform ({error}); it is \
+                 left untransformed"
+            ));
+            object
+        }
+    }
+}
+
+/// A moving transform, as rdl2's two-sample `blur(a, b)`.
+///
+/// **rdl2 has exactly two timesteps.** ɴsɪ has as many as the scene
+/// sets, so anything past the first and last is dropped -- reported,
+/// never silently. Upstream interpolates the way 3Delight does
+/// (element-wise, holding the ends), so the two samples asked for here
+/// are the renderer's own answer rather than this backend's arithmetic.
+fn blurred_transform(
+    scene: &Scene,
+    handle: &str,
+    times: &[f64],
+    flushed: &mut Flushed,
+) -> Option<Value> {
+    let (first, last) = (times[0], times[times.len() - 1]);
+
+    let begin = match scene.world_transform_interpolated_at(handle, first) {
+        Ok(matrix) => matrix,
+        Err(error) => {
+            flushed.limitations.push(format!(
+                "{handle:?} is motion sampled but has no transform at \
+                 {first} ({error}); it renders sharp"
+            ));
+            return None;
+        }
+    };
+    let end = match scene.world_transform_interpolated_at(handle, last) {
+        Ok(matrix) => matrix,
+        Err(error) => {
+            flushed.limitations.push(format!(
+                "{handle:?} is motion sampled but has no transform at \
+                 {last} ({error}); it renders sharp"
+            ));
+            return None;
+        }
+    };
+
+    if times.len() > 2 {
+        flushed.limitations.push(format!(
+            "{handle:?} carries {} motion samples and MoonRay takes two; \
+             the transform is blurred between {first} and {last} and the \
+             {} in between are dropped",
+            times.len(),
+            times.len() - 2
+        ));
+    }
+
+    if begin == end && begin == IDENTITY {
+        return None;
+    }
+
+    Some(Value::Blur(
+        Box::new(Value::Mat4d(begin)),
+        Box::new(Value::Mat4d(end)),
+    ))
+}
+
 /// One `RdlMeshGeometry`, with its world transform baked in.
 fn mesh(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
-    let node = &scene.nodes[handle];
+    let Some(node) = scene.node(handle) else {
+        return Object::new(MESH, handle);
+    };
 
     let mut object = Object::new(MESH, handle);
 
-    let transform = scene.world_transform(handle);
-    if transform != IDENTITY {
-        object = object.set("node_xform", Value::Mat4d(transform));
-    }
+    object = with_transform(object, scene, handle, flushed);
 
-    match node.attrs.get("nvertices").map(|arg| &arg.data) {
+    match node.effective("nvertices").map(|arg| &arg.data) {
         Some(OwnedData::I32(counts)) => {
             object = object.set(
                 "face_vertex_count",
@@ -264,7 +350,7 @@ fn mesh(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
             .push(format!("mesh {handle:?} has no \"nvertices\"")),
     }
 
-    match node.attrs.get("P.indices").map(|arg| &arg.data) {
+    match node.effective("P.indices").map(|arg| &arg.data) {
         Some(OwnedData::I32(indices)) => {
             object = object.set(
                 "vertices_by_index",
@@ -276,7 +362,7 @@ fn mesh(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
             .push(format!("mesh {handle:?} has no \"P.indices\"")),
     }
 
-    match node.attrs.get("P").map(|arg| &arg.data) {
+    match node.effective("P").map(|arg| &arg.data) {
         Some(OwnedData::F32(points)) if points.len() % 3 == 0 => {
             object = object.set(
                 "vertex_list_0",
@@ -298,8 +384,13 @@ fn mesh(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     // alone renders every subdivision surface faceted -- and silently,
     // since a polygon mesh of the same cage is a perfectly good render
     // of the wrong thing.
-    let scheme = match node.attrs.get("subdivision.scheme").map(|a| &a.data) {
-        Some(OwnedData::String(values)) => values.first().cloned(),
+    // An ɴsɪ string is bytes, not `String`: the C API was handed
+    // whatever the host had, and a file name need not be UTF-8. Only
+    // the values compared against a known spelling are read as text.
+    let scheme = match node.effective("subdivision.scheme").map(|a| &a.data) {
+        Some(OwnedData::String(values)) => values
+            .first()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
         _ => None,
     };
     let subdivision = scheme.is_some() || node.node_type == "subdivisionmesh";
@@ -331,7 +422,7 @@ fn mesh(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     // orientation, where 1 is left-handed. Getting it backwards turns
     // every generated normal inside out.
     if let Some(OwnedData::I32(values)) =
-        node.attrs.get("clockwisewinding").map(|arg| &arg.data)
+        node.effective("clockwisewinding").map(|arg| &arg.data)
         && values.first().is_some_and(|winding| *winding != 0)
     {
         object = object.set("orientation", Value::Int(1));
@@ -346,13 +437,13 @@ fn mesh(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
 /// `subdivision.creasevertices` is a flat list of vertex index *pairs*,
 /// one edge each, and `subd_crease_indices` is the same shape -- so this
 /// is a rename rather than a conversion.
-fn creases(mut object: Object, node: &nsi_intermediate::Node) -> Object {
+fn creases(mut object: Object, node: &Node) -> Object {
     for (from, to) in [
         ("subdivision.creasevertices", "subd_crease_indices"),
         ("subdivision.cornervertices", "subd_corner_indices"),
     ] {
         if let Some(OwnedData::I32(indices)) =
-            node.attrs.get(from).map(|arg| &arg.data)
+            node.effective(from).map(|arg| &arg.data)
         {
             object = object.set(
                 to,
@@ -366,7 +457,7 @@ fn creases(mut object: Object, node: &nsi_intermediate::Node) -> Object {
         ("subdivision.cornersharpness", "subd_corner_sharpnesses"),
     ] {
         if let Some(OwnedData::F32(values)) =
-            node.attrs.get(from).map(|arg| &arg.data)
+            node.effective(from).map(|arg| &arg.data)
         {
             object = object.set(
                 to,
@@ -386,12 +477,24 @@ fn creases(mut object: Object, node: &nsi_intermediate::Node) -> Object {
 /// has to be pointed at. An `attributes` node carrying nothing but
 /// visibility has no shader, and that row's material column stays
 /// `undef()`.
-fn material(scene: &Scene, handle: &str) -> Option<Reference> {
-    scene
-        .geometry_binding(handle)?
-        .surface_shader
-        .as_deref()
-        .map(|shader| Reference::new(MATERIAL, shader))
+fn material(
+    scene: &Scene,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Option<Reference> {
+    match scene.geometry_binding(handle) {
+        Ok(binding) => binding?
+            .surface_shader
+            .as_deref()
+            .map(|shader| Reference::new(MATERIAL, shader)),
+        Err(error) => {
+            flushed.limitations.push(format!(
+                "{handle:?} has no single material binding ({error}); it \
+                 renders with the default surface"
+            ));
+            None
+        }
+    }
 }
 
 /// The parameters carried from an ɴsɪ shader into the substitute
@@ -419,13 +522,13 @@ const CARRIED: [(&str, &str); 6] = [
 /// parameters that share a name with one of its attributes.
 fn shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     let mut object = Object::new(MATERIAL, handle);
-    let Some(node) = scene.nodes.get(handle) else {
+    let Some(node) = scene.node(handle) else {
         return object;
     };
 
     let mut carried = Vec::new();
     for (from, to) in CARRIED {
-        let Some(arg) = node.attrs.get(from) else {
+        let Some(arg) = node.effective(from) else {
             continue;
         };
 
@@ -483,13 +586,12 @@ fn shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
 fn environment(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     let mut object = Object::new(ENVIRONMENT_LIGHT, handle);
 
-    let transform = scene.world_transform(handle);
-    if transform != IDENTITY {
-        object = object.set("node_xform", Value::Mat4d(transform));
-    }
+    object = with_transform(object, scene, handle, flushed);
 
     if scene
         .geometry_binding(handle)
+        .ok()
+        .flatten()
         .and_then(|binding| binding.surface_shader)
         .is_some()
     {
@@ -510,16 +612,15 @@ fn camera(
     resolution: (i32, i32),
     flushed: &mut Flushed,
 ) -> Object {
-    let node = &scene.nodes[handle];
+    let Some(node) = scene.node(handle) else {
+        return Object::new(PERSPECTIVE_CAMERA, handle);
+    };
 
     let mut object = Object::new(PERSPECTIVE_CAMERA, handle);
 
-    let transform = scene.world_transform(handle);
-    if transform != IDENTITY {
-        object = object.set("node_xform", Value::Mat4d(transform));
-    }
+    object = with_transform(object, scene, handle, flushed);
 
-    match node.attrs.get("fov").map(|arg| &arg.data) {
+    match node.effective("fov").map(|arg| &arg.data) {
         Some(OwnedData::F32(values)) if !values.is_empty() => {
             object =
                 object.set("focal", Value::Float(focal(values[0], resolution)));
@@ -562,12 +663,15 @@ fn focal(fov_degrees: f32, resolution: (i32, i32)) -> f32 {
 fn render_output(scene: &Scene, layer: &str, drivers: &[String]) -> Object {
     let mut object = Object::new("RenderOutput", layer);
 
-    if let Some(node) = scene.nodes.get(layer)
+    if let Some(node) = scene.node(layer)
         && let Some(OwnedData::String(names)) =
-            node.attrs.get("variablename").map(|arg| &arg.data)
+            node.effective("variablename").map(|arg| &arg.data)
         && let Some(name) = names.first()
     {
-        object = object.set("channel_name", Value::String(name.clone()));
+        object = object.set(
+            "channel_name",
+            Value::String(String::from_utf8_lossy(name).into_owned()),
+        );
     }
 
     // A layer may fan out to several drivers. rdl2 writes one file per
@@ -575,12 +679,9 @@ fn render_output(scene: &Scene, layer: &str, drivers: &[String]) -> Object {
     // reported by the caller's limitations if this ever grows to handle
     // them.
     if let Some(driver) = drivers.first()
-        && let Some(node) = scene.nodes.get(driver)
-        && let Some(OwnedData::String(files)) =
-            node.attrs.get("imagefilename").map(|arg| &arg.data)
-        && let Some(file) = files.first()
+        && let Some(file) = image_file(scene, driver)
     {
-        object = object.set("file_name", Value::String(file.clone()));
+        object = object.set("file_name", Value::String(file));
     }
 
     object
@@ -588,8 +689,10 @@ fn render_output(scene: &Scene, layer: &str, drivers: &[String]) -> Object {
 
 /// The file an ɴsɪ output driver writes to.
 fn image_file(scene: &Scene, driver: &str) -> Option<String> {
-    match &scene.nodes.get(driver)?.attrs.get("imagefilename")?.data {
-        OwnedData::String(files) => files.first().cloned(),
+    match &scene.node(driver)?.effective("imagefilename")?.data {
+        OwnedData::String(files) => files
+            .first()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
         _ => None,
     }
 }
@@ -600,9 +703,9 @@ fn image_file(scene: &Scene, driver: &str) -> Option<String> {
 /// `SceneVariables::sImageWidth` and `sImageHeight`.
 fn resolution(scene: &Scene) -> (i32, i32) {
     for output in scene.render_outputs() {
-        if let Some(node) = scene.nodes.get(&output.screen)
+        if let Some(node) = scene.node(&output.screen)
             && let Some(OwnedData::I32(values)) =
-                node.attrs.get("resolution").map(|arg| &arg.data)
+                node.effective("resolution").map(|arg| &arg.data)
             && values.len() >= 2
         {
             return (values[0], values[1]);
@@ -622,14 +725,25 @@ mod tests {
     use nsi_intermediate::OwnedArg;
     use nsi_trait::Type;
 
+    /// A translation along X, as ɴsɪ stores a matrix: row-major, with
+    /// the translation in the last row.
+    fn translation(x: f64) -> OwnedArg {
+        #[rustfmt::skip]
+        let matrix = vec![
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+              x, 0.0, 0.0, 1.0,
+        ];
+        arg(
+            "transformationmatrix",
+            Type::MatrixF64,
+            OwnedData::F64(matrix),
+        )
+    }
+
     fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArg {
-        OwnedArg {
-            name: name.to_string(),
-            type_tag,
-            array_length: 1,
-            flags: 0,
-            data,
-        }
+        OwnedArg::new(name, type_tag, 1, 0, data)
     }
 
     /// A triangle, a camera, a screen and an output -- the smallest
@@ -637,58 +751,78 @@ mod tests {
     fn triangle() -> Scene {
         let mut scene = Scene::default();
 
-        scene.create("tri", "mesh");
-        scene.set_attribute(
-            "tri",
-            vec![
-                arg("nvertices", Type::I32, OwnedData::I32(vec![3])),
-                arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2])),
-                arg(
-                    "P",
-                    Type::Point,
-                    OwnedData::F32(vec![
-                        0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
-                    ]),
-                ),
-            ],
-        );
+        scene.create("tri", "mesh").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "tri",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![3])),
+                    arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2])),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                        ]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
         scene.connect("tri", None, ".root", "objects").unwrap();
 
-        scene.create("cam", "perspectivecamera");
-        scene.set_attribute(
-            "cam",
-            vec![arg("fov", Type::F32, OwnedData::F32(vec![45.0]))],
-        );
+        scene
+            .create("cam", "perspectivecamera")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(
+                "cam",
+                vec![arg("fov", Type::F32, OwnedData::F32(vec![45.0]))],
+            )
+            .expect("a recordable edit");
 
-        scene.create("screen", "screen");
-        scene.set_attribute(
-            "screen",
-            vec![arg("resolution", Type::I32, OwnedData::I32(vec![320, 240]))],
-        );
+        scene.create("screen", "screen").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "screen",
+                vec![arg(
+                    "resolution",
+                    Type::I32,
+                    OwnedData::I32(vec![320, 240]),
+                )],
+            )
+            .expect("a recordable edit");
         scene.connect("screen", None, "cam", "screens").unwrap();
 
-        scene.create("beauty", "outputlayer");
-        scene.set_attribute(
-            "beauty",
-            vec![arg(
-                "variablename",
-                Type::String,
-                OwnedData::String(vec!["Ci".to_string()]),
-            )],
-        );
+        scene
+            .create("beauty", "outputlayer")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(
+                "beauty",
+                vec![arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"Ci".to_vec()]),
+                )],
+            )
+            .expect("a recordable edit");
         scene
             .connect("beauty", None, "screen", "outputlayers")
             .unwrap();
 
-        scene.create("driver", "outputdriver");
-        scene.set_attribute(
-            "driver",
-            vec![arg(
-                "imagefilename",
-                Type::String,
-                OwnedData::String(vec!["beauty.exr".to_string()]),
-            )],
-        );
+        scene
+            .create("driver", "outputdriver")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(
+                "driver",
+                vec![arg(
+                    "imagefilename",
+                    Type::String,
+                    OwnedData::String(vec![b"beauty.exr".to_vec()]),
+                )],
+            )
+            .expect("a recordable edit");
         scene
             .connect("driver", None, "beauty", "outputdrivers")
             .unwrap();
@@ -749,10 +883,13 @@ mod tests {
 
     #[test]
     fn a_subdivisionmesh_says_it_is_one() {
-        let mut scene = triangle();
-        scene.create("tri", "subdivisionmesh");
+        let mut scene = Scene::default();
+        scene
+            .create("subd", "subdivisionmesh")
+            .expect("a fresh handle");
 
         let rdla = flush(&scene).to_rdla();
+        assert!(rdla.contains("RdlMeshGeometry(\"subd\") {"), "{rdla}");
         assert!(rdla.contains("[\"is_subd\"] = true,"), "{rdla}");
     }
 
@@ -763,14 +900,16 @@ mod tests {
     #[test]
     fn subdivision_scheme_on_a_mesh_makes_it_a_subdivision_surface() {
         let mut scene = triangle();
-        scene.set_attribute(
-            "tri",
-            vec![arg(
-                "subdivision.scheme",
-                Type::String,
-                OwnedData::String(vec!["catmull-clark".to_string()]),
-            )],
-        );
+        scene
+            .set_attribute(
+                "tri",
+                vec![arg(
+                    "subdivision.scheme",
+                    Type::String,
+                    OwnedData::String(vec![b"catmull-clark".to_vec()]),
+                )],
+            )
+            .expect("a recordable edit");
 
         let rdla = flush(&scene).to_rdla();
         assert!(rdla.contains("[\"is_subd\"] = true,"), "{rdla}");
@@ -783,36 +922,38 @@ mod tests {
     #[test]
     fn creases_and_corners_cross() {
         let mut scene = triangle();
-        scene.set_attribute(
-            "tri",
-            vec![
-                arg(
-                    "subdivision.scheme",
-                    Type::String,
-                    OwnedData::String(vec!["catmull-clark".to_string()]),
-                ),
-                arg(
-                    "subdivision.creasevertices",
-                    Type::I32,
-                    OwnedData::I32(vec![0, 1, 1, 2]),
-                ),
-                arg(
-                    "subdivision.creasesharpness",
-                    Type::F32,
-                    OwnedData::F32(vec![2.5, 2.5]),
-                ),
-                arg(
-                    "subdivision.cornervertices",
-                    Type::I32,
-                    OwnedData::I32(vec![2]),
-                ),
-                arg(
-                    "subdivision.cornersharpness",
-                    Type::F32,
-                    OwnedData::F32(vec![10.0]),
-                ),
-            ],
-        );
+        scene
+            .set_attribute(
+                "tri",
+                vec![
+                    arg(
+                        "subdivision.scheme",
+                        Type::String,
+                        OwnedData::String(vec![b"catmull-clark".to_vec()]),
+                    ),
+                    arg(
+                        "subdivision.creasevertices",
+                        Type::I32,
+                        OwnedData::I32(vec![0, 1, 1, 2]),
+                    ),
+                    arg(
+                        "subdivision.creasesharpness",
+                        Type::F32,
+                        OwnedData::F32(vec![2.5, 2.5]),
+                    ),
+                    arg(
+                        "subdivision.cornervertices",
+                        Type::I32,
+                        OwnedData::I32(vec![2]),
+                    ),
+                    arg(
+                        "subdivision.cornersharpness",
+                        Type::F32,
+                        OwnedData::F32(vec![10.0]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
 
         let rdla = flush(&scene).to_rdla();
         assert!(
@@ -835,10 +976,16 @@ mod tests {
     #[test]
     fn clockwise_winding_is_left_handed_orientation() {
         let mut scene = triangle();
-        scene.set_attribute(
-            "tri",
-            vec![arg("clockwisewinding", Type::I32, OwnedData::I32(vec![1]))],
-        );
+        scene
+            .set_attribute(
+                "tri",
+                vec![arg(
+                    "clockwisewinding",
+                    Type::I32,
+                    OwnedData::I32(vec![1]),
+                )],
+            )
+            .expect("a recordable edit");
 
         let rdla = flush(&scene).to_rdla();
         assert!(rdla.contains("[\"orientation\"] = 1,"), "{rdla}");
@@ -850,7 +997,7 @@ mod tests {
     fn geometry_carries_its_world_transform() {
         let mut scene = triangle();
 
-        scene.create("xf", "transform");
+        scene.create("xf", "transform").expect("a recordable edit");
         #[rustfmt::skip]
         let matrix = vec![
             1.0, 0.0, 0.0, 0.0,
@@ -858,14 +1005,16 @@ mod tests {
             0.0, 0.0, 1.0, 0.0,
             1.0, 2.0, 3.0, 1.0,
         ];
-        scene.set_attribute(
-            "xf",
-            vec![arg(
-                "transformationmatrix",
-                Type::MatrixF64,
-                OwnedData::F64(matrix),
-            )],
-        );
+        scene
+            .set_attribute(
+                "xf",
+                vec![arg(
+                    "transformationmatrix",
+                    Type::MatrixF64,
+                    OwnedData::F64(matrix),
+                )],
+            )
+            .expect("a recordable edit");
         // The mesh hangs off the transform, not off the root: ɴsɪ's
         // transform chain is a chain, and a shape connected straight to
         // `.root` as well would stop the walk at the root.
@@ -890,8 +1039,10 @@ mod tests {
     fn a_bound_shader_becomes_the_default_surface() {
         let mut scene = triangle();
 
-        scene.create("attr", "attributes");
-        scene.create("shader", "shader");
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("shader", "shader").expect("a recordable edit");
         scene
             .connect("attr", None, "tri", "geometryattributes")
             .unwrap();
@@ -922,23 +1073,69 @@ mod tests {
         );
     }
 
-    /// Motion samples are reported as unhonoured rather than flattened
-    /// into a sharp render without a word.
+    /// A moving transform becomes rdl2's two-sample `blur(a, b)`.
+    ///
+    /// This is the capability that distinguishes this backend from the
+    /// Mitsuba one, which cannot blur at all.
     #[test]
-    fn motion_samples_are_reported() {
+    fn a_moving_transform_blurs() {
         let mut scene = triangle();
-        scene.set_attribute_at_time(
-            "tri",
-            0.0,
-            vec![arg("P", Type::Point, OwnedData::F32(vec![0.0, 0.0, 0.0]))],
+        scene
+            .disconnect("tri", None, ".root", "objects")
+            .expect("connected");
+        scene.create("xf", "transform").expect("a fresh handle");
+        scene
+            .connect("tri", None, "xf", "objects")
+            .expect("known attribute");
+        scene
+            .connect("xf", None, ".root", "objects")
+            .expect("known attribute");
+
+        for (time, x) in [(0.0, 0.0), (1.0, 5.0)] {
+            scene
+                .set_attribute_at_time("xf", time, vec![translation(x)])
+                .expect("a recordable edit");
+        }
+
+        let rdla = flush(&scene).to_rdla();
+        assert!(
+            rdla.contains(
+                "[\"node_xform\"] = blur(Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, \
+                 1, 0, 0, 0, 0, 1), Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, \
+                 0, 5, 0, 0, 1))"
+            ),
+            "{rdla}"
         );
+    }
+
+    /// rdl2 has exactly two timesteps. ɴsɪ has as many as the scene
+    /// sets, and dropping the rest quietly is the failure this reports.
+    #[test]
+    fn more_than_two_motion_samples_are_reported() {
+        let mut scene = triangle();
+        scene
+            .disconnect("tri", None, ".root", "objects")
+            .expect("connected");
+        scene.create("xf", "transform").expect("a fresh handle");
+        scene
+            .connect("tri", None, "xf", "objects")
+            .expect("known attribute");
+        scene
+            .connect("xf", None, ".root", "objects")
+            .expect("known attribute");
+
+        for (time, x) in [(0.0, 0.0), (0.5, 1.0), (1.0, 5.0)] {
+            scene
+                .set_attribute_at_time("xf", time, vec![translation(x)])
+                .expect("a recordable edit");
+        }
 
         let flushed = flush(&scene);
         assert!(
             flushed
                 .limitations
                 .iter()
-                .any(|line| line.contains("renders sharp")),
+                .any(|line| line.contains("MoonRay takes two")),
             "{:?}",
             flushed.limitations
         );
@@ -957,7 +1154,9 @@ mod tests {
     #[test]
     fn an_environment_lights_the_scene() {
         let mut scene = triangle();
-        scene.create("env", "environment");
+        scene
+            .create("env", "environment")
+            .expect("a recordable edit");
 
         let flushed = flush(&scene);
         let rdla = flushed.to_rdla();
