@@ -145,9 +145,14 @@ The capability that distinguishes this backend.
 
 ## User Story 3: Subdivision (P2)
 
-- [ ] T3.1 ɴsɪ `subdivisionmesh` to a `RdlMeshGeometry` with
-      `is_subd` true -- and an ɴsɪ `mesh` to one with it explicitly
-      false, since it defaults to true.
+- [~] T3.1 ɴsɪ subdivision to a `RdlMeshGeometry` with `is_subd` true.
+      **ɴsɪ marks this with an attribute, not a node type**: a `mesh`
+      carrying `subdivision.scheme`. Keying off the node type alone --
+      which this did until a real subdivision surface was rendered --
+      renders the faceted cage instead, and looks like a perfectly good
+      render of the wrong thing. Creases and corners cross too
+      (`subdivision.crease*` / `corner*` to `subd_crease_*` /
+      `subd_corner_*`), as does `clockwisewinding` to `orientation`.
 - [ ] T3.2 Confirm limit-surface evaluation and view-adaptive
       tessellation are reached, not bypassed.
 

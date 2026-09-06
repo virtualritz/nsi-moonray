@@ -98,8 +98,7 @@ pub fn flush(scene: &Scene) -> Flushed {
     for (handle, node) in &scene.nodes {
         match node.node_type.as_str() {
             "mesh" | "subdivisionmesh" => {
-                let subdivision = node.node_type == "subdivisionmesh";
-                objects.push(mesh(scene, handle, subdivision, &mut flushed));
+                objects.push(mesh(scene, handle, &mut flushed));
                 geometries.push(Reference::new(MESH, handle));
 
                 // Every mesh gets a row, bound or not: MoonRay renders
@@ -243,12 +242,7 @@ pub fn flush(scene: &Scene) -> Flushed {
 }
 
 /// One `RdlMeshGeometry`, with its world transform baked in.
-fn mesh(
-    scene: &Scene,
-    handle: &str,
-    subdivision: bool,
-    flushed: &mut Flushed,
-) -> Object {
+fn mesh(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     let node = &scene.nodes[handle];
 
     let mut object = Object::new(MESH, handle);
@@ -299,9 +293,91 @@ fn mesh(
             .push(format!("mesh {handle:?} has no float \"P\"")),
     }
 
-    // `is_subd` defaults to *true*, so an ɴsɪ `mesh` has to say
-    // otherwise or it renders as a subdivision surface.
-    object.set("is_subd", Value::Bool(subdivision))
+    // ɴsɪ marks a subdivision surface with an *attribute* on a `mesh`,
+    // not with a node type: `subdivision.scheme`. Keying off the type
+    // alone renders every subdivision surface faceted -- and silently,
+    // since a polygon mesh of the same cage is a perfectly good render
+    // of the wrong thing.
+    let scheme = match node.attrs.get("subdivision.scheme").map(|a| &a.data) {
+        Some(OwnedData::String(values)) => values.first().cloned(),
+        _ => None,
+    };
+    let subdivision = scheme.is_some() || node.node_type == "subdivisionmesh";
+
+    // `is_subd` defaults to *true* in MoonRay, so a polygon mesh has to
+    // say otherwise or it is subdivided anyway.
+    object = object.set("is_subd", Value::Bool(subdivision));
+
+    if let Some(scheme) = &scheme {
+        // 0 is bilinear and 1 is catclark, per `RdlMesh`'s
+        // `subd_scheme` enum. MoonRay has no other schemes.
+        match scheme.as_str() {
+            "catmull-clark" => {
+                object = object.set("subd_scheme", Value::Int(1))
+            }
+            "bilinear" => object = object.set("subd_scheme", Value::Int(0)),
+            other => flushed.limitations.push(format!(
+                "mesh {handle:?} asks for subdivision scheme {other:?}, \
+                 which MoonRay does not have; Catmull-Clark is used"
+            )),
+        }
+    }
+
+    if subdivision {
+        object = creases(object, node);
+    }
+
+    // ɴsɪ says which way faces wind; MoonRay calls the same thing
+    // orientation, where 1 is left-handed. Getting it backwards turns
+    // every generated normal inside out.
+    if let Some(OwnedData::I32(values)) =
+        node.attrs.get("clockwisewinding").map(|arg| &arg.data)
+        && values.first().is_some_and(|winding| *winding != 0)
+    {
+        object = object.set("orientation", Value::Int(1));
+    }
+
+    object
+}
+
+/// Subdivision creases and corners, which ɴsɪ carries as four parallel
+/// attributes and MoonRay as four of its own.
+///
+/// `subdivision.creasevertices` is a flat list of vertex index *pairs*,
+/// one edge each, and `subd_crease_indices` is the same shape -- so this
+/// is a rename rather than a conversion.
+fn creases(mut object: Object, node: &nsi_intermediate::Node) -> Object {
+    for (from, to) in [
+        ("subdivision.creasevertices", "subd_crease_indices"),
+        ("subdivision.cornervertices", "subd_corner_indices"),
+    ] {
+        if let Some(OwnedData::I32(indices)) =
+            node.attrs.get(from).map(|arg| &arg.data)
+        {
+            object = object.set(
+                to,
+                Value::Vector(indices.iter().map(|i| Value::Int(*i)).collect()),
+            );
+        }
+    }
+
+    for (from, to) in [
+        ("subdivision.creasesharpness", "subd_crease_sharpnesses"),
+        ("subdivision.cornersharpness", "subd_corner_sharpnesses"),
+    ] {
+        if let Some(OwnedData::F32(values)) =
+            node.attrs.get(from).map(|arg| &arg.data)
+        {
+            object = object.set(
+                to,
+                Value::Vector(
+                    values.iter().map(|v| Value::Float(*v)).collect(),
+                ),
+            );
+        }
+    }
+
+    object
 }
 
 /// The material bound to one piece of geometry, if any.
@@ -678,6 +754,94 @@ mod tests {
 
         let rdla = flush(&scene).to_rdla();
         assert!(rdla.contains("[\"is_subd\"] = true,"), "{rdla}");
+    }
+
+    /// ɴsɪ marks a subdivision surface with an **attribute on a mesh**,
+    /// not a node type — `subdivision.scheme`. Keying off the type
+    /// alone renders every subdivision surface as its faceted cage,
+    /// which looks like a plausible render of the wrong thing.
+    #[test]
+    fn subdivision_scheme_on_a_mesh_makes_it_a_subdivision_surface() {
+        let mut scene = triangle();
+        scene.set_attribute(
+            "tri",
+            vec![arg(
+                "subdivision.scheme",
+                Type::String,
+                OwnedData::String(vec!["catmull-clark".to_string()]),
+            )],
+        );
+
+        let rdla = flush(&scene).to_rdla();
+        assert!(rdla.contains("[\"is_subd\"] = true,"), "{rdla}");
+        assert!(rdla.contains("[\"subd_scheme\"] = 1,"), "{rdla}");
+    }
+
+    /// Creases and corners are four parallel ɴsɪ attributes and four
+    /// MoonRay ones of the same shape: index pairs and a sharpness
+    /// each.
+    #[test]
+    fn creases_and_corners_cross() {
+        let mut scene = triangle();
+        scene.set_attribute(
+            "tri",
+            vec![
+                arg(
+                    "subdivision.scheme",
+                    Type::String,
+                    OwnedData::String(vec!["catmull-clark".to_string()]),
+                ),
+                arg(
+                    "subdivision.creasevertices",
+                    Type::I32,
+                    OwnedData::I32(vec![0, 1, 1, 2]),
+                ),
+                arg(
+                    "subdivision.creasesharpness",
+                    Type::F32,
+                    OwnedData::F32(vec![2.5, 2.5]),
+                ),
+                arg(
+                    "subdivision.cornervertices",
+                    Type::I32,
+                    OwnedData::I32(vec![2]),
+                ),
+                arg(
+                    "subdivision.cornersharpness",
+                    Type::F32,
+                    OwnedData::F32(vec![10.0]),
+                ),
+            ],
+        );
+
+        let rdla = flush(&scene).to_rdla();
+        assert!(
+            rdla.contains("[\"subd_crease_indices\"] = { 0, 1, 1, 2},"),
+            "{rdla}"
+        );
+        assert!(
+            rdla.contains("[\"subd_crease_sharpnesses\"] = { 2.5, 2.5},"),
+            "{rdla}"
+        );
+        assert!(rdla.contains("[\"subd_corner_indices\"] = { 2},"), "{rdla}");
+        assert!(
+            rdla.contains("[\"subd_corner_sharpnesses\"] = { 10},"),
+            "{rdla}"
+        );
+    }
+
+    /// ɴsɪ's winding is MoonRay's orientation, and getting it backwards
+    /// turns every generated normal inside out.
+    #[test]
+    fn clockwise_winding_is_left_handed_orientation() {
+        let mut scene = triangle();
+        scene.set_attribute(
+            "tri",
+            vec![arg("clockwisewinding", Type::I32, OwnedData::I32(vec![1]))],
+        );
+
+        let rdla = flush(&scene).to_rdla();
+        assert!(rdla.contains("[\"orientation\"] = 1,"), "{rdla}");
     }
 
     /// The world transform is composed upstream and lands in

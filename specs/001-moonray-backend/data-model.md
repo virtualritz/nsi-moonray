@@ -64,7 +64,8 @@ The class is `RdlMeshGeometry`, whose DSO source is
 | ɴsɪ node | MoonRay |
 | --- | --- |
 | `mesh` | `RdlMeshGeometry` with `is_subd` **false** |
-| `subdivisionmesh` | `RdlMeshGeometry` with `is_subd` true, limit-evaluated |
+| `mesh` with `subdivision.scheme` | `RdlMeshGeometry` with `is_subd` true, limit-evaluated |
+| `subdivisionmesh` | the same |
 | `transform` | resolved into `node_xform` by `nsi-intermediate` |
 | `attributes` | dissolved into a `Layer` assignment |
 | `shader` | `Material` / `Map` / `NormalMap` |
@@ -81,6 +82,21 @@ explicitly or it renders as a subdivision surface. Read from
 
 Topology is `face_vertex_count` and `vertices_by_index`, both
 `IntVector`; positions are `vertex_list_0`, a `Vec3fVector`.
+
+**Subdivision is an attribute in ɴsɪ, not a node type.** A `mesh`
+carrying `subdivision.scheme` *is* a subdivision surface --
+`polyhedron-ops` writes exactly that, and so does every ɴsɪ producer
+that follows 3Delight. The rest of the family maps one to one:
+
+| ɴsɪ | MoonRay |
+| --- | --- |
+| `subdivision.scheme` `"catmull-clark"` | `subd_scheme` 1 |
+| `subdivision.scheme` `"bilinear"` | `subd_scheme` 0 |
+| `subdivision.creasevertices` | `subd_crease_indices` |
+| `subdivision.creasesharpness` | `subd_crease_sharpnesses` |
+| `subdivision.cornervertices` | `subd_corner_indices` |
+| `subdivision.cornersharpness` | `subd_corner_sharpnesses` |
+| `clockwisewinding` | `orientation` 1, left-handed |
 
 ## Motion Samples
 

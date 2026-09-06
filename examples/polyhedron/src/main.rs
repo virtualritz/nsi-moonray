@@ -9,11 +9,21 @@ use nsi_core as nsi;
 use polyhedron_ops::Polyhedron;
 
 fn main() {
+    // `mrr-poly [crease hardness] [image]`. The hardness is what
+    // `polyhedron-ops` puts on every edge: 10 is its default and reads
+    // as a hard-edged polyhedron, and lower values let the Catmull-Clark
+    // limit surface round the edges off.
+    let mut arguments = std::env::args().skip(1);
+    let crease: Option<f32> = arguments.next().and_then(|a| a.parse().ok());
+    let image = arguments.next().unwrap_or_else(|| "/tmp/poly.exr".into());
+
     let ctx = nsi::Context::new(None).expect("could not load an ɴsɪ renderer");
 
-    let poly = Polyhedron::dodecahedron().kis(None, None, None, None, true).finalize();
+    let poly = Polyhedron::dodecahedron()
+        .kis(None, None, None, None, true)
+        .finalize();
 
-    poly.to_nsi(&ctx, Some("poly"), None, None, None);
+    poly.to_nsi(&ctx, Some("poly"), crease, None, None);
     ctx.connect("poly", None, ".root", "objects", None);
 
     // Pull the camera back: the polyhedron is centred on the origin, so
@@ -44,7 +54,7 @@ fn main() {
     ctx.set_attribute("beauty", &[nsi::string!("variablename", "Ci")]);
     ctx.connect("beauty", None, "screen", "outputlayers", None);
     ctx.create("driver", nsi::node::OUTPUT_DRIVER, None);
-    ctx.set_attribute("driver", &[nsi::string!("imagefilename", "/tmp/poly.exr")]);
+    ctx.set_attribute("driver", &[nsi::string!("imagefilename", image.as_str())]);
     ctx.connect("driver", None, "beauty", "outputdrivers", None);
 
     ctx.create("env", nsi::node::ENVIRONMENT, None);
