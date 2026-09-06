@@ -25,6 +25,24 @@ use nsi_trait::Type;
 /// MoonRay's mesh geometry, whose DSO is `moonray/dso/geometry/RdlMesh`.
 const MESH: &str = "RdlMeshGeometry";
 
+/// MoonRay's instancer, whose DSO is
+/// `moonray/dso/geometry/RdlInstancerGeometry`.
+///
+/// Instancing is native on both sides and neither needs persuading
+/// (`research.md` F9): this declares `references`, `xform_list`,
+/// `ref_indices` and nesting to five levels, and `nsi-intermediate`
+/// already resolves ɴsɪ's `instances` node into that exact shape.
+/// Expanding instances into separate objects here would throw away the
+/// memory win that is the whole point of both.
+const INSTANCER: &str = "RdlInstancerGeometry";
+
+/// `RdlInstancerGeometry`'s `method` for reading whole matrices.
+///
+/// `0` takes decomposed `positions`/`orientations`/`scales`; `2` takes
+/// `xform_list`. ɴsɪ hands over 4x4s, so decomposing them here only to
+/// have MoonRay recompose them would be a lossy round trip for nothing.
+const XFORM_LIST: i32 = 2;
+
 /// MoonRay's perspective camera DSO.
 const PERSPECTIVE_CAMERA: &str = "PerspectiveCamera";
 
@@ -90,21 +108,43 @@ pub fn flush(scene: &Scene) -> Flushed {
     // Geometry and its material, if it has one. The rows themselves are
     // built after the walk, because every one of them references the
     // light set and that is not known until the last node is seen.
-    let mut bindings: Vec<(String, Option<Reference>)> = Vec::new();
+    // The rdl2 *class* travels with the handle. A `Layer` row names an
+    // object by class and name both, so assuming `RdlMeshGeometry` for
+    // every row puts an instancer in the layer under a class it does
+    // not have -- a row that looks right and names nothing.
+    let mut bindings: Vec<(&'static str, String, Option<Reference>)> =
+        Vec::new();
     let mut objects = Vec::new();
+    // Handles of the instancers seen, so a prototype can be told from
+    // an ordinary shape after the walk -- a prototype is drawn by its
+    // instancer and must not also be drawn on its own.
+    let mut instancers: Vec<String> = Vec::new();
 
     let resolution = resolution(scene);
+
+    // Which instancer, if any, places each prototype. Built before the
+    // walk because node order says nothing: a prototype is commonly
+    // recorded before the `instances` node that places it, and a
+    // prototype's transform has to be resolved *relative to* its
+    // instancer rather than to the world.
+    let prototypes = prototypes(scene);
 
     for (handle, node) in scene.nodes() {
         match node.node_type.as_str() {
             "mesh" | "subdivisionmesh" => {
-                objects.push(mesh(scene, handle, &mut flushed));
+                objects.push(mesh(
+                    scene,
+                    handle,
+                    prototypes.get(handle).map(String::as_str),
+                    &mut flushed,
+                ));
                 geometries.push(Reference::new(MESH, handle));
 
                 // Every mesh gets a row, bound or not: MoonRay renders
                 // what the `Layer` names, so geometry left out of it is
                 // simply absent from the image.
                 bindings.push((
+                    MESH,
                     handle.clone(),
                     material(scene, handle, &mut flushed),
                 ));
@@ -117,6 +157,24 @@ pub fn flush(scene: &Scene) -> Flushed {
             "environment" => {
                 objects.push(environment(scene, handle, &mut flushed));
                 lights.push(Reference::new(ENVIRONMENT_LIGHT, handle));
+            }
+
+            "instances" => {
+                if let Some(object) = instancer(scene, handle, &mut flushed) {
+                    objects.push(object);
+                    geometries.push(Reference::new(INSTANCER, handle));
+                    // An instancer needs a `Layer` row like any other
+                    // geometry: MoonRay renders what the `Layer` names,
+                    // and a row with no material is skipped outright.
+                    // Its material is the one bound to the instancer,
+                    // if any -- the prototypes carry their own.
+                    bindings.push((
+                        INSTANCER,
+                        handle.clone(),
+                        material(scene, handle, &mut flushed),
+                    ));
+                    instancers.push(handle.clone());
+                }
             }
 
             // Resolved away upstream, or carried by another node.
@@ -180,14 +238,14 @@ pub fn flush(scene: &Scene) -> Flushed {
     let mut unshaded = 0;
     let assignments = bindings
         .into_iter()
-        .map(|(handle, material)| {
+        .map(|(class, handle, material)| {
             let material = material.unwrap_or_else(|| {
                 unshaded += 1;
                 Reference::new(MATERIAL, DEFAULT_MATERIAL)
             });
 
             Assignment::new(
-                Reference::new(MESH, &handle),
+                Reference::new(class, &handle),
                 Some(material),
                 light_set.clone(),
             )
@@ -231,6 +289,205 @@ pub fn flush(scene: &Scene) -> Flushed {
     }
 
     flushed
+}
+
+/// Which instancer places each prototype.
+///
+/// A prototype shared by two instancers is ambiguous -- upstream says
+/// so, and there is no single relative transform for it -- so the
+/// first instancer wins and the collision is reported by
+/// [`with_prototype_transform`], which is where the transform it
+/// affects is chosen.
+fn prototypes(scene: &Scene) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+
+    for (handle, node) in scene.nodes() {
+        if node.node_type == "instances" {
+            for source in scene.instance_sources(handle) {
+                map.entry(source).or_insert_with(|| handle.clone());
+            }
+        }
+    }
+
+    map
+}
+
+/// A prototype's transform, resolved against its instancer.
+///
+/// `world_transform` *refuses* for a prototype
+/// ([`ResolveError::Instanced`]) and is right to: the `instances` node
+/// holds one matrix per instance and none that belongs to the
+/// prototype, so any single world transform would put every instance
+/// in one place. What the prototype does have is the chain from itself
+/// up to the instancer, which is what MoonRay applies through
+/// `use_reference_xforms`.
+fn with_prototype_transform(
+    object: Object,
+    scene: &Scene,
+    handle: &str,
+    instancer: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    match scene.relative_transform(handle, instancer) {
+        Ok(transform) if transform == IDENTITY => object,
+        Ok(transform) => object.set("node_xform", Value::Mat4d(transform)),
+        Err(error) => {
+            flushed.limitations.push(format!(
+                "prototype {handle:?} of instancer {instancer:?} was left \
+                 at identity: {error}"
+            ));
+            object
+        }
+    }
+}
+
+/// The rdl2 class an ɴsɪ geometry node becomes.
+///
+/// An instancing prototype can itself be an instancer -- ɴsɪ nests
+/// `instances` under `instances`, and MoonRay's `instance_level` goes
+/// to four -- so a reference is not always a mesh.
+fn geometry_class(scene: &Scene, handle: &str) -> &'static str {
+    match scene.node(handle).map(|node| node.node_type.as_str()) {
+        Some("instances") => INSTANCER,
+        _ => MESH,
+    }
+}
+
+/// An ɴsɪ `instances` node as a `RdlInstancerGeometry`.
+///
+/// Both sides model instancing directly and upstream has already done
+/// the resolving (`research.md` F9), so this is a transcription rather
+/// than a translation: `instance_sources` are the `references`,
+/// `Instance::transform` fills `xform_list`, and `Instance::source`
+/// fills `ref_indices`.
+///
+/// # What MoonRay does by itself, and what it does not
+///
+/// Read from `rt/GeometryManager.cc`, because both halves are the kind
+/// of thing a careful guess gets backwards:
+///
+/// - **A prototype is not drawn on its own, automatically.**
+///   `fillGenerateList` walks `references` recursively and everything
+///   it reaches below the top level is generated in *local* space and
+///   promoted to a shared primitive: "this geometry won't show". So a
+///   prototype needs no excluding from the `GeometrySet`, and the
+///   recursion is also what makes nesting work without help.
+/// - **A prototype still needs its `Layer` row.** The shaders the
+///   instanced copies use are looked up through the layer's
+///   `GeometryToRootShadersMap` and hoisted onto the instancer; a
+///   prototype missing from the layer takes the "referenced geometry
+///   has no shaders" path and its copies render unshaded. Excluding
+///   the prototype to stop it drawing twice -- the obvious move -- is
+///   exactly how to lose the material while the image still appears.
+///
+/// Because the referenced geometry is generated at identity, its own
+/// transform reaches the instance only through `use_reference_xforms`,
+/// which is why that is set here alongside the prototype's
+/// `relative_transform`.
+fn instancer(
+    scene: &Scene,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Option<Object> {
+    let sources = scene.instance_sources(handle);
+    if sources.is_empty() {
+        flushed.limitations.push(format!(
+            "instancer {handle:?} has no `sourcemodels` connected and \
+             places nothing"
+        ));
+        return None;
+    }
+
+    // A moving instancer is ɴsɪ-legal and 3Delight renders it, but
+    // `xform_list` is one list and rdl2 has two timesteps. Take the
+    // shutter-open sample and *say so*: a crowd frozen at t0 is a
+    // reduction, and reporting it is what separates this from the
+    // silent flattening the backend exists to avoid.
+    let instances = match scene.instance_transforms(handle) {
+        Ok(instances) => instances,
+        Err(nsi_intermediate::ResolveError::MotionSampledTransform {
+            ..
+        }) => {
+            let time = scene
+                .motion_times(handle)
+                .unwrap_or_default()
+                .first()
+                .copied()
+                .unwrap_or(0.0);
+            flushed.limitations.push(format!(
+                "instancer {handle:?} moves; its instance transforms were \
+                 taken at time {time} because `xform_list` is a single \
+                 list. Per-instance motion blur needs `velocities`"
+            ));
+            match scene.instance_transforms_at(handle, time) {
+                Ok(instances) => instances,
+                Err(error) => {
+                    flushed.limitations.push(format!(
+                        "instancer {handle:?} places nothing: {error}"
+                    ));
+                    return None;
+                }
+            }
+        }
+        Err(error) => {
+            flushed
+                .limitations
+                .push(format!("instancer {handle:?} places nothing: {error}"));
+            return None;
+        }
+    };
+
+    if instances.is_empty() {
+        flushed.limitations.push(format!(
+            "instancer {handle:?} has prototypes but no instance \
+             transforms, so it places nothing"
+        ));
+        return None;
+    }
+
+    let references = Value::Vector(
+        sources
+            .iter()
+            .map(|source| {
+                Value::Object(Reference::new(
+                    geometry_class(scene, source),
+                    source,
+                ))
+            })
+            .collect(),
+    );
+
+    let object = Object::new(INSTANCER, handle)
+        .set("references", references)
+        .set("method", Value::Int(XFORM_LIST))
+        .set(
+            "xform_list",
+            Value::Vector(
+                instances
+                    .iter()
+                    .map(|instance| Value::Mat4d(instance.transform))
+                    .collect(),
+            ),
+        )
+        // Written even when every instance draws source 0, where
+        // MoonRay would default to it: the list is what says the
+        // pairing was resolved rather than assumed, and upstream
+        // resolves it against each connection's `index` attribute
+        // rather than against connection order.
+        .set(
+            "ref_indices",
+            Value::Vector(
+                instances
+                    .iter()
+                    .map(|instance| Value::Int(instance.source as i32))
+                    .collect(),
+            ),
+        )
+        // The prototype is generated at identity, so without this its
+        // own transform below the instancer is simply lost.
+        .set("use_reference_xforms", Value::Bool(true));
+
+    Some(with_transform(object, scene, handle, flushed))
 }
 
 /// Put an object's resolved world transform on it, as `node_xform`.
@@ -329,14 +586,24 @@ fn blurred_transform(
 }
 
 /// One `RdlMeshGeometry`, with its world transform baked in.
-fn mesh(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
+fn mesh(
+    scene: &Scene,
+    handle: &str,
+    prototype_of: Option<&str>,
+    flushed: &mut Flushed,
+) -> Object {
     let Some(node) = scene.node(handle) else {
         return Object::new(MESH, handle);
     };
 
     let mut object = Object::new(MESH, handle);
 
-    object = with_transform(object, scene, handle, flushed);
+    object = match prototype_of {
+        Some(instancer) => {
+            with_prototype_transform(object, scene, handle, instancer, flushed)
+        }
+        None => with_transform(object, scene, handle, flushed),
+    };
 
     match node.effective("nvertices").map(|arg| &arg.data) {
         Some(OwnedData::I32(counts)) => {
@@ -1215,6 +1482,168 @@ mod tests {
                 .limitations
                 .iter()
                 .any(|line| line.contains("no ɴsɪ shader bound")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// One instance matrix, translated along X.
+    fn instance_matrix(x: f64) -> Vec<f64> {
+        #[rustfmt::skip]
+        let matrix = vec![
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+              x, 0.0, 0.0, 1.0,
+        ];
+        matrix
+    }
+
+    /// A prototype mesh under an instancer that places it twice.
+    fn two_instances() -> Scene {
+        let mut scene = triangle();
+
+        scene
+            .create("inst", "instances")
+            .expect("a recordable edit");
+        scene.connect("inst", None, ".root", "objects").unwrap();
+
+        scene.create("proto", "mesh").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "proto",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![3])),
+                    arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2])),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                        ]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("proto", None, "inst", "sourcemodels")
+            .unwrap();
+
+        let mut matrices = instance_matrix(10.0);
+        matrices.extend(instance_matrix(20.0));
+        scene
+            .set_attribute(
+                "inst",
+                vec![arg(
+                    "transformationmatrices",
+                    Type::MatrixF64,
+                    OwnedData::F64(matrices),
+                )],
+            )
+            .expect("a recordable edit");
+
+        scene
+    }
+
+    /// The mapping: `sourcemodels` to `references`, one matrix per
+    /// instance to `xform_list`, and the method that reads it.
+    #[test]
+    fn an_instances_node_becomes_an_instancer() {
+        let flushed = flush(&two_instances());
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("RdlInstancerGeometry(\"inst\") {"), "{rdla}");
+        assert!(
+            rdla.contains("[\"references\"] = { RdlMeshGeometry(\"proto\")}"),
+            "{rdla}"
+        );
+        // `method` 2 is "xform list"; 0 would read
+        // positions/orientations/scales, which are not written.
+        assert!(rdla.contains("[\"method\"] = 2"), "{rdla}");
+        assert!(rdla.contains("[\"xform_list\"] = { Mat4("), "{rdla}");
+        assert!(rdla.contains("[\"use_reference_xforms\"] = true"), "{rdla}");
+    }
+
+    /// **`T6.5`.** The point of instancing is that the prototype exists
+    /// once. A flattened scene renders the same image, so an image test
+    /// cannot catch this and only counting can.
+    #[test]
+    fn a_prototype_is_referenced_once_not_expanded() {
+        let flushed = flush(&two_instances());
+        let rdla = flushed.to_rdla();
+
+        let meshes = rdla.matches("RdlMeshGeometry(\"proto\") {").count();
+        assert_eq!(
+            meshes, 1,
+            "the prototype must be declared once however many instances \
+             draw it -- expanding it throws away the whole point.\n{rdla}"
+        );
+
+        // Two instances, one prototype: the matrices live in the
+        // instancer, not in two copies of the mesh.
+        let instancers =
+            rdla.matches("RdlInstancerGeometry(\"inst\") {").count();
+        assert_eq!(instancers, 1, "{rdla}");
+    }
+
+    /// A prototype needs its `Layer` row like any other geometry.
+    ///
+    /// MoonRay looks the instanced copies' shaders up through the
+    /// layer's `GeometryToRootShadersMap` and hoists them onto the
+    /// instancer (`rt/GeometryManager.cc`), so a prototype left out of
+    /// the layer renders unshaded -- while `fillGenerateList` is what
+    /// stops it *also* drawing on its own, with no help from here.
+    #[test]
+    fn a_prototype_keeps_its_layer_row() {
+        let rdla = flush(&two_instances()).to_rdla();
+
+        assert!(
+            rdla.contains("RdlMeshGeometry(\"proto\")")
+                && rdla.contains("Layer(\"/nsi/layer\")"),
+            "{rdla}"
+        );
+        // The instancer is named in the layer too, or MoonRay renders
+        // nothing it places -- **by class and name**. Asserting only
+        // that the handle appears is what let a row reading
+        // `RdlMeshGeometry("inst")` through: it looks right, and names
+        // an object that does not exist.
+        let layer = rdla
+            .split("Layer(\"/nsi/layer\") {")
+            .nth(1)
+            .expect("a layer");
+        assert!(
+            layer.contains("RdlInstancerGeometry(\"inst\")"),
+            "the instancer's row must name its own class\n{layer}"
+        );
+        assert!(layer.contains("RdlMeshGeometry(\"proto\")"), "{layer}");
+    }
+
+    /// An instancer with prototypes but no matrices places nothing, and
+    /// says so rather than emitting an instancer that draws air.
+    #[test]
+    fn an_instancer_with_no_matrices_is_reported() {
+        let mut scene = triangle();
+        scene
+            .create("inst", "instances")
+            .expect("a recordable edit");
+        scene.connect("inst", None, ".root", "objects").unwrap();
+        scene.create("proto", "mesh").expect("a recordable edit");
+        scene
+            .connect("proto", None, "inst", "sourcemodels")
+            .unwrap();
+
+        let flushed = flush(&scene);
+
+        assert!(
+            !flushed.to_rdla().contains("RdlInstancerGeometry"),
+            "{}",
+            flushed.to_rdla()
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("places nothing")),
             "{:?}",
             flushed.limitations
         );

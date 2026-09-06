@@ -205,20 +205,22 @@ and nesting to five levels, and `nsi-intermediate` already resolves
 ɴsɪ's `instances` node into exactly that shape — its `Instance` type
 says so in its own doc. This backend calls none of it.
 
-- [ ] T6.1 **Map `instances` to `RdlInstancerGeometry`.** Today an ɴsɪ
-      `instances` node contributes *nothing*: `flush.rs` handles
-      `ResolveError::Instanced` by reporting it and leaving the
-      prototype at its own transform, so a crowd of a thousand renders
-      as one prototype at the origin. Reported, and wrong.
+- [x] T6.1 **Map `instances` to `RdlInstancerGeometry`.**
       `instance_sources` to `references`, `Instance::transform` to
       `xform_list` with `method` = `2`, `Instance::source` to
-      `ref_indices`.
-- [ ] T6.2 A prototype's own transform. `relative_transform(prototype,
-      instancer)` is the chain ɴsɪ composes below the instancer, and
-      `use_reference_xforms` is what decides whether MoonRay applies
-      the reference geometry's own. Settle which by rendering, not by
-      reading: getting it wrong double-applies or drops a transform,
-      and both look plausible.
+      `ref_indices`. Before this an `instances` node contributed
+      *nothing* -- `flush.rs` handled `ResolveError::Instanced` by
+      reporting it and never asked the question that succeeds -- so a
+      crowd of a thousand rendered as one prototype at the origin.
+- [~] T6.2 A prototype's own transform. `relative_transform(prototype,
+      instancer)` becomes the prototype's `node_xform`, and
+      `use_reference_xforms` is set -- settled by reading
+      `rt/GeometryManager.cc` rather than guessing: a referenced
+      geometry is generated at **identity** (`localXform`), and its own
+      `node_xform` reaches the instance only through
+      `getReferenceData`, which `use_reference_xforms` gates. Still
+      wants a render: double-applying and dropping both look
+      plausible.
 - [ ] T6.3 A moving instancer. `instance_transforms_at(t)` exists
       because 3Delight renders a sampled `transformationmatrices`;
       rdl2 has two timesteps, so this is `T2.5`'s reduction rule again.
@@ -226,9 +228,12 @@ says so in its own doc. This backend calls none of it.
 - [ ] T6.4 Nested instancing. MoonRay's `instance_level` goes to `4`
       and ɴsɪ nests `instances` under `instances`. Confirm the depth
       maps, and report past four rather than flattening.
-- [ ] T6.5 **Assert it is instanced, not expanded.** A test that only
-      checks the image passes on a flattened scene, which is the whole
-      thing this avoids. Count `SceneObject`s, or read the memory.
+- [x] T6.5 **Assert it is instanced, not expanded.**
+      `a_prototype_is_referenced_once_not_expanded` counts the
+      prototype's declarations, because a flattened scene renders an
+      identical image and no image test can tell them apart.
+- [ ] T6.6 Render an instanced scene. The mapping is asserted as text;
+      what it looks like is not. This is also what settles `T6.2`.
 
 ## Not Now
 
