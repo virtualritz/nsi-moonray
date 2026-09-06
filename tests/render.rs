@@ -465,8 +465,15 @@ fn an_applications_callback_receives_the_rendered_pixels() {
     // output layer's own channels, `Ci.R`, `Ci.G`, `Ci.B` for a beauty
     // pass with no alpha -- and a delivery that assumed RGBA would hand
     // the application a buffer of the wrong width.
-    let received: Arc<Mutex<(Vec<f32>, usize, usize, usize)>> =
-        Arc::new(Mutex::new((Vec::new(), 0, 0, 0)));
+    #[derive(Default)]
+    struct Delivered {
+        pixels: Vec<f32>,
+        width: usize,
+        height: usize,
+        channels: usize,
+    }
+
+    let received = Arc::new(Mutex::new(Delivered::default()));
     let seen = Arc::clone(&received);
     let write = WriteCallback::<f32>::new(
         move |_name,
@@ -479,10 +486,10 @@ fn an_applications_callback_receives_the_rendered_pixels() {
               format: &PixelFormat,
               pixels: &[f32]| {
             let mut seen = seen.lock().expect("not poisoned");
-            seen.0.extend_from_slice(pixels);
-            seen.1 = width;
-            seen.2 = height;
-            seen.3 = format.channels();
+            seen.pixels.extend_from_slice(pixels);
+            seen.width = width;
+            seen.height = height;
+            seen.channels = format.channels();
             Error::None
         },
     );
@@ -501,34 +508,44 @@ fn an_applications_callback_receives_the_rendered_pixels() {
         .expect("known attribute");
     shade(&mut scene, "quad", [1.0, 1.0, 1.0]);
 
-    scene.create("beauty", "outputlayer").expect("a fresh handle");
     scene
-        .set_attribute("beauty", vec![arg(
-            "variablename",
-            Type::String,
-            OwnedData::String(vec![b"Ci".to_vec()]),
-        )])
+        .create("beauty", "outputlayer")
+        .expect("a fresh handle");
+    scene
+        .set_attribute(
+            "beauty",
+            vec![arg(
+                "variablename",
+                Type::String,
+                OwnedData::String(vec![b"Ci".to_vec()]),
+            )],
+        )
         .expect("a recordable edit");
     scene
         .connect("beauty", None, "screen", "outputlayers")
         .expect("known attribute");
 
-    scene.create("driver", "outputdriver").expect("a fresh handle");
     scene
-        .set_attribute("driver", vec![
-            arg(
-                "imagefilename",
-                Type::String,
-                OwnedData::String(
-                    vec![image.to_string_lossy().as_bytes().to_vec()],
+        .create("driver", "outputdriver")
+        .expect("a fresh handle");
+    scene
+        .set_attribute(
+            "driver",
+            vec![
+                arg(
+                    "imagefilename",
+                    Type::String,
+                    OwnedData::String(vec![
+                        image.to_string_lossy().as_bytes().to_vec(),
+                    ]),
                 ),
-            ),
-            arg(
-                "callback.write",
-                Type::Reference,
-                OwnedData::Reference(vec![HostPtr(write.to_ptr())]),
-            ),
-        ])
+                arg(
+                    "callback.write",
+                    Type::Reference,
+                    OwnedData::Reference(vec![HostPtr(write.to_ptr())]),
+                ),
+            ],
+        )
         .expect("a recordable edit");
     scene
         .connect("driver", None, "beauty", "outputdrivers")
@@ -547,19 +564,21 @@ fn an_applications_callback_receives_the_rendered_pixels() {
     nsi_moonray::display::deliver_file(&callbacks, "driver", &image)
         .expect("the image is delivered");
 
-    let (pixels, seen_width, seen_height, channels) =
-        &*received.lock().expect("not poisoned");
+    let delivered = received.lock().expect("not poisoned");
 
-    assert_eq!((*seen_width, *seen_height), (width, height));
-    assert!(*channels > 0, "the closure was told the frame has no channels");
+    assert_eq!((delivered.width, delivered.height), (width, height));
+    assert!(
+        delivered.channels > 0,
+        "the closure was told the frame has no channels"
+    );
     assert_eq!(
-        pixels.len(),
-        width * height * channels,
+        delivered.pixels.len(),
+        width * height * delivered.channels,
         "the closure should receive the whole frame, at the channel count \
          it was handed"
     );
     assert!(
-        pixels.iter().any(|value| *value > 0.0),
+        delivered.pixels.iter().any(|value| *value > 0.0),
         "the closure received a black frame"
     );
 }

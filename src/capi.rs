@@ -539,9 +539,12 @@ pub unsafe extern "C" fn NSIRenderControl(
         }
 
         for (handle, callbacks, image) in deliveries {
-            if let Err(error) = display::deliver_file(&callbacks, &handle, &image)
+            if let Err(error) =
+                display::deliver_file(&callbacks, &handle, &image)
             {
-                eprintln!("nsi-moonray: {handle:?} received no pixels: {error}");
+                eprintln!(
+                    "nsi-moonray: {handle:?} received no pixels: {error}"
+                );
             }
         }
     });

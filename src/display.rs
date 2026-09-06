@@ -179,8 +179,7 @@ impl Callbacks {
         // SAFETY: as `open`.
         let write = unsafe { &*write };
         write(
-            name, width, height, x.start, x.end, y.start, y.end, format,
-            pixels,
+            name, width, height, x.start, x.end, y.start, y.end, format, pixels,
         )
     }
 
@@ -214,6 +213,87 @@ impl Callbacks {
 unsafe impl Send for Callbacks {}
 unsafe impl Sync for Callbacks {}
 
+/// Hand a finished image to an application's callbacks.
+///
+/// **A stopgap, and shaped like one.** MoonRay wrote a file, so this
+/// reads it back and delivers one bucket covering the frame: the
+/// application sees a completed render rather than a converging one.
+/// The delivery *interface* is the one it will keep — the same
+/// closures, the same bucket call — so what changes when the renderer
+/// runs in process is where the pixels come from, not what receives
+/// them.
+pub fn deliver_file(
+    callbacks: &Callbacks,
+    name: &str,
+    image: &std::path::Path,
+) -> Result<(), String> {
+    use exr::prelude::*;
+
+    // Read whatever channels are there rather than assuming RGBA.
+    // MoonRay names them after the ɴsɪ output layer -- `Ci.R`, `Ci.G`,
+    // `Ci.B` for a beauty pass with no alpha -- so a reader that
+    // insists on `R`,`G`,`B`,`A` finds no layer at all, which is what
+    // the first version of this did.
+    let read = read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .all_channels()
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(image)
+        .map_err(|error| format!("reading {}: {error}", image.display()))?;
+
+    let layer = &read.layer_data;
+    let width = layer.size.width();
+    let height = layer.size.height();
+
+    // ndspy interleaves a pixel's channels, and its layer split reads
+    // the name before the dot -- so the names go across as the file has
+    // them, lowercased, which is the spelling the channel heuristics
+    // expect (`r`, `g`, `b`, `a`).
+    let names: Vec<String> = layer
+        .channel_data
+        .list
+        .iter()
+        .map(|channel| channel.name.to_string().to_lowercase())
+        .collect();
+    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+    let format = pixel_format(&borrowed);
+
+    let channels = names.len();
+    let mut pixels = vec![0.0f32; width * height * channels];
+    for (index, channel) in layer.channel_data.list.iter().enumerate() {
+        for y in 0..height {
+            for x in 0..width {
+                let sample: f32 = channel
+                    .sample_data
+                    .value_by_flat_index(y * width + x)
+                    .to_f32();
+                pixels[(y * width + x) * channels + index] = sample;
+            }
+        }
+    }
+
+    // SAFETY: the caller is the ɴsɪ context that recorded these
+    // pointers, and the application owns the closures for the length of
+    // the render. See the module's "one constraint".
+    unsafe {
+        callbacks.open(name, width, height, &format);
+        callbacks.write(
+            name,
+            width,
+            height,
+            0..width,
+            0..height,
+            &format,
+            &pixels,
+        );
+        callbacks.finish(name, width, height, format);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,13 +314,18 @@ mod tests {
         pointer: *const core::ffi::c_void,
     ) {
         scene
-            .set_attribute(driver, vec![OwnedArg::new(
-                name,
-                Type::Reference,
-                1,
-                0,
-                OwnedData::Reference(vec![nsi_intermediate::HostPtr(pointer)]),
-            )])
+            .set_attribute(
+                driver,
+                vec![OwnedArg::new(
+                    name,
+                    Type::Reference,
+                    1,
+                    0,
+                    OwnedData::Reference(vec![nsi_intermediate::HostPtr(
+                        pointer,
+                    )]),
+                )],
+            )
             .expect("a recordable edit");
     }
 
@@ -254,7 +339,15 @@ mod tests {
         let counted = Arc::clone(&finished);
 
         let write = WriteCallback::<f32>::new(
-            move |_name, _width, _height, _x0, _x1, _y0, _y1, _format, pixels: &[f32]| {
+            move |_name,
+                  _width,
+                  _height,
+                  _x0,
+                  _x1,
+                  _y0,
+                  _y1,
+                  _format,
+                  pixels: &[f32]| {
                 seen.lock().expect("not poisoned").extend_from_slice(pixels);
                 Error::None
             },
@@ -318,8 +411,9 @@ mod tests {
 
         // SAFETY: as above; the call returns before reaching the
         // closure.
-        let error =
-            unsafe { callbacks.write("memory", 2, 2, 0..2, 0..2, &format, &[0.0]) };
+        let error = unsafe {
+            callbacks.write("memory", 2, 2, 0..2, 0..2, &format, &[0.0])
+        };
         assert_eq!(error, Error::BadParameters);
     }
 
@@ -331,86 +425,18 @@ mod tests {
             .create("driver", "outputdriver")
             .expect("a fresh handle");
         scene
-            .set_attribute("driver", vec![OwnedArg::new(
-                "imagefilename",
-                Type::String,
-                1,
-                0,
-                OwnedData::String(vec![b"beauty.exr".to_vec()]),
-            )])
+            .set_attribute(
+                "driver",
+                vec![OwnedArg::new(
+                    "imagefilename",
+                    Type::String,
+                    1,
+                    0,
+                    OwnedData::String(vec![b"beauty.exr".to_vec()]),
+                )],
+            )
             .expect("a recordable edit");
 
         assert!(Callbacks::of(&scene, "driver").is_none());
     }
-}
-
-/// Hand a finished image to an application's callbacks.
-///
-/// **A stopgap, and shaped like one.** MoonRay wrote a file, so this
-/// reads it back and delivers one bucket covering the frame: the
-/// application sees a completed render rather than a converging one.
-/// The delivery *interface* is the one it will keep — the same
-/// closures, the same bucket call — so what changes when the renderer
-/// runs in process is where the pixels come from, not what receives
-/// them.
-pub fn deliver_file(
-    callbacks: &Callbacks,
-    name: &str,
-    image: &std::path::Path,
-) -> Result<(), String> {
-    use exr::prelude::*;
-
-    // Read whatever channels are there rather than assuming RGBA.
-    // MoonRay names them after the ɴsɪ output layer -- `Ci.R`, `Ci.G`,
-    // `Ci.B` for a beauty pass with no alpha -- so a reader that
-    // insists on `R`,`G`,`B`,`A` finds no layer at all, which is what
-    // the first version of this did.
-    let read = read()
-        .no_deep_data()
-        .largest_resolution_level()
-        .all_channels()
-        .first_valid_layer()
-        .all_attributes()
-        .from_file(image)
-        .map_err(|error| format!("reading {}: {error}", image.display()))?;
-
-    let layer = &read.layer_data;
-    let width = layer.size.width();
-    let height = layer.size.height();
-
-    // ndspy interleaves a pixel's channels, and its layer split reads
-    // the name before the dot -- so the names go across as the file has
-    // them, lowercased, which is the spelling the channel heuristics
-    // expect (`r`, `g`, `b`, `a`).
-    let names: Vec<String> = layer
-        .channel_data
-        .list
-        .iter()
-        .map(|channel| channel.name.to_string().to_lowercase())
-        .collect();
-    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
-    let format = pixel_format(&borrowed);
-
-    let channels = names.len();
-    let mut pixels = vec![0.0f32; width * height * channels];
-    for (index, channel) in layer.channel_data.list.iter().enumerate() {
-        for y in 0..height {
-            for x in 0..width {
-                let sample: f32 =
-                    channel.sample_data.value_by_flat_index(y * width + x).to_f32();
-                pixels[(y * width + x) * channels + index] = sample;
-            }
-        }
-    }
-
-    // SAFETY: the caller is the ɴsɪ context that recorded these
-    // pointers, and the application owns the closures for the length of
-    // the render. See the module's "one constraint".
-    unsafe {
-        callbacks.open(name, width, height, &format);
-        callbacks.write(name, width, height, 0..width, 0..height, &format, &pixels);
-        callbacks.finish(name, width, height, format);
-    }
-
-    Ok(())
 }
