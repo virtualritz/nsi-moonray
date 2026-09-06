@@ -219,6 +219,21 @@ impl Render {
         Ok((width, height))
     }
 
+    /// Write the frame to the files the scene names.
+    ///
+    /// The `SceneVariables`' `output_file` for the beauty, plus every
+    /// `RenderOutput` -- AOVs, cryptomatte, deep -- through MoonRay's
+    /// own output machinery. Encoding an EXR here instead would mean
+    /// reimplementing layer naming, header metadata and the
+    /// aperture/region windows, and getting all of it subtly wrong.
+    ///
+    /// For a batch render. An interactive one sends pixels to the
+    /// application's callbacks and has no file to write.
+    pub fn write(&self) -> Result<(), Error> {
+        // SAFETY: a live renderer.
+        result(unsafe { ffi::nmr_render_write(self.raw) })
+    }
+
     /// The frame so far, RGBA float per pixel.
     ///
     /// MoonRay's render buffer is `PixelBuffer<Vec4f>`, so this is the

@@ -146,9 +146,9 @@ impl Session {
     /// Block until the frame is done, delivering it to the driver's
     /// callbacks as it converges.
     ///
-    /// A scene whose output driver carries no callbacks simply
-    /// converges: there is nowhere to send it, and writing a file from
-    /// the linked renderer is not wired up (`T5.4`).
+    /// A scene whose output driver carries no callbacks is a batch
+    /// render: it converges and then writes the files the scene names,
+    /// through MoonRay's own output machinery.
     pub fn wait(&self) -> Option<Stopped> {
         let driver = self
             .scene
@@ -168,11 +168,20 @@ impl Session {
                     }
                 }
             }
+            // No callbacks: a batch render, whose outputs are files.
             None => {
                 while !self.render.frame_complete() {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 let _ = self.render.stop();
+                if let Err(error) = self.render.write() {
+                    eprintln!(
+                        "nsi-moonray: the image was not written ({}): {error}",
+                        self.render
+                            .error()
+                            .unwrap_or_else(|| "no detail".to_string())
+                    );
+                }
                 Some(Stopped::Complete)
             }
         }

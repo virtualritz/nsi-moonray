@@ -297,6 +297,7 @@ unsafe extern "C" {
         width: *mut u32,
         height: *mut u32,
     ) -> c_int;
+    pub fn nmr_render_write(render: *mut NmrRender) -> c_int;
     pub fn nmr_render_snapshot(
         render: *mut NmrRender,
         pixels: *mut f32,

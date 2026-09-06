@@ -241,6 +241,18 @@ says so in its own doc. This backend calls none of it.
 - [ ] T6.6 Render an instanced scene. The mapping is asserted as text;
       what it looks like is not. This is also what settles `T6.2`.
 
+- [x] T5.4 **A batch render writes its file from the linked
+      renderer.** Through MoonRay's own output machinery --
+      `writeImageWithMessage` for the beauty and
+      `writeRenderOutputsWithMessages` for every `RenderOutput` --
+      rather than encoding an EXR here, which would mean
+      reimplementing layer naming, header metadata and the
+      aperture/region windows and getting all of it subtly wrong.
+      `inprocess::a_batch_render_writes_the_image_it_was_asked_for`
+      reads the image back rather than checking a file appeared: an
+      empty or black EXR passes the weaker check, and this crate has
+      produced both.
+
 ## Cost Of The Choices Above
 
 - [ ] T7.1 A detached shape is emitted and turned off rather than left

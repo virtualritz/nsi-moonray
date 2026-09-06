@@ -85,6 +85,10 @@ fn main() {
         // `rendering_rndr` is the renderer; the rest are what it needs
         // and the linker does not pull in transitively.
         for library in [
+            // `writeImageWithMessage` and its `RenderOutput`
+            // counterpart, which is how a batch render's files get
+            // written by MoonRay rather than by an EXR encoder here.
+            "application",
             "rendering_rndr",
             "rendering_rt",
             "rendering_pbr",

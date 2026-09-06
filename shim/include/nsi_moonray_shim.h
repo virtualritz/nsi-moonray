@@ -257,6 +257,20 @@ int nmr_render_cost(const NmrRender* render, NmrCost* cost);
 int nmr_render_resolution(const NmrRender* render, unsigned* width,
                           unsigned* height);
 
+// Write the frame to the files the scene names, through MoonRay's own
+// output machinery.
+//
+// The `SceneVariables`' `output_file` for the beauty, plus every
+// `RenderOutput` object -- AOVs, cryptomatte, deep. Using MoonRay's
+// writer rather than encoding an EXR here is what keeps an AOV an AOV:
+// this crate would otherwise have to reimplement layer naming, header
+// metadata and the aperture/region windows, and get all of it subtly
+// wrong.
+//
+// Only for a batch render. An interactive one sends pixels to the
+// application's callbacks and has no file to write.
+int nmr_render_write(NmrRender* render);
+
 // Copy the current frame into `pixels`, which must hold
 // `width * height * 4` floats: MoonRay's render buffer is RGBA float
 // per pixel. Returns `NMR_BAD_ARGUMENT` if it is shorter.

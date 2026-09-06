@@ -696,15 +696,22 @@ pub unsafe extern "C" fn NSIRenderControl(
 
 /// Render this context in this process, if MoonRay can be reached.
 ///
-/// The path an application actually wants: the scene goes straight into
-/// the renderer's own `SceneContext`, the frame converges, and each
-/// snapshot reaches the application's `outputdriver` callbacks. No file
-/// is written and no process is spawned.
+/// The path an application actually wants: the scene goes straight
+/// into the renderer's own `SceneContext`, the frame converges, and
+/// the pixels reach the application's `outputdriver` callbacks or the
+/// file it named. No process is spawned.
 ///
-/// Returns `false` when there is no renderer to use -- no `rdl2dso` to
-/// point at, or one already live in this process -- and the caller
-/// falls back to spawning. ɴsɪ always returns an image: an application
-/// that cannot have the fast path should still get its render.
+/// A batch render, so it borrows the same [`Session`] the interactive
+/// path uses and simply waits: one frame, then done. Two code paths
+/// for "build the scene and render it" would drift, and the one that
+/// drifted would be this one, since the tests live on the other.
+///
+/// Returns `false` when there is no renderer to be had -- no `rdl2dso`
+/// to point at, one already live in this process, or render prep
+/// refusing the scene -- and the caller falls back to spawning. ɴsɪ
+/// always returns an image.
+///
+/// [`Session`]: crate::session::Session
 #[cfg(all(feature = "rdl2", moonray))]
 pub fn render_in_process(scene: &nsi_intermediate::Scene) -> bool {
     let Some(dso) = moonray_dso_path() else {
@@ -717,101 +724,19 @@ pub fn render_in_process(scene: &nsi_intermediate::Scene) -> bool {
         return false;
     };
 
-    // One renderer per process is MoonRay's own constraint -- its
-    // driver state is global (`002` `research.md` F4) -- so this can
-    // legitimately answer `None` while another render is running.
-    let Some(render) = crate::rdl2::Render::new(
-        Some(&dso),
-        None,
-        crate::rdl2::Mode::Progressive,
-    ) else {
+    // The session takes the scene by value; this path is handed a
+    // borrow, and cloning is the honest cost of being the batch entry
+    // point rather than the owner.
+    let Some(session) = crate::session::Session::new(scene.clone(), &dso)
+    else {
         eprintln!(
-            "nsi-moonray: a MoonRay render is already running in this \
-             process; this scene goes to the `moonray` binary instead"
+            "nsi-moonray: no in-process render; the scene goes to the \
+             `moonray` binary instead"
         );
         return false;
     };
 
-    let flushed = flush(scene);
-    for limitation in &flushed.limitations {
-        eprintln!("nsi-moonray: {limitation}");
-    }
-
-    // `.rdla` is a dump now, not the transport -- but a dump you can
-    // still ask for, and `$NSI_MOONRAY_SCENE` is how. It has to work on
-    // *this* path too: the scene someone wants to look at is the one
-    // that actually rendered, and only writing it on the fallback would
-    // hand them the wrong answer or nothing at all.
-    dump_scene(&flushed);
-
-    // The renderer owns the scene, so this is the context the frame is
-    // rendered from rather than a copy pushed across.
-    let Some(live) = render.scene() else {
-        eprintln!("nsi-moonray: the renderer has no scene context");
-        return false;
-    };
-
-    for line in crate::apply::apply(&flushed.document, &live) {
-        eprintln!("nsi-moonray: {line}");
-    }
-
-    if let Err(error) = render.initialize() {
-        // Not a reason to give up on the scene: fall back to the
-        // spawned binary, which reports rather than crashes. A scene
-        // with no camera is the common way here (see the shim).
-        eprintln!(
-            "nsi-moonray: render prep failed in process ({}); handing \
-             the scene to the `moonray` binary instead",
-            render.error().unwrap_or_else(|| error.to_string())
-        );
-        return false;
-    }
-    if let Err(error) = render.start() {
-        eprintln!("nsi-moonray: the frame did not start: {error}");
-        return false;
-    }
-
-    let drivers: Vec<(String, Callbacks)> = scene
-        .nodes()
-        .filter(|(_, node)| node.node_type == "outputdriver")
-        .filter_map(|(handle, _)| {
-            Some((handle.clone(), Callbacks::of(scene, handle)?))
-        })
-        .collect();
-
-    match drivers.first() {
-        // An application with a viewport: stream to it.
-        Some((handle, callbacks)) => {
-            if drivers.len() > 1 {
-                eprintln!(
-                    "nsi-moonray: {} output drivers carry callbacks; only \
-                     {handle:?} is streamed to so far",
-                    drivers.len()
-                );
-            }
-            if let Err(error) =
-                crate::stream::stream(&render, callbacks, handle, None)
-            {
-                eprintln!("nsi-moonray: {handle:?} streaming: {error}");
-            }
-        }
-        // No callbacks: a batch render whose outputs are files.
-        // Converge, then stop -- and say the file is not written,
-        // rather than leave someone hunting for it.
-        None => {
-            while !render.frame_complete() {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            let _ = render.stop();
-            eprintln!(
-                "nsi-moonray: rendered in process, but no `outputdriver` \
-                 carries callbacks and writing the image to a file from \
-                 the linked renderer is not wired up yet, so nothing was \
-                 saved"
-            );
-        }
-    }
-
+    session.wait();
     true
 }
 
@@ -872,26 +797,6 @@ fn wait_for_frame(ctx: NsiContext) {
             session.wait();
         }
     });
-}
-
-/// Write the `.rdla` dump, if one was asked for.
-///
-/// Only when `$NSI_MOONRAY_SCENE` names a path: on the in-process path
-/// nothing needs a file, so writing one unasked would leave litter next
-/// to whatever ran the render.
-#[cfg(all(feature = "rdl2", moonray))]
-fn dump_scene(flushed: &crate::flush::Flushed) {
-    let Some(path) = std::env::var_os("NSI_MOONRAY_SCENE") else {
-        return;
-    };
-    let path = PathBuf::from(path);
-
-    if let Err(error) = std::fs::write(&path, flushed.to_rdla()) {
-        eprintln!(
-            "nsi-moonray: cannot write the scene dump {}: {error}",
-            path.display()
-        );
-    }
 }
 
 /// Where MoonRay's scene classes live.

@@ -10,6 +10,7 @@
 #include <moonray/rendering/rndr/RenderContext.h>
 #include <moonray/rendering/rndr/RenderOptions.h>
 #include <moonray/rendering/rndr/RenderStatistics.h>
+#include <moonray/application/RaasApplication.h>
 #include <scene_rdl2/common/fb_util/FbTypes.h>
 #include <scene_rdl2/scene/rdl2/rdl2.h>
 
@@ -332,6 +333,51 @@ int nmr_render_resolution(const NmrRender* render, unsigned* width,
     } catch (...) {
         return NMR_FAILED;
     }
+}
+
+int nmr_render_write(NmrRender* render)
+{
+    return guarded(render, [&] {
+        const auto& scene = render->context->getSceneContext();
+        const auto& variables = scene.getSceneVariables();
+
+        scene_rdl2::fb_util::RenderBuffer beauty;
+        render->context->snapshotRenderBuffer(&beauty, true, true, true);
+
+        int failures = moonray::writeImageWithMessage(
+            &beauty,
+            variables.get(rdl2::SceneVariables::sOutputFile),
+            variables.getExrHeaderAttributes(),
+            render->context->getRezedApertureWindow(),
+            render->context->getRezedRegionWindow());
+
+        // Every `RenderOutput` the scene declares. The buffers each
+        // want are snapshotted whether or not anything asked for them:
+        // MoonRay's own `renderOutput` does the same, and each
+        // snapshot is internally a no-op when no AOV needs it.
+        scene_rdl2::fb_util::HeatMapBuffer heat_map;
+        render->context->snapshotHeatMapBuffer(&heat_map, true, true);
+        scene_rdl2::fb_util::FloatBuffer weights;
+        render->context->snapshotWeightBuffer(&weights, true, true);
+        std::vector<scene_rdl2::fb_util::VariablePixelBuffer> aovs;
+        render->context->snapshotAovBuffers(aovs, true, true);
+        scene_rdl2::fb_util::RenderBuffer beauty_odd;
+        render->context->snapshotRenderBufferOdd(&beauty_odd, true, true);
+        std::vector<scene_rdl2::fb_util::VariablePixelBuffer> filters;
+        render->context->snapshotDisplayFilterBuffers(filters, true, true);
+
+        failures += moonray::writeRenderOutputsWithMessages(
+            render->context->getRenderOutputDriver(),
+            render->context->getDeepBuffer(),
+            render->context->getCryptomatteBuffer(), &heat_map, &weights,
+            &beauty_odd, aovs, filters);
+
+        if (failures > 0) {
+            render->error = "one or more output images failed to write";
+            return NMR_FAILED;
+        }
+        return NMR_OK;
+    });
 }
 
 int nmr_render_snapshot(NmrRender* render, float* pixels, size_t capacity)

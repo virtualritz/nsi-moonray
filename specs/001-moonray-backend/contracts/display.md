@@ -48,6 +48,8 @@ recorded below.
 | A driver reached through `dlopen` gets pixels | Open | A `Box<dyn FnWrite>` is a trait object whose vtable belongs to the compilation that made it | None | Register through `DspyRegisterDriver` and deliver over the `extern "C"` entry points instead. `T5.2` |
 | A driver that says stop, stops | **Covered** | `stream.rs` — a `write` answering `Error::Stop` ends the loop and stops the frame, and the caller is told which of completion, stop or deadline ended it | `tests/inprocess.rs::a_callback_that_says_stop_stops_the_render` | The file-delivery path still discards it, which is harmless there: by the time a finished image is handed over there is nothing left to stop. |
 
+| A batch render writes its file | **Covered** | `shim/src/render.cc` — MoonRay's own `writeImageWithMessage` and `writeRenderOutputsWithMessages`, given the buffers its own `renderOutput` gathers | `inprocess::a_batch_render_writes_the_image_it_was_asked_for` reads the written EXR back and asserts its size and that it is not black | -- |
+
 ## Invariants
 
 - **No ndspy structs between the renderer and the application.** The

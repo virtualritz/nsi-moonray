@@ -463,3 +463,72 @@ fn the_c_api_renders_in_process_and_returns_pixels() {
         "the C API delivered a black centre of frame"
     );
 }
+
+/// **`T5.4`.** A batch render — an output driver with no callbacks —
+/// writes the file the scene names, through MoonRay's own output
+/// machinery.
+///
+/// Checked by *reading the image back*, not by a file appearing: an
+/// empty or black EXR would satisfy the weaker check, and both are
+/// things this has produced before.
+#[test]
+fn a_batch_render_writes_the_image_it_was_asked_for() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-inprocess");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let image = directory.join("batch.exr");
+    let _ = std::fs::remove_file(&image);
+
+    let (width, height) = (64i32, 48i32);
+    let mut nsi = scene(width, height);
+    // No callbacks on the driver: this is a batch render.
+    nsi.set_attribute(
+        "driver",
+        vec![OwnedArg::new(
+            "imagefilename",
+            Type::String,
+            1,
+            0,
+            OwnedData::String(vec![
+                image.to_string_lossy().as_bytes().to_vec(),
+            ]),
+        )],
+    )
+    .unwrap();
+
+    let session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    drop(session);
+
+    assert!(image.exists(), "no image at {}", image.display());
+
+    use exr::prelude::{ReadChannels, ReadLayers};
+    let read = exr::prelude::read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .all_channels()
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(&image)
+        .expect("the written image reads back");
+
+    let layer = &read.layer_data;
+    assert_eq!(
+        (layer.size.width(), layer.size.height()),
+        (width as usize, height as usize)
+    );
+
+    let lit = layer.channel_data.list.iter().any(|channel| {
+        (0..layer.size.width() * layer.size.height())
+            .any(|i| channel.sample_data.value_by_flat_index(i).to_f32() > 0.0)
+    });
+    assert!(lit, "the written image is entirely black");
+}
