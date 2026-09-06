@@ -155,3 +155,74 @@ fn an_unknown_class_is_reported_by_name() {
         "{report:?}"
     );
 }
+
+/// **`S5`. The two consumers of `Document`, checked against each
+/// other — through rdl2.**
+///
+/// `apply` and `to_rdla` are two paths out of one structure, and
+/// nothing else compares them. A setter that took a different route
+/// from the writer — a wrong attribute name, a transposed matrix, a
+/// vector element order — would leave both self-consistent and only
+/// one correct.
+///
+/// The comparison is not text against text: rdl2's writer emits every
+/// declared attribute of every class, defaults included, while this
+/// crate emits only what it set. So the check is that **every
+/// attribute this crate writes appears with the same value** in what
+/// rdl2 writes after being driven through the shim.
+///
+/// `SceneVariables` is the subject because it is built into rdl2 —
+/// needing no DSO — and declares an attribute of most types.
+#[test]
+fn applying_a_document_and_dumping_it_agrees_with_the_emitter() {
+    use nsi_moonray::{document::Body, value::Value};
+
+    let context = context();
+
+    let mut variables = nsi_moonray::document::Object::scene_variables();
+    for (name, value) in [
+        ("image_width", Value::Int(640)),
+        ("image_height", Value::Int(480)),
+        ("output_file", Value::String("beauty.exr".to_string())),
+        ("pixel_samples", Value::Int(3)),
+        // A float `%g` renders unobviously, which is the case that
+        // would catch a formatter disagreeing with rdl2's writer.
+        ("scene_scale", Value::Float(0.1)),
+        ("fatal_color", Value::Rgb([0.25, 0.5, 0.75])),
+        ("sample_clamping_value", Value::Float(12.5)),
+    ] {
+        variables = variables.set(name, value);
+    }
+
+    let mut document = Document::default();
+    document.push(variables);
+
+    let report = apply(&document, &context);
+    assert!(
+        report.is_empty(),
+        "every attribute must apply; an unreported failure would make \
+         this test vacuous: {report:?}"
+    );
+
+    let out = std::env::temp_dir().join("nsi-moonray-roundtrip.rdla");
+    context
+        .write_ascii(&out)
+        .expect("the live scene writes out");
+    let written = std::fs::read_to_string(&out).expect("read back");
+
+    // Every attribute the emitter wrote must appear, verbatim, in what
+    // rdl2 wrote. `Value`'s formatting is oracle-checked against rdl2's
+    // own writer, so agreeing here means the *setter* agrees too.
+    for object in &document.objects {
+        if let Body::Attributes(attributes) = &object.body {
+            for (name, value) in attributes {
+                let expected = format!("[\"{name}\"] = {value},");
+                assert!(
+                    written.contains(&expected),
+                    "the applied scene disagrees with the emitter at \
+                     {name:?}: expected {expected}\n{written}"
+                );
+            }
+        }
+    }
+}

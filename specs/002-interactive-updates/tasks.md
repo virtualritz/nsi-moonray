@@ -26,7 +26,7 @@ Nothing built. Ordered so that each step is checkable on its own.
       no `scene_rdl2` builds and runs everything but `tests/apply.rs`.
       `cc` is an unconditional build-dependency: a build script sees
       features only as `CARGO_FEATURE_*`, never as a `cfg`.
-- [ ] S5 A round trip against the emitter. `oracle verify` proves rdl2
+- [x] S5 A round trip against the emitter. `oracle verify` proves rdl2
       reads what the emitter writes; the twin check is that applying a
       document and dumping it gives the same bytes. Any divergence is a
       setter that took a different path from the writer, and nothing
@@ -97,7 +97,11 @@ whether it embeds this crate or `dlopen`s it.
       `apply_affected` re-sends only what upstream's `Affected` named.
       What is *not* asserted is that the other geometry was untouched
       -- that is `I5`, and an image cannot show it.
-- [ ] I4 Deformation: `P` changes, and only that mesh regenerates.
+- [~] I4 Deformation: `P` changes and the shape moves.
+      `a_deformation_edit_moves_the_vertices` -- a narrow edit, not a
+      rebuild. That *only that mesh* regenerates is `I5`'s to prove,
+      and this is the case that should cost the expensive tier:
+      `vertex_list_*` is not `FLAGS_CAN_SKIP_GEOM_RELOAD`.
 - [~] I5 Assert the *cost*, not only the pixels -- **blocked, and the
       last thing between "renders the right image" and "is actually
       incremental".** `Render::cost` reads `RenderStats`, whose

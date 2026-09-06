@@ -662,3 +662,64 @@ fn disconnecting_a_shape_turns_it_off_without_a_rebuild() {
          is the difference between a BVH rebuild and a re-tessellation"
     );
 }
+
+/// **`I4`.** A deformation edit — `P` changes, and the shape moves.
+///
+/// The narrow path re-sends only the mesh, and MoonRay regenerates it.
+/// Which is the expensive tier: `vertex_list_*` is not
+/// `FLAGS_CAN_SKIP_GEOM_RELOAD`, so this one *should* re-tessellate,
+/// unlike a shader edit. That it does is `I5`'s to prove.
+#[test]
+fn a_deformation_edit_moves_the_vertices() {
+    use nsi_moonray::session::Session;
+
+    let dso = dso_path();
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (64usize, 48usize);
+    let mut session = Session::new(scene(width as i32, height as i32), &dso)
+        .expect("an interactive render");
+    session.wait();
+    let before = session.render().snapshot().expect("a frame").2;
+
+    // Move the quad's vertices left, without touching its transform.
+    session
+        .scene_mut()
+        .set_attribute(
+            "quad",
+            vec![arg(
+                "P",
+                Type::Point,
+                OwnedData::F32(vec![
+                    -3.0, -1.0, 0.0, -1.0, -1.0, 0.0, -1.0, 1.0, 0.0, -3.0,
+                    1.0, 0.0,
+                ]),
+            )],
+        )
+        .unwrap();
+
+    let rebuilt = session.synchronize();
+    assert!(!rebuilt, "editing `P` is a narrow edit, not a rebuild");
+    session.wait();
+    let after = session.render().snapshot().expect("a frame").2;
+
+    let centre = width / 2;
+    let left = width / 5;
+
+    assert!(
+        column(&before, width, height, centre) > 0.0,
+        "the quad should start in the centre"
+    );
+    assert!(
+        column(&after, width, height, centre)
+            < column(&before, width, height, centre) * 0.5,
+        "the centre should empty as the vertices move off it"
+    );
+    assert!(
+        column(&after, width, height, left)
+            > column(&before, width, height, left),
+        "the left should fill as the vertices arrive"
+    );
+}
