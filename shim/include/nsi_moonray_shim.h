@@ -228,6 +228,30 @@ int nmr_render_is_frame_complete(const NmrRender* render);
 // showing, ahead of `frame_complete`.
 int nmr_render_are_coarse_passes_complete(const NmrRender* render);
 
+// What the last frame *cost*, which is the only way to tell an
+// incremental update from a rebuild.
+//
+// A synchronise that re-tessellates everything renders exactly the
+// right image, slightly later. No test that reads pixels can see the
+// difference, and neither can a person watching a small scene. These
+// are what can.
+//
+// From `RenderStats`, whose counters are cumulative across frames --
+// so an incremental update is "these did not go up", not "these are
+// zero".
+typedef struct NmrCost {
+    // Times, in seconds, summed over every frame so far.
+    double tessellation;
+    double build_accelerator;
+    double load_procedurals;
+    double rebuild_geometry;
+    // How many primitives have been tessellated, ever. The most
+    // direct answer to "did this edit re-tessellate anything".
+    size_t primitives_tessellated;
+} NmrCost;
+
+int nmr_render_cost(const NmrRender* render, NmrCost* cost);
+
 // The frame's dimensions, as the renderer resolved them -- which is
 // not necessarily what the scene asked for, since `res` scales it.
 int nmr_render_resolution(const NmrRender* render, unsigned* width,

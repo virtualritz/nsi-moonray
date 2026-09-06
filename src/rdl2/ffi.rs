@@ -37,6 +37,19 @@ pub struct NmrRender {
     _private: [u8; 0],
 }
 
+/// What the frames so far have cost. Cumulative, so an incremental
+/// update is "these did not go up".
+#[cfg(moonray)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NmrCost {
+    pub tessellation: f64,
+    pub build_accelerator: f64,
+    pub load_procedurals: f64,
+    pub rebuild_geometry: f64,
+    pub primitives_tessellated: usize,
+}
+
 unsafe extern "C" {
     pub fn nmr_context_new(dso_path: *const c_char) -> *mut NmrContext;
     pub fn nmr_context_free(context: *mut NmrContext);
@@ -275,6 +288,10 @@ unsafe extern "C" {
         render: *const NmrRender,
     ) -> c_int;
     pub fn nmr_render_is_frame_complete(render: *const NmrRender) -> c_int;
+    pub fn nmr_render_cost(
+        render: *const NmrRender,
+        cost: *mut NmrCost,
+    ) -> c_int;
     pub fn nmr_render_resolution(
         render: *const NmrRender,
         width: *mut u32,

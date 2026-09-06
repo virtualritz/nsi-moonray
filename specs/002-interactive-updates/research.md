@@ -241,3 +241,37 @@ whose writer had already been added. A stale artefact does not look
 like a stale artefact; it looks like a bug you have already fixed.
 
 `cargo build --lib` before `cargo test` is the reliable order.
+
+## F8: MoonRay's cost counters do not accumulate for a library consumer
+
+`I5` -- "assert the cost, not only the pixels" -- needs a number that
+says whether an edit re-tessellated anything, because a synchronise
+that rebuilds the whole scene renders exactly the right image, slightly
+later, and no pixel test can tell the difference.
+
+`RenderStats` looks like the answer and is reachable:
+`RenderContext::getSceneRenderStats()` is public, its counters are
+public (`// stats are public for ease of access`), and
+`RenderContext.cc:2605` copies `mTessellationTime`,
+`mPerPrimitiveTessellationTime`, `mBuildAcceleratorTime` and the rest
+across from the `GeometryManager` after every `finalizeChanges`.
+
+**They do not move.** Adding a second shape to a live session -- first
+a polygon mesh, then a subdivision surface, which certainly
+tessellates -- leaves `primitives_tessellated` at 1 and every timer at
+`0.0`. The shape renders correctly, so the incremental path is fine;
+it is the measurement that is not there. The likely cause is that the
+timers are gated on stats logging a library consumer does not enable,
+but that was not chased down.
+
+`Render::cost` is kept, because the fields are real and the accessor is
+right. What is *not* kept is an assertion built on it: a test saying "a
+shader edit costs no geometry work" would pass because nothing ever
+moves, which is worse than no assertion at all. The control test --
+"adding geometry shows up in the counters" -- is committed and
+`#[ignore]`d, so `cargo test -- --ignored` says whether this is still
+true.
+
+`I5` stays open, and it is the last thing standing between "the
+incremental path renders the right image" and "the incremental path is
+actually incremental".

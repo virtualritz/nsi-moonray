@@ -1,14 +1,41 @@
 # Handoff
 
-Written 2026-09-05, after Phase 0. Read `specs/README.md`, then this.
+Updated 2026-09-06. Read `specs/README.md`, then this.
 
 ## What Exists
 
-A crate that flushes a recorded ɴsɪ scene into `.rdla`, and a captured
-oracle proving it writes the real format rather than a plausible one.
-Twenty-four tests; `cargo test` needs no renderer, no `scene_rdl2`, and
-no network — but it does need a sibling `../nsi` checkout, for the
-reason below.
+**MoonRay is linked, not spawned.** A recorded ɴsɪ scene reaches live
+`SceneObject`s, renders in this process, and each snapshot reaches the
+application's own closures as the frame converges. Editing the scene
+and calling `synchronize` re-sends only what changed. No file is
+written on the render path and no process is started.
+
+That is the whole of `001`'s delivery question and most of `002`. What
+is *not* done is proving the incremental path is incremental — see
+"What Would Bite You".
+
+```
+ɴsɪ calls ──▶ nsi-intermediate ──▶ flush ──▶ Document
+              (records + journals)              │
+                        apply │                 │ to_rdla
+                              ▼                 ▼
+                   MoonRay, linked          .rdla, a *dump*
+                              │
+                     snapshot │
+                              ▼
+                       callback.write
+```
+
+`.rdla` is a dump you can ask for with `$NSI_MOONRAY_SCENE`, not a
+transport. The oracle tests still check it, and still earn their place:
+they check the *values* this backend computes without needing a
+renderer, which is what let the transport change underneath them.
+
+Sixty-six tests with the renderer, fifty-six without. `cargo test`
+needs no renderer, no `scene_rdl2` and no network — but it does need a
+sibling `../nsi` checkout, for the reason below. The `rdl2` feature is
+what asks for a renderer, and it is off by default so that this crate
+stays workable from a machine that cannot build MoonRay.
 
 `scene_rdl2` builds on a modest machine — four cores, stock Ubuntu
 packages, about fifteen minutes. `quickstart.md` has the recipe and the
@@ -99,10 +126,12 @@ Two shapes, and neither asks this repository to build MoonRay:
   for a consumer that has that feature on. `tests/dropin.rs` opens the
   built artefact and drives a triangle through it by symbol.
 
-  What it is not yet: interactive. `"start"` runs MoonRay to
-  completion, so `"synchronize"`, `"suspend"` and `"resume"` have
-  nothing to act on, and a display driver sees a finished render
-  rather than a converging one.
+  It is interactive now: `"start"` with `"interactive"`,
+  `"synchronize"`, `"wait"` and `"stop"` all act on a live
+  `Session`. `"suspend"` and `"resume"` are deliberately unmapped —
+  MoonRay can `stopFrame`/`startFrame`, but restarting loses the
+  samples taken so far, and a viewport that dimmed whenever it was
+  touched would be worse than one that ignores the call.
 
 ## Pixels Reach The Application, Without ndspy
 
@@ -144,19 +173,53 @@ exist: `nsi-intermediate` writes streams and does not read them, and
 `nsi-stream` is the pixel-streaming driver, not a reader. That parser
 belongs upstream beside the writer. `T4.3`.
 
-Spawning the binary cannot stream samples back, so progressive
-rendering means linking `libmoonray` instead. `T4.4`.
+Spawning is now the *fallback*, for when there is no linked renderer:
+`rdl2dso` not found, a session already running, or render prep
+refusing the scene. ɴsɪ always returns an image, so a host that cannot
+have the fast path still gets its render.
+
+## The Two Layers That Matter Now
+
+- **`shim/`** is an `extern "C"` surface over `scene_rdl2` and MoonRay.
+  Two rules hold at every entry point, and both are load-bearing: no
+  C++ exception crosses the boundary (`set` by name throws, and
+  unwinding into Rust is undefined behaviour), and nothing refuses a
+  scene. `shim/tests/smoke.cc` drives every setter through rdl2's own
+  `ExtensiveObject` — which is how the calls were checked against the
+  library rather than against its headers.
+- **`src/session.rs`** is the interactive loop: a scene you keep
+  editing and a renderer that keeps what it already built.
+  `src/capi.rs` is a thin shim over it, so an application reaches the
+  same code whether it embeds this crate or `dlopen`s it.
 
 ## Where To Start
 
-**`T0.6`, the authoring twin of `RdlMeshGeometry`.** Its DSO lives in
-`moonray`, so nothing on a host without the renderer can read back a
-scene that uses it — the flush's output is currently checked as text
-only, while the oracle's is checked by rdl2 itself. But
-`moonray/dso/geometry/RdlMesh/attributes.cc` needs only `scene_rdl2`
-headers: build that file with a stub implementation and there is a
-faithful declaration-twin to author against, and `oracle verify` starts
-covering real mesh scenes.
+**`I5`, the cost assertion.** Everything else in the interactive path
+works and is checked; this is the one thing that would show it is
+doing what it claims. `002` `research.md` F8 has what was tried. It is
+worth chasing MoonRay's stats gating, because without it "incremental"
+is an assumption rather than a measurement.
+
+Then, in rough order of value:
+
+- **`I2`, geometry off through visibility.** `research.md` F3 says
+  MoonRay's visibility attributes are `FLAGS_GEOM_RELOAD_BVH_ONLY` —
+  one cost tier cheaper than editing the `Layer` or deleting the
+  object, for the same image. This is the case where getting the
+  *mapping* right is the whole job.
+- **`T5.4`, writing a file from the linked renderer.** A batch render
+  with no callbacks currently converges and then says nothing was
+  saved. That is honest but useless for a farm.
+- **`T0.6`, the authoring twin of `RdlMeshGeometry`.** Its DSO lives
+  in `moonray`, so nothing on a host without the renderer can read
+  back a scene that uses it. But
+  `moonray/dso/geometry/RdlMesh/attributes.cc` needs only `scene_rdl2`
+  headers: build it with a stub implementation and `oracle verify`
+  starts covering real mesh scenes.
+- **`T6.6`, rendering an instanced scene.** The mapping is asserted as
+  text; what it looks like is not, and `T6.2` — whether
+  `use_reference_xforms` double-applies or drops the prototype's own
+  transform — can only be settled by looking.
 
 Materials are substituted, not translated: every ɴsɪ shader becomes a
 `UsdPreviewSurface` at its defaults. Carrying its *parameters* across
@@ -167,20 +230,74 @@ prevent.
 
 ## What Has Been Rendered
 
-Three things, all through a MoonRay built here:
+Through a spawned MoonRay:
 
 - a triangle, which is what found the two black-image bugs below;
 - a translated quad, checked against where the transform puts it rather
   than against the matrix in the file (`T1.2`);
 - two quads with two materials, red and green, asserted per channel
   (`T1.4` — the inherited top risk, and the one thing reading the file
-  could never have settled).
+  could never have settled);
+- a moving quad, blurred (`T2.2`);
+- a `polyhedron-ops` polyhedron through the backend loaded as
+  `lib3delight.so` — the drop-in path end to end with an unmodified
+  consumer (`examples/polyhedron`).
 
-And `examples/polyhedron` renders a `polyhedron-ops` polyhedron through
-this backend loaded as `lib3delight.so`, which is the drop-in path
-working end to end with an unmodified consumer.
+Through a **linked** MoonRay, with no file and no process:
+
+- a lit quad, asserted at the centre of frame and across a tenth of
+  the pixels — "any pixel is non-zero" would pass on a stray sample;
+- the same, streamed to an application's closures as it converged: six
+  buckets for a frame taking a third of a second;
+- a red quad turning green through one `synchronize`, and a quad
+  moving to where a transform edit put it — both asserted on pixels,
+  because "applied but not marked" is a scene holding the new value
+  while the render shows the old one, and reading the scene back would
+  pass on exactly that.
+
+## Six Things Found By Running It
+
+Each cost real time, none is inferable from a header, and every one is
+a crash or a silent wrong answer rather than an error:
+
+- **`initGlobalDriver` is not optional** (`002` F4).
+  `RenderContext`'s constructor does not set up the process;
+  `moonray`'s own `main` calls this first. Skip it and `initialize`
+  SIGSEGVs inside *logging*, with a backtrace pointing nowhere near
+  the cause.
+- **One renderer per process** (`002` F4). MoonRay's driver state is
+  global. Two live ones abort in the allocator. The shim refuses the
+  second and says why; sequential use is fine.
+- **A scene with no camera crashes MoonRay** (`002` F5).
+  `initialize` indexes `getActiveCameras()[0]` on an empty vector,
+  which is undefined behaviour rather than the `KeyError` its own
+  `catch` waits for. A camera-less ɴsɪ scene is legal, so the flush
+  now emits a default camera. Written up in `upstream/` to send.
+- **`setSceneUpdated` is not what carries an edit across** (`002` F6).
+  It reads like the load-bearing call and is not: a transform and a
+  shader parameter both reach the render without it. Two tests
+  asserted otherwise and both failed. It is still called; nothing
+  claims more than that.
+- **MoonRay's cost counters do not move** (`002` F8), which is why
+  `I5` is still open — see below.
+- **The `cdylib` goes stale under `cargo test`** (`002` F7).
+  `tests/dropin.rs` `dlopen`s it by path, so Cargo does not know the
+  test depends on it. This cost two debugging sessions and both times
+  pointed somewhere else entirely: a stale artefact looks like a bug
+  you have already fixed. `cargo build --lib` first.
 
 ## What Would Bite You
+
+**The incremental path is unproven as *incremental*.** It renders the
+right image — a shader edit and a transform each cross in one
+synchronise, asserted on pixels — but nothing shows MoonRay
+re-tessellated nothing. A synchronise that rebuilt the whole scene
+would pass every test here. `Render::cost` reads the counters that
+would settle it and they do not move (`002` F8); the control test is
+committed and `#[ignore]`d rather than an assertion being built on top
+of it. **`I5` is the last thing between "renders correctly" and
+"is actually interactive".**
+
 
 **Two ways a perfectly correct scene renders black**, both found by
 rendering rather than by reasoning, and both now fixed:

@@ -56,6 +56,20 @@ impl Mode {
     }
 }
 
+/// What MoonRay has spent, cumulatively, since the renderer was made.
+///
+/// Times are in seconds. `primitives_tessellated` is a count of
+/// tessellations performed, which is the most direct answer to "did
+/// that edit re-tessellate anything".
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Cost {
+    pub tessellation: f64,
+    pub build_accelerator: f64,
+    pub load_procedurals: f64,
+    pub rebuild_geometry: f64,
+    pub primitives_tessellated: usize,
+}
+
 /// A MoonRay renderer.
 pub struct Render {
     raw: *mut ffi::NmrRender,
@@ -167,6 +181,28 @@ impl Render {
     pub fn frame_complete(&self) -> bool {
         // SAFETY: a live renderer.
         unsafe { ffi::nmr_render_is_frame_complete(self.raw) != 0 }
+    }
+
+    /// What the frames so far have cost.
+    ///
+    /// **The only way to tell an incremental update from a rebuild.** A
+    /// synchronise that re-tessellates the whole scene renders exactly
+    /// the right image, slightly later: no test that reads pixels can
+    /// see the difference, and on a small scene neither can a person.
+    ///
+    /// The counters are cumulative across frames, so the question to
+    /// ask is "did these go up", not "are these zero".
+    pub fn cost(&self) -> Result<Cost, Error> {
+        let mut cost = ffi::NmrCost::default();
+        // SAFETY: a live renderer and a valid out-pointer.
+        result(unsafe { ffi::nmr_render_cost(self.raw, &mut cost) })?;
+        Ok(Cost {
+            tessellation: cost.tessellation,
+            build_accelerator: cost.build_accelerator,
+            load_procedurals: cost.load_procedurals,
+            rebuild_geometry: cost.rebuild_geometry,
+            primitives_tessellated: cost.primitives_tessellated,
+        })
     }
 
     /// The frame's size, as the renderer resolved it.

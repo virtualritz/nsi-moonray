@@ -30,7 +30,7 @@ mod ffi;
 #[cfg(moonray)]
 mod render;
 #[cfg(moonray)]
-pub use render::{Mode, Render};
+pub use render::{Cost, Mode, Render};
 
 /// What a shim call answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

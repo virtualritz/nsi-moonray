@@ -350,6 +350,20 @@ fn a_created_node_falls_back_and_reports() {
     let _ = nsi.take_changes();
 
     nsi.create("second", "mesh").unwrap();
+    // A *subdivision* surface, because a polygon mesh may never go
+    // through tessellation at all and the counters would not move for
+    // it -- which is the thing this test exists to rule out.
+    nsi.set_attribute(
+        "second",
+        vec![OwnedArg::new(
+            "subdivision.scheme",
+            Type::String,
+            1,
+            0,
+            OwnedData::String(vec![b"catmull-clark".to_vec()]),
+        )],
+    )
+    .unwrap();
     nsi.connect("second", None, ".root", "objects").unwrap();
 
     let changes = nsi.take_changes();
@@ -497,5 +511,89 @@ fn a_session_moves_a_shape() {
         column(&after, width, height, left)
             > column(&before, width, height, left),
         "the left should brighten as the quad arrives"
+    );
+}
+
+/// **`I5`, and why it is still open.**
+///
+/// A synchronise that re-tessellates the whole scene renders exactly
+/// the right picture, slightly later. Every other test here would pass
+/// on it. Only a cost counter can tell the difference — which is why
+/// `Render::cost` exists and reads MoonRay's `RenderStats`.
+///
+/// **The counters do not move.** Adding a second shape — a polygon
+/// mesh, then a subdivision surface, which certainly tessellates —
+/// leaves `primitives_tessellated` at 1 and every timer at `0.0`,
+/// while the shape itself renders correctly. So the fields are real
+/// and reachable but are not accumulating in this configuration;
+/// `mTessellationTime` and friends are probably gated on stats
+/// logging that a library consumer does not turn on.
+///
+/// This test is ignored rather than deleted because it is the control:
+/// until *it* passes, an assertion that a shader edit costs no
+/// geometry work would pass because nothing ever moves, which is worse
+/// than having no assertion at all.
+///
+/// Run with `cargo test -- --ignored` to check whether this is still
+/// true.
+#[test]
+#[ignore = "MoonRay's cost counters do not accumulate here; see the note"]
+fn adding_geometry_shows_up_in_the_cost_counters() {
+    use nsi_moonray::session::Session;
+
+    let dso = dso_path();
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let mut session =
+        Session::new(scene(64, 48), &dso).expect("an interactive render");
+    session.wait();
+
+    let before = session.render().cost().expect("cost counters");
+
+    let nsi = session.scene_mut();
+    nsi.create("second", "mesh").unwrap();
+    nsi.set_attribute(
+        "second",
+        vec![
+            arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
+            arg(
+                "P",
+                Type::Point,
+                OwnedData::F32(vec![
+                    -3.0, -1.0, -5.0, -2.0, -1.0, -5.0, -2.0, 1.0, -5.0, -3.0,
+                    1.0, -5.0,
+                ]),
+            ),
+            OwnedArg::new(
+                "subdivision.scheme",
+                Type::String,
+                1,
+                0,
+                OwnedData::String(vec![b"catmull-clark".to_vec()]),
+            ),
+        ],
+    )
+    .unwrap();
+    nsi.connect("second", None, ".root", "objects").unwrap();
+
+    assert!(session.synchronize(), "a created node forces a re-apply");
+    session.wait();
+
+    // The shape does arrive -- this part passes. It is the counters
+    // that do not move.
+    let pixels = session.render().snapshot().expect("a frame").2;
+    assert!(
+        column(&pixels, 64, 48, 8) > 0.0,
+        "the second shape should be rendering on the left"
+    );
+
+    let after = session.render().cost().expect("cost counters");
+    assert!(
+        after.primitives_tessellated > before.primitives_tessellated,
+        "adding a subdivision surface must cost tessellation, or these \
+         counters cannot support `I5`: {before:?} then {after:?}"
     );
 }

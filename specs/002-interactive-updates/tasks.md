@@ -90,9 +90,20 @@ whether it embeds this crate or `dlopen`s it.
       What is *not* asserted is that the other geometry was untouched
       -- that is `I5`, and an image cannot show it.
 - [ ] I4 Deformation: `P` changes, and only that mesh regenerates.
-- [ ] I5 Assert the *cost*, not only the pixels. MoonRay logs what it
-      regenerated; a test that only checks the image passes on a full
-      rebuild.
+- [~] I5 Assert the *cost*, not only the pixels -- **blocked, and the
+      last thing between "renders the right image" and "is actually
+      incremental".** `Render::cost` reads `RenderStats`, whose
+      counters are public and are copied across after every
+      `finalizeChanges`. They do not move: adding a subdivision surface
+      to a live session leaves `primitives_tessellated` at 1 and every
+      timer at `0.0`, while the shape renders correctly. So the
+      accessor is right and the measurement is absent -- probably gated
+      on stats logging a library consumer does not enable
+      (`research.md` F8).
+      The control test is committed and `#[ignore]`d rather than an
+      assertion being shipped on top of it: "a shader edit costs no
+      geometry work" would pass because nothing ever moves, which is
+      worse than no assertion.
 - [x] I6 Fall back to a full re-apply for anything not narrowable,
       and report it. `Affected::everything` (an edit to `.root` or
       `.global`) and any node created or deleted -- set and layer

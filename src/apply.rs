@@ -73,7 +73,9 @@ pub fn apply_affected(
     if !changes.created.is_empty() || !changes.deleted.is_empty() {
         let mut report = apply(document, context);
         report.push(format!(
-            "{} node(s) created and {} deleted, which changes set and              layer membership, so the whole scene was re-applied",
+            "{} node(s) created and {} deleted, which changes set \
+             and layer membership, so the whole scene was \
+             re-applied",
             changes.created.len(),
             changes.deleted.len()
         ));

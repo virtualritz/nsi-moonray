@@ -9,6 +9,7 @@
 
 #include <moonray/rendering/rndr/RenderContext.h>
 #include <moonray/rendering/rndr/RenderOptions.h>
+#include <moonray/rendering/rndr/RenderStatistics.h>
 #include <scene_rdl2/common/fb_util/FbTypes.h>
 #include <scene_rdl2/scene/rdl2/rdl2.h>
 
@@ -291,6 +292,25 @@ int nmr_render_is_frame_complete(const NmrRender* render)
         return render->context->isFrameComplete() ? 1 : 0;
     } catch (...) {
         return 0;
+    }
+}
+
+int nmr_render_cost(const NmrRender* render, NmrCost* cost)
+{
+    if (render == nullptr || !render->context || cost == nullptr) {
+        return NMR_BAD_ARGUMENT;
+    }
+    try {
+        const auto& stats = render->context->getSceneRenderStats();
+        cost->tessellation = stats.mTessellationTime.getSum();
+        cost->build_accelerator = stats.mBuildAcceleratorTime.getSum();
+        cost->load_procedurals = stats.mLoadProceduralsTime.getSum();
+        cost->rebuild_geometry = stats.mRebuildGeometryTime.getSum();
+        cost->primitives_tessellated =
+            stats.mPerPrimitiveTessellationTime.size();
+        return NMR_OK;
+    } catch (...) {
+        return NMR_FAILED;
     }
 }
 
