@@ -206,6 +206,21 @@ Three things a scene has to do, each measured rather than assumed:
   a class it does not ship, so without a stand-in *no* scene containing
   a mesh light renders at all.
 
+**`OslMap` cannot be exercised on MoonRay `eef67ae`.** Giving a
+`MeshLight` *any* `map_shader` segfaults in render prep, inside
+`Mesh::getST` while the light walks its own faces to compute their
+energies. It is not this map: MoonRay's own `CheckerboardMap` crashes
+identically, in both execution modes, on quad and triangle meshes, with
+and without a `uv_list` on the mesh, and with or without the mesh-light
+material asking for texture coordinates. Reported as
+`upstream/moonray-meshlight-map-shader-segfault.md`.
+
+A mesh light with a constant `color` and `intensity` works — measured,
+1.45 on a floor lit by one — so an emitter that does *not* vary across
+its surface lights a scene today. `OslMap` is what will make a varying
+one work, and it is written and built against the interface MoonRay
+documents.
+
 `specs/003-osl/research.md` O2 and O3.
 
 ## The hit-only path, which is still right for the surface itself

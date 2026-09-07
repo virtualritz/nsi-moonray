@@ -15,6 +15,7 @@ crashes for one assembled in memory.
 | [`scene_rdl2-bvh-only-flag-ignored.md`](scene_rdl2-bvh-only-flag-ignored.md) | Not filed — as above |
 | [`moonray-meshlight-needs-moonshine-dwa.md`](moonray-meshlight-needs-moonshine-dwa.md) | Not filed — as above |
 | [`moonray-scalar-material-renders-black.md`](moonray-scalar-material-renders-black.md) | Not filed — as above |
+| [`moonray-meshlight-map-shader-segfault.md`](moonray-meshlight-map-shader-segfault.md) | Not filed — as above |
 
 The workaround for each lives in this repository and is marked as
 such, so that fixing it upstream is a deletion rather than an
