@@ -482,7 +482,8 @@ int nmr_set_add(NmrObject* set, NmrObject* member)
 }
 
 int nmr_layer_assign(NmrObject* layer, NmrObject* geometry, const char* part,
-                     NmrObject* material, NmrObject* light_set)
+                     NmrObject* material, NmrObject* light_set,
+                     NmrObject* displacement)
 {
     if (geometry == nullptr) {
         return NMR_BAD_ARGUMENT;
@@ -492,6 +493,10 @@ int nmr_layer_assign(NmrObject* layer, NmrObject* geometry, const char* part,
         if (target == nullptr) {
             throw scene_rdl2::except::TypeError("not a Layer");
         }
+        // The six-argument overload, because the four-argument one has
+        // no displacement column and silently renders the undisplaced
+        // shape. The volume shader is null until there is something to
+        // put in it.
         target->assign(
             object_of(geometry)->asA<rdl2::Geometry>(),
             rdl2::String(part == nullptr ? "" : part),
@@ -499,7 +504,11 @@ int nmr_layer_assign(NmrObject* layer, NmrObject* geometry, const char* part,
                                 : object_of(material)->asA<rdl2::Material>(),
             light_set == nullptr
                 ? nullptr
-                : object_of(light_set)->asA<rdl2::LightSet>());
+                : object_of(light_set)->asA<rdl2::LightSet>(),
+            displacement == nullptr
+                ? nullptr
+                : object_of(displacement)->asA<rdl2::Displacement>(),
+            nullptr);
     });
 }
 

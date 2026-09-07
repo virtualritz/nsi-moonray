@@ -24,11 +24,18 @@ transform and deformation motion blur on one scene-wide shutter,
 cameras, render outputs, and lights — which in ɴsɪ are geometry wearing
 an emissive shader rather than nodes of their own.
 
-Materials are substituted rather than translated, because MoonRay runs
-no OSL: every ɴsɪ shader becomes a `UsdPreviewSurface`, MoonRay's stock
-PBR surface, carrying whatever parameters that shader is known to have.
-The known shaders are a table read off 3Delight's own compiled `.oso`
-files rather than guessed at; anything else is reported by name.
+Shading runs OSL. ɴsɪ *is* OSL — a `shader` node names a compiled
+`.oso` — so the network crosses as an OSL group specification and
+MoonRay executes it, through the `Osl` and `OslDisplacement` root
+shaders in [`dso/osl/`](dso/osl/). That needs OSL at build time:
+set `$OSL_ROOT`.
+
+Without it, materials are substituted rather than translated: every ɴsɪ
+shader becomes a `UsdPreviewSurface`, MoonRay's stock PBR surface,
+carrying whatever parameters that shader is known to have. The known
+shaders are a table read off 3Delight's own compiled `.oso` files
+rather than guessed at; anything else is reported by name. A
+displacement has no such substitute and is reported instead.
 
 ## `mnry`
 

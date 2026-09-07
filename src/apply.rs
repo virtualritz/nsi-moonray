@@ -307,11 +307,20 @@ pub fn apply(document: &Document, context: &Context) -> Vec<String> {
                         &mut report,
                     );
 
+                    let displacement = optional(
+                        &assignment.displacement,
+                        &objects,
+                        &name,
+                        "displacement",
+                        &mut report,
+                    );
+
                     if let Err(error) = update.assign(
                         geometry,
                         &assignment.part,
                         material,
                         light_set,
+                        displacement,
                     ) {
                         report.push(format!(
                             "{name:?}: row not assigned: {error}"

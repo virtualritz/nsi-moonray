@@ -142,9 +142,10 @@ int nmr_set_binding(NmrObject* o, const char* name, NmrObject* target);
 int nmr_set_add(NmrObject* set, NmrObject* member);
 
 // One `Layer` row. `part` may be null for the whole geometry, and
-// `material` or `light_set` may be null.
+// `material`, `light_set` or `displacement` may be null.
 int nmr_layer_assign(NmrObject* layer, NmrObject* geometry, const char* part,
-                     NmrObject* material, NmrObject* light_set);
+                     NmrObject* material, NmrObject* light_set,
+                     NmrObject* displacement);
 
 // Write the live context out. This is what keeps `.rdla` honest once it
 // is no longer the transport: dump the applied scene and diff it

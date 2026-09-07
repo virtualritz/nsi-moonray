@@ -20,8 +20,9 @@ use crate::{
     name::Name,
     value::{Reference, Value},
 };
-use nsi_intermediate::{IDENTITY, Node, OwnedData, Scene};
+use nsi_intermediate::{EdgeKind, IDENTITY, Node, OwnedData, Scene};
 use nsi_trait::Type;
+use std::collections::HashSet;
 
 /// MoonRay's mesh geometry, whose DSO is `moonray/dso/geometry/RdlMesh`.
 const MESH: &str = "RdlMeshGeometry";
@@ -98,6 +99,15 @@ const MATERIAL: &str = "UsdPreviewSurface";
 /// MoonRay, so it has to be on MoonRay's DSO path for a scene naming
 /// it to load at all.
 const OSL_MATERIAL: &str = "Osl";
+
+/// The root shader an ɴsɪ `displacementshader` becomes.
+///
+/// Built by this repository beside the material, from the same shading
+/// system: the group is identical, the *usage* is not. There is no
+/// substitute for it, so without OSL a displacement is reported and
+/// dropped -- moving vertices is not something a stand-in surface can
+/// approximate.
+const OSL_DISPLACEMENT: &str = "OslDisplacement";
 
 /// Every way MoonRay can see a piece of geometry.
 ///
@@ -241,7 +251,12 @@ pub fn flush_with(
     // Handles borrow from the scene now rather than being copied:
     // upstream interns them, and a flush that cloned every one back
     // into a `String` would hand that saving straight back.
-    let mut bindings: Vec<(&'static str, &str, Option<Reference>)> = Vec::new();
+    let mut bindings: Vec<(
+        &'static str,
+        &str,
+        Option<Reference>,
+        Option<Reference>,
+    )> = Vec::new();
     let mut objects = Vec::new();
     // Handles of the instancers seen, so a prototype can be told from
     // an ordinary shape after the walk -- a prototype is drawn by its
@@ -262,6 +277,11 @@ pub fn flush_with(
     // prototype's transform has to be resolved *relative to* its
     // instancer rather than to the world.
     let prototypes = prototypes(scene);
+    // Which shaders are bound in which slot. Built from the edges
+    // rather than per geometry because the *class* a shader node
+    // becomes is a property of the shader, and the node walk reaches it
+    // in whatever order the scene was recorded in.
+    let (surfaces, displaces) = shader_roles(scene);
 
     for (handle, node) in scene.nodes() {
         match node.node_type() {
@@ -343,6 +363,7 @@ pub fn flush_with(
                     MESH,
                     handle,
                     material(scene, handle, shading, &mut flushed),
+                    displacement(scene, handle, shading, &mut flushed),
                 ));
             }
 
@@ -395,6 +416,7 @@ pub fn flush_with(
                         INSTANCER,
                         handle,
                         material(scene, handle, shading, &mut flushed),
+                        displacement(scene, handle, shading, &mut flushed),
                     ));
                     instancers.push(handle);
                 }
@@ -406,12 +428,35 @@ pub fn flush_with(
             "outputdriver" | "outputlayer" => {}
 
             "shader" => {
+                // rdl2 names are unique across classes -- creating a
+                // second object under a name another class already
+                // holds is an error, not a shadowing -- so a shader
+                // becomes *one* object and its binding decides which.
+                if shading == Shading::Osl && displaces.contains(&handle) {
+                    if surfaces.contains(&handle) {
+                        flushed.limitations.push(format!(
+                            "shader {handle:?} is bound as both a surface                              and a displacement shader; it crossed as the                              surface, because a MoonRay object has one                              class and one name"
+                        ));
+                        objects.push(shader(
+                            scene,
+                            handle,
+                            shading,
+                            &mut flushed,
+                        ));
+                    } else {
+                        objects.push(osl_displacement(
+                            scene,
+                            handle,
+                            &mut flushed,
+                        ));
+                    }
+                }
                 // An emitter is carried by the light it makes, not by
                 // a stand-in surface nothing references. With OSL
                 // running the question is answered by *executing* the
                 // shader rather than by recognising its name, so the
                 // check only applies to the substitute.
-                if shading == Shading::Osl
+                else if shading == Shading::Osl
                     || light_class(scene, handle).is_none()
                 {
                     objects.push(shader(scene, handle, shading, &mut flushed));
@@ -491,17 +536,20 @@ pub fn flush_with(
     let mut unshaded = 0;
     let assignments = bindings
         .into_iter()
-        .map(|(class, handle, material)| {
+        .map(|(class, handle, material, displacement)| {
             let material = material.unwrap_or_else(|| {
                 unshaded += 1;
                 Reference::new(MATERIAL, DEFAULT_MATERIAL)
             });
 
-            Assignment::new(
-                Reference::new(class, handle),
-                Some(material),
-                light_set.clone(),
-            )
+            Assignment {
+                displacement,
+                ..Assignment::new(
+                    Reference::new(class, handle),
+                    Some(material),
+                    light_set.clone(),
+                )
+            }
         })
         .collect();
 
@@ -1472,6 +1520,63 @@ fn material(
     }
 }
 
+/// The shader handles bound in each shader slot: surfaces, then
+/// displacements.
+///
+/// Read off the edges rather than resolved per geometry, and
+/// deliberately: this decides what *class* a shader node becomes, which
+/// has to be the same answer everywhere the shader is named. An edge
+/// that loses ɴsɪ's precedence rule to another still leaves an object
+/// nothing references, which costs a few lines of `.rdla`; getting the
+/// class wrong costs the surface.
+fn shader_roles(scene: &Scene) -> (HashSet<&str>, HashSet<&str>) {
+    let mut surfaces = HashSet::new();
+    let mut displaces = HashSet::new();
+
+    for edge in scene.edges() {
+        match edge.kind {
+            EdgeKind::SurfaceShader => {
+                surfaces.insert(edge.from());
+            }
+            EdgeKind::DisplacementShader => {
+                displaces.insert(edge.from());
+            }
+            _ => {}
+        }
+    }
+
+    (surfaces, displaces)
+}
+
+/// The displacement bound to one piece of geometry, if any.
+///
+/// There is no substitute for a displacement the way `UsdPreviewSurface`
+/// substitutes for a surface: a displacement *moves vertices*, and a
+/// stand-in that does not move them renders a different shape. So
+/// without OSL -- or with a shader OSL cannot load -- it is reported and
+/// the geometry keeps its own silhouette.
+fn displacement(
+    scene: &Scene,
+    handle: &str,
+    shading: Shading,
+    flushed: &mut Flushed,
+) -> Option<Reference> {
+    let shader = scene
+        .geometry_binding(handle)
+        .ok()
+        .flatten()?
+        .displacement_shader?;
+
+    if shading != Shading::Osl || !crate::osl::is_runnable(scene, &shader) {
+        flushed.limitations.push(format!(
+            "{handle:?} has displacement shader {shader:?} bound, which              needs OSL; the geometry is not displaced"
+        ));
+        return None;
+    }
+
+    Some(Reference::new(OSL_DISPLACEMENT, shader))
+}
+
 /// The parameters carried from an ɴsɪ shader into the substitute
 /// surface, paired with the `UsdPreviewSurface` attribute each feeds.
 ///
@@ -1946,6 +2051,21 @@ fn osl_shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
         object = object.set("search_path", Value::String(path));
     }
 
+    object
+}
+
+/// One ɴsɪ shader network, as MoonRay's `OslDisplacement`.
+///
+/// The same group specification a material would carry: OSL decides
+/// what a shader may do from the *usage* it is compiled into a group
+/// with, and that is the root shader's business, not the flush's.
+fn osl_displacement(
+    scene: &Scene,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    let mut object = osl_shader(scene, handle, flushed);
+    object.class = Name::new(OSL_DISPLACEMENT);
     object
 }
 
@@ -2833,6 +2953,109 @@ mod tests {
     /// to recognise: the network becomes an OSL group specification
     /// and MoonRay runs it, so a parameter no table knows about
     /// arrives anyway.
+    /// **A displacement shader becomes an `OslDisplacement`, not an
+    /// `Osl`.**
+    ///
+    /// rdl2 refuses a second object under a name another class already
+    /// holds -- measured, and it is a hard error at scene load, not a
+    /// warning -- so which class a shader node becomes is decided by
+    /// what it is bound to and there is exactly one answer per handle.
+    #[test]
+    fn an_nsi_displacement_shader_becomes_a_displacement() {
+        let mut scene = triangle();
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("surf", "shader").expect("a recordable edit");
+        scene.create("disp", "shader").expect("a recordable edit");
+        for (handle, file) in [
+            ("surf", "/opt/3delight/osl/dlPrincipled.oso"),
+            ("disp", "/opt/3delight/osl/push.oso"),
+        ] {
+            scene
+                .set_attribute(
+                    handle,
+                    vec![arg(
+                        "shaderfilename",
+                        Type::String,
+                        OwnedData::String(vec![file.as_bytes().to_vec()]),
+                    )],
+                )
+                .expect("a recordable edit");
+        }
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("surf", None, "attr", "surfaceshader")
+            .unwrap();
+        scene
+            .connect("disp", None, "attr", "displacementshader")
+            .unwrap();
+
+        let flushed = flush_with(&scene, Purpose::default(), Shading::Osl);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("OslDisplacement(\"disp\") {"), "{rdla}");
+        // And not *also* as a material, which would not load.
+        assert!(!rdla.contains("Osl(\"disp\") {"), "{rdla}");
+        assert!(rdla.contains("shader push disp ;"), "{rdla}");
+        // The fifth column of the layer row: geometry, part, material,
+        // light set -- which this fixture has none of -- displacement.
+        assert!(
+            rdla.contains(
+                "{RdlMeshGeometry(\"tri\"), \"\", Osl(\"surf\"), undef(), \
+                 OslDisplacement(\"disp\")"
+            ),
+            "{rdla}"
+        );
+    }
+
+    /// Without OSL there is nothing to run a displacement with, and no
+    /// stand-in that moves vertices -- so it is said rather than
+    /// silently dropped.
+    #[test]
+    fn a_displacement_without_osl_is_reported() {
+        let mut scene = triangle();
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("disp", "shader").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "disp",
+                vec![arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![b"/opt/osl/push.oso".to_vec()]),
+                )],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("disp", None, "attr", "displacementshader")
+            .unwrap();
+
+        let flushed =
+            flush_with(&scene, Purpose::default(), Shading::Substitute);
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("is not displaced")),
+            "{:?}",
+            flushed.limitations
+        );
+        assert!(
+            !flushed.to_rdla().contains("OslDisplacement"),
+            "{}",
+            flushed.to_rdla()
+        );
+    }
+
     #[test]
     fn an_nsi_shader_becomes_an_osl_material() {
         let mut scene = triangle();

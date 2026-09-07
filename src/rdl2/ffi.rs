@@ -266,6 +266,7 @@ unsafe extern "C" {
         part: *const c_char,
         material: *mut NmrObject,
         light_set: *mut NmrObject,
+        displacement: *mut NmrObject,
     ) -> c_int;
 }
 

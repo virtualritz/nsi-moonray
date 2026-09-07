@@ -20,6 +20,8 @@
 /// backend's shim does; a scene handed to `moonray` by hand needs
 /// `-exec_mode scalar`.
 
+#define NSI_MOONRAY_OSL_ROOT rdl2::Material
+#define NSI_MOONRAY_OSL_LABELS
 #include "attributes.cc"
 #include "shading_system.h"
 

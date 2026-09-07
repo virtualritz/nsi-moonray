@@ -1855,3 +1855,109 @@ fn a_materialx_closure_renders() {
         "green should exceed blue, as `tint` says: {red} {green} {blue}"
     );
 }
+
+/// **An OSL displacement moves the surface.**
+///
+/// A displacement is the one shader binding with no substitute: it
+/// changes the *shape*, so a stand-in that shades plausibly and leaves
+/// the vertices alone is not an approximation of it. What is asserted
+/// is therefore the silhouette -- the covered area of the frame -- and
+/// not the colour.
+///
+/// The quad is pushed half a unit along its normal, towards the camera,
+/// which makes it cover more of the frame. Measured against
+/// MoonRay's own `NormalDisplacement` at the same height first, so the
+/// number below is what the renderer does rather than what this test
+/// hopes for.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn an_osl_displacement_displaces() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-displace");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("push.osl");
+    std::fs::write(
+        &source,
+        "displacement push(float amount = 0.5)\n\
+         {\n    P = P + amount * normalize(N);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("push.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    // The same scene twice: once as it is, once with the displacement
+    // bound. Anything else that changed the coverage would change both.
+    let (width, height) = (64usize, 48usize);
+    let covered = |displaced: bool| {
+        let mut nsi = scene(width as i32, height as i32);
+        nsi.create("attr", "attributes").unwrap();
+
+        if displaced {
+            nsi.create("push", "shader").unwrap();
+            nsi.set_attribute(
+                "push",
+                vec![arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![
+                        directory
+                            .join("push.oso")
+                            .to_string_lossy()
+                            .into_owned()
+                            .into_bytes(),
+                    ]),
+                )],
+            )
+            .unwrap();
+            nsi.connect("push", None, "attr", "displacementshader")
+                .unwrap();
+        }
+
+        nsi.connect("attr", None, "quad", "geometryattributes")
+            .unwrap();
+
+        let mut session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+        // Alpha, which is coverage and nothing else.
+        pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 0.5)
+            .count()
+    };
+
+    let plain = covered(false);
+    let pushed = covered(true);
+
+    assert!(plain > 0, "the undisplaced quad is not in frame at all");
+    assert!(
+        pushed > plain + plain / 10,
+        "pushing the quad half a unit towards the camera should have \
+         made it visibly larger: {plain} pixels became {pushed}. Equal \
+         means the displacement never reached MoonRay -- an unbound \
+         `OslDisplacement` is silent, because the layer's displacement \
+         column is optional."
+    );
+}
