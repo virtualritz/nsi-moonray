@@ -7,7 +7,7 @@
 //! the name fails with a parse error about the wrong format.
 
 use anyhow::{Context as _, Result};
-use nsi_intermediate::{OwnedArg, OwnedData, Recorder, Scene};
+use nsi_intermediate::{OwnedArgument, OwnedData, Recorder, Scene};
 use nsi_moonray::flush::{Flushed, Purpose, flush_for};
 use nsi_trait::Type;
 use std::path::Path;
@@ -49,8 +49,8 @@ pub fn read(path: &Path) -> Result<Input> {
 pub fn redirect_output(scene: &mut Scene, image: &Path) -> Result<usize> {
     let drivers: Vec<String> = scene
         .nodes()
-        .filter(|(_, node)| node.node_type == "outputdriver")
-        .map(|(handle, _)| handle.clone())
+        .filter(|(_, node)| node.node_type() == "outputdriver")
+        .map(|(handle, _)| handle.to_owned())
         .collect();
 
     let name = image.to_string_lossy().into_owned();
@@ -58,7 +58,7 @@ pub fn redirect_output(scene: &mut Scene, image: &Path) -> Result<usize> {
         scene
             .set_attribute(
                 driver,
-                vec![OwnedArg::new(
+                vec![OwnedArgument::new(
                     "imagefilename",
                     Type::String,
                     1,

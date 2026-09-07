@@ -298,7 +298,7 @@ pub fn deliver_file(
 mod tests {
     use super::*;
     use nsi_ffi_wrap::output::{FinishCallback, WriteCallback};
-    use nsi_intermediate::{OwnedArg, OwnedData};
+    use nsi_intermediate::{OwnedArgument, OwnedData};
     use nsi_trait::Type;
     use std::sync::{
         Arc, Mutex,
@@ -316,12 +316,12 @@ mod tests {
         scene
             .set_attribute(
                 driver,
-                vec![OwnedArg::new(
+                vec![OwnedArgument::new(
                     name,
                     Type::Reference,
                     1,
                     0,
-                    OwnedData::Reference(vec![nsi_intermediate::HostPtr(
+                    OwnedData::Reference(vec![nsi_intermediate::HostPointer(
                         pointer,
                     )]),
                 )],
@@ -427,7 +427,7 @@ mod tests {
         scene
             .set_attribute(
                 "driver",
-                vec![OwnedArg::new(
+                vec![OwnedArgument::new(
                     "imagefilename",
                     Type::String,
                     1,

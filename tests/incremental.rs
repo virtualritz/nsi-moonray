@@ -7,7 +7,7 @@
 //! spawned process has no scene to edit.
 #![cfg(all(feature = "rdl2", moonray))]
 
-use nsi_intermediate::{OwnedArg, OwnedData, Scene};
+use nsi_intermediate::{OwnedArgument, OwnedData, Scene};
 use nsi_moonray::{
     apply::{apply, apply_affected},
     flush::flush,
@@ -15,8 +15,8 @@ use nsi_moonray::{
 };
 use nsi_trait::Type;
 
-fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArg {
-    OwnedArg::new(name, type_tag, 1, 0, data)
+fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArgument {
+    OwnedArgument::new(name, type_tag, 1, 0, data)
 }
 
 fn dso_path() -> String {
@@ -63,7 +63,7 @@ fn grid(side: i32) -> (Vec<i32>, Vec<i32>, Vec<f32>) {
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[rustfmt::skip]
-fn translate(x: f64) -> OwnedArg {
+fn translate(x: f64) -> OwnedArgument {
     arg("transformationmatrix", Type::MatrixF64, OwnedData::F64(vec![
         1.0, 0.0, 0.0, 0.0,
         0.0, 1.0, 0.0, 0.0,
@@ -411,7 +411,7 @@ fn a_created_node_falls_back_and_reports() {
     // it -- which is the thing this test exists to rule out.
     nsi.set_attribute(
         "second",
-        vec![OwnedArg::new(
+        vec![OwnedArgument::new(
             "subdivision.scheme",
             Type::String,
             1,
@@ -454,7 +454,7 @@ fn a_session_runs_a_synchronise_loop() {
         argument::CallbackPtr,
         output::{Error, PixelFormat, WriteCallback},
     };
-    use nsi_intermediate::HostPtr;
+    use nsi_intermediate::HostPointer;
     use nsi_moonray::session::Session;
     use std::sync::{Arc, Mutex};
 
@@ -499,12 +499,12 @@ fn a_session_runs_a_synchronise_loop() {
     let mut nsi = scene(width as i32, height as i32);
     nsi.set_attribute(
         "driver",
-        vec![OwnedArg::new(
+        vec![OwnedArgument::new(
             "callback.write",
             Type::Reference,
             1,
             0,
-            OwnedData::Reference(vec![HostPtr(write.to_ptr())]),
+            OwnedData::Reference(vec![HostPointer(write.to_ptr())]),
         )],
     )
     .unwrap();
@@ -690,7 +690,7 @@ fn a_synchronise_is_measured_not_assumed() {
             arg("nvertices", Type::I32, OwnedData::I32(counts)),
             arg("P.indices", Type::I32, OwnedData::I32(indices)),
             arg("P", Type::Point, OwnedData::F32(points)),
-            OwnedArg::new(
+            OwnedArgument::new(
                 "subdivision.scheme",
                 Type::String,
                 1,

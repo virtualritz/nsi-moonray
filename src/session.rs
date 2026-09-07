@@ -204,14 +204,14 @@ impl Session {
         let driver = self
             .scene
             .nodes()
-            .filter(|(_, node)| node.node_type == "outputdriver")
+            .filter(|(_, node)| node.node_type() == "outputdriver")
             .find_map(|(handle, _)| {
-                Some((handle.clone(), Callbacks::of(&self.scene, handle)?))
+                Some((handle, Callbacks::of(&self.scene, handle)?))
             });
 
         match driver {
             Some((handle, callbacks)) => {
-                match stream(&self.render, &callbacks, &handle, None) {
+                match stream(&self.render, &callbacks, handle, None) {
                     Ok(stopped) => Some(stopped),
                     Err(error) => {
                         eprintln!("nsi-moonray: {handle:?} streaming: {error}");

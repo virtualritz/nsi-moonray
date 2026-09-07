@@ -622,3 +622,65 @@ MoonRay decides the rest. A third option -- subdividing on this side
 and handing MoonRay a polygon mesh -- would work today and is exactly
 what `F4` says not to do, because it throws away the view-adaptive
 tessellation that made MoonRay worth linking.
+
+### F14: The flush now costs more than the scene it flushes
+
+Upstream interns handles behind `ustr_handles` and quotes its own
+numbers. `tools/footprint` measures the same thing on the shape this
+backend actually sees -- long hierarchical handles, two nodes per
+shape, two connections each -- and, unlike upstream's benchmark,
+**flushes at the end**, which turns out to be where the story is.
+
+50 000 shapes: 100 001 ɴsɪ nodes, 50 005 rdl2 objects.
+
+| | scene | per node | build | flush | per object |
+| --- | --- | --- | --- | --- | --- |
+| as upstream ships | 144.6 MB | 1516 B | 35.3 s | +109.8 MB | 2303 B |
+| `interned` | 103.1 MB | 1081 B | 11.3 s | +109.1 MB | 2288 B |
+
+**29% smaller and 3.1x faster to record.** The speed is not a side
+effect of the size: `edges_to_attribute` had to build two `String`s to
+probe its key on every call, and interned it probes with a pair of
+`u64`s. Flushing takes half a second either way, so all 24 seconds of
+the difference is scene recording. `interned_handles` is on by default
+here on the strength of that, with one caveat worth stating: `ustr`'s
+table is global and never freed, so a host running many *different*
+scenes in one process accumulates their handles. A renderer re-renders
+the same ones.
+
+The second row of that table is about **this** crate, and it is the
+uncomfortable one. The flushed document is now *larger than the scene
+it came from* -- 109 MB against 103 MB, 2288 bytes an object -- and it
+did not shrink at all when the scene did. `Document` copies every
+handle into `String`s it owns:
+
+- `Object::name`, once per object;
+- `Reference`, which holds a `String` class **and** a `String` name,
+  and a `Layer` row holds up to nine of them;
+- `Value::Object` and `Value::Objects` inside attributes.
+
+So a scene whose handles upstream just stopped duplicating gets them
+duplicated again on the way out, five or six times over for a shape
+with a material and a light set. The document outlives the flush -- it
+is what `apply_affected` diffs against between frames -- so this is
+resident for the life of an interactive session, not a transient.
+
+Two ways out, neither taken yet:
+
+- **Borrow.** `Document<'a>` with `&'a str` names, tied to the scene it
+  was flushed from. Cheapest in bytes, and it makes the lifetime
+  relationship explicit -- but `Session` holds the previous document
+  across an edit to the scene that produced it, which is exactly the
+  borrow that cannot outlive its source. It would have to clone at the
+  point it is stored, which is most of them.
+- **Intern.** The same `ustr` table upstream already populates: a
+  `Reference`'s class is one of about twenty strings and its name is a
+  handle the scene has already interned, so both are free lookups.
+  `Value` and `Object` keep owning their names and nothing about the
+  API changes.
+
+Interning is the one that fits, and it is measurable the same way. Not
+done here because it is a change to every constructor in `document.rs`
+and `value.rs` and the oracle tests pin their output byte for byte --
+which is the good problem to have, since it means the change cannot
+quietly alter what is written.

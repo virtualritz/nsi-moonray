@@ -1,0 +1,23 @@
+[package]
+name = "footprint"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+# Upstream's interned handles, which `nsi-moonray`'s own
+# `interned_handles` forwards to. Named here rather than reached
+# through that feature so the two halves of the measurement differ in
+# exactly one thing.
+interned = ["nsi-intermediate/ustr_handles"]
+
+[dependencies]
+# Sibling checkouts, the same convention the crate itself uses.
+nsi-intermediate = { path = "../../../nsi/crates/nsi-intermediate" }
+nsi-trait = { path = "../../../nsi/crates/nsi-trait" }
+nsi-moonray = { path = "../..", default-features = false }
+
+# Its own workspace: this is a measuring instrument, not part of the
+# crate, and it must be buildable with a feature the crate under
+# measurement does not have on.
+[workspace]

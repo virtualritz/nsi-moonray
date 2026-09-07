@@ -462,6 +462,25 @@ says so in its own doc. This backend calls none of it.
       for `Batch`; a `Session` is `Interactive` by construction.
       `flush::tests::a_batch_flush_omits_a_detached_shape`.
 
+- [x] T7.2 **Interned handles, on measured numbers.** Upstream stores a
+      handle interned behind `ustr_handles`; `interned_handles`
+      forwards to it and is on by default. `tools/footprint` is why:
+      a 100 001-node scene costs 144.6 MB and 35.3 seconds to record
+      as upstream ships, and 103.1 MB and 11.3 seconds interned. The
+      speed is not a side effect of the size --
+      `edges_to_attribute` had to build two `String`s to probe its key
+      on every call. Additive, so a consumer that disagrees still
+      compiles. `research.md` F14.
+- [ ] T7.3 **The flushed document is bigger than the scene.** Fell out
+      of `T7.2`: 109 MB against 103 MB, and it did not shrink when the
+      scene did, because `Document` copies every handle into `String`s
+      it owns -- `Object::name` once, and `Reference` twice per
+      `Layer` row, up to nine of them. It is resident for the life of
+      an interactive session, since `apply_affected` diffs against it
+      between frames. Interning is the fix that fits; borrowing is not,
+      because `Session` holds the previous document across an edit to
+      the scene that produced it. `research.md` F14.
+
 ## Not Now
 
 - [x] TN.1 Progressive rendering. `Mode::{Batch, Progressive,

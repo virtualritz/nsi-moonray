@@ -11,13 +11,13 @@
 //! building it is heavy and nothing else here needs it. Set `$MOONRAY`,
 //! `$MOONRAY_ROOT`, or put `moonray` on `$PATH` to run it.
 
-use nsi_intermediate::{OwnedArg, OwnedData, Scene};
+use nsi_intermediate::{OwnedArgument, OwnedData, Scene};
 use nsi_moonray::{flush::flush, render::Render};
 use nsi_trait::Type;
 use std::{fs, path::PathBuf};
 
-fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArg {
-    OwnedArg::new(name, type_tag, 1, 0, data)
+fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArgument {
+    OwnedArgument::new(name, type_tag, 1, 0, data)
 }
 
 /// A unit quad in the XY plane at `z`, as an ɴsɪ mesh.
@@ -72,7 +72,7 @@ fn shade(scene: &mut Scene, geometry: &str, colour: [f32; 3]) {
 
 /// A translation, as ɴsɪ stores it: row-major, translation in the last
 /// row.
-fn translate(x: f64, y: f64, z: f64) -> OwnedArg {
+fn translate(x: f64, y: f64, z: f64) -> OwnedArgument {
     #[rustfmt::skip]
     let matrix = vec![
         1.0, 0.0, 0.0, 0.0,
@@ -463,7 +463,7 @@ fn an_applications_callback_receives_the_rendered_pixels() {
         argument::CallbackPtr,
         output::{Error, PixelFormat, WriteCallback},
     };
-    use nsi_intermediate::HostPtr;
+    use nsi_intermediate::HostPointer;
     use std::sync::{Arc, Mutex};
 
     // What the closure saw: the pixels, and the shape it was told they
@@ -548,7 +548,7 @@ fn an_applications_callback_receives_the_rendered_pixels() {
                 arg(
                     "callback.write",
                     Type::Reference,
-                    OwnedData::Reference(vec![HostPtr(write.to_ptr())]),
+                    OwnedData::Reference(vec![HostPointer(write.to_ptr())]),
                 ),
             ],
         )

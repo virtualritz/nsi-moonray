@@ -26,7 +26,7 @@ include = [
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = ["cli"]
+default = ["cli", "interned_handles"]
 # Link `scene_rdl2` -- and, with it, build the scene in memory rather
 # than writing a file. Off by default because it needs `scene_rdl2`
 # installed and `$SCENE_RDL2_ROOT` pointing at it, while everything
@@ -44,6 +44,27 @@ cli = [
     "dep:frame-sequence",
     "dep:notify",
 ]
+# Intern ɴsɪ handles upstream, so a scene holds eight bytes a copy
+# instead of a `String`. A handle is stored many times over -- the node
+# key, both ends of every edge, three edge indexes.
+#
+# **On by default, on measured numbers rather than on principle.**
+# `tools/footprint` records a 100 001-node scene at 144.6 MB and 35.3
+# seconds as upstream ships, and 103.1 MB and 11.3 seconds interned:
+# 29% smaller and 3.1x faster to build. The speed is not a side effect
+# of the size -- `edges_to_attribute` had to build two `String`s to
+# probe its key on every call.
+#
+# The cost is that `ustr`'s table is global and never freed, so a host
+# that runs many *different* scenes in one process accumulates their
+# handles. A renderer re-renders the same ones, which is why this is
+# the right default here and might not be elsewhere.
+#
+# **Additive**, unlike `nsi-ffi-wrap`'s flag of the same name: it
+# switches upstream's *storage* and every public signature still takes
+# and returns `&str`, so a consumer that disagrees about the feature
+# still compiles against this crate.
+interned_handles = ["nsi-intermediate/ustr_handles"]
 
 [build-dependencies]
 # Builds `shim/src/scene.cc` when the `rdl2` feature is on. Not

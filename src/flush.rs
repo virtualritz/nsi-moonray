@@ -194,13 +194,15 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
     // object by class and name both, so assuming `RdlMeshGeometry` for
     // every row puts an instancer in the layer under a class it does
     // not have -- a row that looks right and names nothing.
-    let mut bindings: Vec<(&'static str, String, Option<Reference>)> =
-        Vec::new();
+    // Handles borrow from the scene now rather than being copied:
+    // upstream interns them, and a flush that cloned every one back
+    // into a `String` would hand that saving straight back.
+    let mut bindings: Vec<(&'static str, &str, Option<Reference>)> = Vec::new();
     let mut objects = Vec::new();
     // Handles of the instancers seen, so a prototype can be told from
     // an ordinary shape after the walk -- a prototype is drawn by its
     // instancer and must not also be drawn on its own.
-    let mut instancers: Vec<String> = Vec::new();
+    let mut instancers: Vec<&str> = Vec::new();
     // A scene with none gets one, because MoonRay crashes rather than
     // complains. See `DEFAULT_CAMERA`.
     let mut cameras = 0usize;
@@ -218,7 +220,7 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
     let prototypes = prototypes(scene);
 
     for (handle, node) in scene.nodes() {
-        match node.node_type.as_str() {
+        match node.node_type() {
             "mesh" | "subdivisionmesh" => {
                 // ɴsɪ has no light nodes: a mesh wearing an emitter
                 // *is* the light (`LIGHTS`). Checked before anything
@@ -251,7 +253,7 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
                         objects.push(mesh(
                             scene,
                             handle,
-                            prototypes.get(handle).map(String::as_str),
+                            prototypes.get(handle).copied(),
                             shutter,
                             &mut flushed,
                         ));
@@ -270,7 +272,7 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
                 let shape = mesh(
                     scene,
                     handle,
-                    prototypes.get(handle).map(String::as_str),
+                    prototypes.get(handle).copied(),
                     shutter,
                     &mut flushed,
                 );
@@ -294,7 +296,7 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
                 // simply absent from the image.
                 bindings.push((
                     MESH,
-                    handle.clone(),
+                    handle,
                     material(scene, handle, &mut flushed),
                 ));
             }
@@ -346,10 +348,10 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
                     // if any -- the prototypes carry their own.
                     bindings.push((
                         INSTANCER,
-                        handle.clone(),
+                        handle,
                         material(scene, handle, &mut flushed),
                     ));
-                    instancers.push(handle.clone());
+                    instancers.push(handle);
                 }
             }
 
@@ -446,7 +448,7 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
             });
 
             Assignment::new(
-                Reference::new(class, &handle),
+                Reference::new(class, handle),
                 Some(material),
                 light_set.clone(),
             )
@@ -517,16 +519,16 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
 /// first instancer wins and the collision is reported by
 /// [`with_prototype_transform`], which is where the transform it
 /// affects is chosen.
-fn prototypes(scene: &Scene) -> std::collections::HashMap<String, String> {
+fn prototypes(scene: &Scene) -> std::collections::HashMap<String, &str> {
     let mut map = std::collections::HashMap::new();
 
     for (handle, node) in scene.nodes() {
-        if node.node_type == "instances" {
+        if node.node_type() == "instances" {
             for source in scene.instance_sources(handle) {
                 // The connection may name a transform above the
                 // geometry; the prototype is what is under it.
                 if let Some(geometry) = prototype_geometry(scene, &source) {
-                    map.entry(geometry).or_insert_with(|| handle.clone());
+                    map.entry(geometry).or_insert(handle);
                 }
             }
         }
@@ -588,7 +590,7 @@ fn prototype_geometry(scene: &Scene, source: &str) -> Option<String> {
     const GEOMETRY: [&str; 3] = ["mesh", "subdivisionmesh", "instances"];
 
     let node = scene.node(source)?;
-    if GEOMETRY.contains(&node.node_type.as_str()) {
+    if GEOMETRY.contains(&node.node_type()) {
         return Some(source.to_string());
     }
 
@@ -601,14 +603,14 @@ fn prototype_geometry(scene: &Scene, source: &str) -> Option<String> {
         if !seen.insert(handle.clone()) {
             continue;
         }
-        for edge in scene.edges_to_attr(&handle, "objects") {
-            let Some(child) = scene.node(&edge.from) else {
+        for edge in scene.edges_to_attribute(&handle, "objects") {
+            let Some(child) = scene.node(edge.from()) else {
                 continue;
             };
-            if GEOMETRY.contains(&child.node_type.as_str()) {
-                return Some(edge.from.clone());
+            if GEOMETRY.contains(&child.node_type()) {
+                return Some(edge.from().to_owned());
             }
-            queue.push_back(edge.from.clone());
+            queue.push_back(edge.from().to_owned());
         }
     }
 
@@ -621,7 +623,7 @@ fn prototype_geometry(scene: &Scene, source: &str) -> Option<String> {
 /// `instances` under `instances`, and MoonRay's `instance_level` goes
 /// to four -- so a reference is not always a mesh.
 fn geometry_class(scene: &Scene, handle: &str) -> &'static str {
-    match scene.node(handle).map(|node| node.node_type.as_str()) {
+    match scene.node(handle).map(|node| node.node_type()) {
         Some("instances") => INSTANCER,
         _ => MESH,
     }
@@ -893,7 +895,7 @@ fn velocity(
 /// `None` when nothing moves, which is the ordinary case.
 fn shutter(scene: &Scene) -> Option<[f64; 2]> {
     for (handle, node) in scene.nodes() {
-        if node.node_type != "perspectivecamera" {
+        if node.node_type() != "perspectivecamera" {
             continue;
         }
         if let Some(OwnedData::F64(values)) =
@@ -1305,7 +1307,7 @@ fn mesh(
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
         _ => None,
     };
-    let subdivision = scheme.is_some() || node.node_type == "subdivisionmesh";
+    let subdivision = scheme.is_some() || node.node_type() == "subdivisionmesh";
 
     // `is_subd` defaults to *true* in MoonRay, so a polygon mesh has to
     // say otherwise or it is subdivided anyway.
@@ -1564,9 +1566,8 @@ fn shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     // and reporting it as a lost parameter would be noise in every
     // message.
     let dropped: Vec<&str> = node
-        .attrs
-        .keys()
-        .map(String::as_str)
+        .attributes()
+        .map(|(name, _)| name)
         .filter(|name| *name != "shaderfilename" && !carried.contains(name))
         .collect();
 
@@ -1716,9 +1717,8 @@ fn light(
     }
 
     let dropped: Vec<&str> = node
-        .attrs
-        .keys()
-        .map(String::as_str)
+        .attributes()
+        .map(|(name, _)| name)
         .filter(|name| !carried.contains(name))
         .collect();
 
@@ -1966,12 +1966,12 @@ fn camera_reference(handle: &str) -> Reference {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nsi_intermediate::OwnedArg;
+    use nsi_intermediate::OwnedArgument;
     use nsi_trait::Type;
 
     /// A translation along X, as ɴsɪ stores a matrix: row-major, with
     /// the translation in the last row.
-    fn translation(x: f64) -> OwnedArg {
+    fn translation(x: f64) -> OwnedArgument {
         #[rustfmt::skip]
         let matrix = vec![
             1.0, 0.0, 0.0, 0.0,
@@ -1986,12 +1986,12 @@ mod tests {
         )
     }
 
-    fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArg {
-        OwnedArg::new(name, type_tag, 1, 0, data)
+    fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArgument {
+        OwnedArgument::new(name, type_tag, 1, 0, data)
     }
 
     /// The triangle, wearing a named shader.
-    fn emissive(shader: &str, parameters: &[OwnedArg]) -> Scene {
+    fn emissive(shader: &str, parameters: &[OwnedArgument]) -> Scene {
         let mut scene = triangle();
 
         scene

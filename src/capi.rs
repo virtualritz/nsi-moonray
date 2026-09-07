@@ -61,7 +61,7 @@ use crate::{
     display::{self, Callbacks},
     render::Render,
 };
-use nsi_intermediate::{HostPtr, OwnedArg, OwnedData, Scene};
+use nsi_intermediate::{HostPointer, OwnedArgument, OwnedData, Scene};
 use nsi_trait::{FfiParam, Type};
 use std::{
     collections::HashMap,
@@ -165,7 +165,7 @@ unsafe fn string(pointer: *const c_char) -> Option<String> {
 
 /// Copy a C parameter array into owned arguments.
 ///
-/// This mirrors `OwnedArg::from_param`, which cannot be reused here: it
+/// This mirrors `OwnedArgument::from_param`, which cannot be reused here: it
 /// takes a `nsi-ffi-wrap` `Arg`, and what arrives across the C boundary
 /// is the raw struct. The one subtlety is the element count — the C
 /// `count` field counts *elements*, and an `array_length`-ed parameter
@@ -176,7 +176,10 @@ unsafe fn string(pointer: *const c_char) -> Option<String> {
 ///
 /// `params` points at `count` valid `FfiParam`s, each describing data
 /// of the type it names.
-unsafe fn arguments(params: *const FfiParam, count: c_int) -> Vec<OwnedArg> {
+unsafe fn arguments(
+    params: *const FfiParam,
+    count: c_int,
+) -> Vec<OwnedArgument> {
     if params.is_null() || count <= 0 {
         return Vec::new();
     }
@@ -193,7 +196,7 @@ unsafe fn arguments(params: *const FfiParam, count: c_int) -> Vec<OwnedArg> {
 /// # Safety
 ///
 /// `param` describes valid data of the type it names.
-unsafe fn argument(param: &FfiParam) -> Option<OwnedArg> {
+unsafe fn argument(param: &FfiParam) -> Option<OwnedArgument> {
     let name = unsafe { string(param.name) }?;
     let type_tag = tag(param.type_)?;
 
@@ -258,14 +261,14 @@ unsafe fn argument(param: &FfiParam) -> Option<OwnedArg> {
                     scalars,
                 )
                 .iter()
-                .map(|pointer| HostPtr(*pointer))
+                .map(|pointer| HostPointer(*pointer))
                 .collect(),
             ),
             Type::Invalid => return None,
         }
     };
 
-    Some(OwnedArg::new(
+    Some(OwnedArgument::new(
         name,
         type_tag,
         array_length,
@@ -306,7 +309,7 @@ const fn components(type_tag: Type) -> usize {
 /// An integer argument, which is how ɴsɪ carries flags like
 /// `"interactive"`.
 #[cfg(all(feature = "rdl2", moonray))]
-fn argument_int(arguments: &[OwnedArg], name: &str) -> Option<i32> {
+fn argument_int(arguments: &[OwnedArgument], name: &str) -> Option<i32> {
     arguments
         .iter()
         .find(|argument| argument.name == name)
@@ -320,7 +323,7 @@ fn argument_int(arguments: &[OwnedArg], name: &str) -> Option<i32> {
         })
 }
 
-fn argument_string(arguments: &[OwnedArg], name: &str) -> Option<String> {
+fn argument_string(arguments: &[OwnedArgument], name: &str) -> Option<String> {
     arguments
         .iter()
         .find(|argument| argument.name == name)
@@ -668,11 +671,11 @@ pub unsafe extern "C" fn NSIRenderControl(
         let deliveries: Vec<(String, Callbacks, PathBuf)> = context
             .scene
             .nodes()
-            .filter(|(_, node)| node.node_type == "outputdriver")
+            .filter(|(_, node)| node.node_type() == "outputdriver")
             .filter_map(|(handle, _)| {
                 let callbacks = Callbacks::of(&context.scene, handle)?;
                 let file = crate::flush::image_file(&context.scene, handle)?;
-                Some((handle.clone(), callbacks, PathBuf::from(file)))
+                Some((handle.to_owned(), callbacks, PathBuf::from(file)))
             })
             .collect();
 
@@ -914,8 +917,8 @@ mod tests {
         let recorded = with(ctx, |context| {
             let node = context.scene.node("tri").expect("the node exists");
             (
-                node.node_type.clone(),
-                node.attrs.contains_key("nvertices"),
+                node.node_type().to_owned(),
+                node.attribute("nvertices").is_some(),
                 context.scene.edges().count(),
             )
         })
@@ -958,7 +961,12 @@ mod tests {
         unsafe { NSISetAttribute(ctx, handle.as_ptr(), 1, &param) };
 
         let scalars = with(ctx, |context| {
-            match &context.scene.node("mesh").expect("the node exists").attrs["P"]
+            match &context
+                .scene
+                .node("mesh")
+                .expect("the node exists")
+                .attribute("P")
+                .expect("P is set")
                 .data
             {
                 OwnedData::F32(values) => values.len(),

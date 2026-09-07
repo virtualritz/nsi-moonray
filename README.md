@@ -103,6 +103,12 @@ git clone https://github.com/virtualritz/nsi-moonray.git
 cd nsi-moonray && cargo test
 ```
 
+Handles are interned by default (`interned_handles`, forwarding to
+upstream's `ustr_handles`): `tools/footprint` measures a 100 001-node
+scene at 144.6 MB and 35.3 s without it and 103.1 MB and 11.3 s with —
+29% smaller and 3.1× faster to record. `default-features = false` turns
+it, and `mnry`, off.
+
 With a renderer, point at it and turn the feature on:
 
 ```bash

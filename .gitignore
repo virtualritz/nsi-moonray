@@ -1,4 +1,5 @@
 /target
+/tools/footprint/target
 
 # Test renders. `tests/render.rs` names its own output and
 # `SceneVariables` writes `scene.exr` beside whatever ran a render, so

@@ -9,12 +9,12 @@
 //! updates, progressive delivery and concurrent rendering together.
 #![cfg(all(feature = "rdl2", moonray))]
 
-use nsi_intermediate::{OwnedArg, OwnedData, Scene};
+use nsi_intermediate::{OwnedArgument, OwnedData, Scene};
 use nsi_moonray::{apply::apply, flush::flush, rdl2::Render};
 use nsi_trait::Type;
 
-fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArg {
-    OwnedArg::new(name, type_tag, 1, 0, data)
+fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArgument {
+    OwnedArgument::new(name, type_tag, 1, 0, data)
 }
 
 fn dso_path() -> Option<String> {
@@ -276,7 +276,7 @@ fn a_converging_render_streams_to_the_applications_closures() {
         argument::CallbackPtr,
         output::{Error, PixelFormat, WriteCallback},
     };
-    use nsi_intermediate::HostPtr;
+    use nsi_intermediate::HostPointer;
     use nsi_moonray::stream::{Stopped, stream};
     use std::sync::{Arc, Mutex};
 
@@ -320,12 +320,12 @@ fn a_converging_render_streams_to_the_applications_closures() {
     // The application's driver, exactly as an ɴsɪ consumer writes it.
     nsi.set_attribute(
         "driver",
-        vec![OwnedArg::new(
+        vec![OwnedArgument::new(
             "callback.write",
             Type::Reference,
             1,
             0,
-            OwnedData::Reference(vec![HostPtr(write.to_ptr())]),
+            OwnedData::Reference(vec![HostPointer(write.to_ptr())]),
         )],
     )
     .unwrap();
@@ -382,7 +382,7 @@ fn a_callback_that_says_stop_stops_the_render() {
         argument::CallbackPtr,
         output::{Error, PixelFormat, WriteCallback},
     };
-    use nsi_intermediate::HostPtr;
+    use nsi_intermediate::HostPointer;
     use nsi_moonray::stream::{Stopped, stream};
 
     let Some(dso) = dso_path() else {
@@ -406,12 +406,12 @@ fn a_callback_that_says_stop_stops_the_render() {
     let mut nsi = scene(64, 48);
     nsi.set_attribute(
         "driver",
-        vec![OwnedArg::new(
+        vec![OwnedArgument::new(
             "callback.write",
             Type::Reference,
             1,
             0,
-            OwnedData::Reference(vec![HostPtr(write.to_ptr())]),
+            OwnedData::Reference(vec![HostPointer(write.to_ptr())]),
         )],
     )
     .unwrap();
@@ -441,7 +441,7 @@ fn the_c_api_renders_in_process_and_returns_pixels() {
         argument::CallbackPtr,
         output::{Error, PixelFormat, WriteCallback},
     };
-    use nsi_intermediate::HostPtr;
+    use nsi_intermediate::HostPointer;
     use std::sync::{Arc, Mutex};
 
     let Some(dso) = dso_path() else {
@@ -486,12 +486,12 @@ fn the_c_api_renders_in_process_and_returns_pixels() {
     let mut nsi = scene(width, height);
     nsi.set_attribute(
         "driver",
-        vec![OwnedArg::new(
+        vec![OwnedArgument::new(
             "callback.write",
             Type::Reference,
             1,
             0,
-            OwnedData::Reference(vec![HostPtr(write.to_ptr())]),
+            OwnedData::Reference(vec![HostPointer(write.to_ptr())]),
         )],
     )
     .unwrap();
@@ -548,7 +548,7 @@ fn a_batch_render_writes_the_image_it_was_asked_for() {
     // No callbacks on the driver: this is a batch render.
     nsi.set_attribute(
         "driver",
-        vec![OwnedArg::new(
+        vec![OwnedArgument::new(
             "imagefilename",
             Type::String,
             1,
@@ -1301,7 +1301,7 @@ fn subdivision_reaches_the_limit_surface() {
             ),
         ];
         if subdivided {
-            attributes.push(OwnedArg::new(
+            attributes.push(OwnedArgument::new(
                 "subdivision.scheme",
                 Type::String,
                 1,

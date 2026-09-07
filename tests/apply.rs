@@ -244,7 +244,7 @@ fn applying_a_document_and_dumping_it_agrees_with_the_emitter() {
 /// Skipped where `$NSI_MOONRAY_DSO` names no directory holding them.
 #[test]
 fn a_mesh_scene_applies_through_the_authoring_twins() {
-    use nsi_intermediate::{OwnedArg, Scene};
+    use nsi_intermediate::{OwnedArgument, Scene};
     use nsi_moonray::flush::flush;
     use nsi_trait::Type;
 
@@ -264,8 +264,8 @@ fn a_mesh_scene_applies_through_the_authoring_twins() {
         name: &str,
         type_tag: Type,
         data: nsi_intermediate::OwnedData,
-    ) -> OwnedArg {
-        OwnedArg::new(name, type_tag, 1, 0, data)
+    ) -> OwnedArgument {
+        OwnedArgument::new(name, type_tag, 1, 0, data)
     }
     use nsi_intermediate::OwnedData;
 
