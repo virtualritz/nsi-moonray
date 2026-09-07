@@ -315,12 +315,21 @@ pub fn apply(document: &Document, context: &Context) -> Vec<String> {
                         &mut report,
                     );
 
+                    let volume_shader = optional(
+                        &assignment.volume_shader,
+                        &objects,
+                        &name,
+                        "volume shader",
+                        &mut report,
+                    );
+
                     if let Err(error) = update.assign(
                         geometry,
                         &assignment.part,
                         material,
                         light_set,
                         displacement,
+                        volume_shader,
                     ) {
                         report.push(format!(
                             "{name:?}: row not assigned: {error}"

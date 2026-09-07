@@ -267,6 +267,7 @@ unsafe extern "C" {
         material: *mut NmrObject,
         light_set: *mut NmrObject,
         displacement: *mut NmrObject,
+        volume_shader: *mut NmrObject,
     ) -> c_int;
 }
 

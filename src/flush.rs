@@ -118,6 +118,27 @@ const OSL_DISPLACEMENT: &str = "OslDisplacement";
 /// as a `UserData` object in the mesh's `primitive_attributes`.
 const USER_DATA: &str = "UserData";
 
+/// What a `volume` node becomes.
+///
+/// The interface's `volume` node is *defined* as OpenVDB -- a file and
+/// a set of named grids, and nothing else -- and `VdbGeometry` is
+/// MoonRay's only volume geometry, so this is one of the closer
+/// mappings in this backend.
+const VOLUME: &str = "VdbGeometry";
+
+/// The volume shader a `VdbGeometry` is rendered with.
+///
+/// MoonRay's stock one, standing in for the OSL volume shader the
+/// interface binds through `volumeshader` -- which needs a
+/// `VolumeShader` root of its own, whose four separate virtuals
+/// (extinction, albedo, emission, anisotropy) do not fit OSL's one
+/// execution. A `Layer` row with no volume shader renders nothing at
+/// all, so the substitute is what makes a volume appear.
+const VOLUME_SHADER: &str = "VdbVolume";
+
+/// The one `VdbVolume` every volume in the scene is rendered with.
+const DEFAULT_VOLUME_SHADER: &str = "/nsi/volume_shader";
+
 /// Every way MoonRay can see a piece of geometry.
 ///
 /// Read from `scene_rdl2/lib/scene/rdl2/Geometry.cc` rather than
@@ -271,6 +292,9 @@ pub fn flush_with(
     // an ordinary shape after the walk -- a prototype is drawn by its
     // instancer and must not also be drawn on its own.
     let mut instancers: Vec<&str> = Vec::new();
+    // Handles of the volumes seen, so their layer rows can be given a
+    // volume shader rather than a material after the walk.
+    let mut volumes: Vec<&str> = Vec::new();
     // A scene with none gets one, because MoonRay crashes rather than
     // complains. See `DEFAULT_CAMERA`.
     let mut cameras = 0usize;
@@ -378,6 +402,23 @@ pub fn flush_with(
                     displacement(scene, handle, shading, &mut flushed),
                 ));
             }
+
+            "volume" => {
+                objects.push(volume(scene, handle, shutter, &mut flushed));
+                geometries.push(Reference::new(VOLUME, handle));
+                // A volume's row carries a *volume shader* rather than
+                // a material, and the two columns are not
+                // interchangeable: MoonRay reads the volume through the
+                // sixth and would render nothing from the third.
+                bindings.push((VOLUME, handle, None, None));
+                volumes.push(handle);
+            }
+
+            "vdbparticles" => flushed.limitations.push(format!(
+                "{handle:?} is a `vdbparticles` node; MoonRay has no \
+                 point-cloud geometry that reads an OpenVDB \
+                 `PointDataGrid`, and it was skipped"
+            )),
 
             "perspectivecamera" => {
                 objects.push(camera(
@@ -551,9 +592,29 @@ pub fn flush_with(
     };
 
     let mut unshaded = 0;
+    let mut volumes_shaded = false;
     let assignments = bindings
         .into_iter()
         .map(|(class, handle, material, displacement)| {
+            // **A volume's row is shaded through the sixth column, not
+            // the third.** MoonRay reads a volume through its
+            // `VolumeShader` and a material there does nothing; the row
+            // still needs one, or the volume renders as nothing at all.
+            if class == VOLUME {
+                volumes_shaded = true;
+                return Assignment {
+                    volume_shader: Some(Reference::new(
+                        VOLUME_SHADER,
+                        DEFAULT_VOLUME_SHADER,
+                    )),
+                    ..Assignment::new(
+                        Reference::new(class, handle),
+                        None,
+                        light_set.clone(),
+                    )
+                };
+            }
+
             let material = material.unwrap_or_else(|| {
                 unshaded += 1;
                 Reference::new(MATERIAL, DEFAULT_MATERIAL)
@@ -569,6 +630,10 @@ pub fn flush_with(
             }
         })
         .collect();
+
+    if volumes_shaded {
+        objects.push(Object::new(VOLUME_SHADER, DEFAULT_VOLUME_SHADER));
+    }
 
     if unshaded > 0 {
         objects.push(Object::new(MATERIAL, DEFAULT_MATERIAL));
@@ -2482,6 +2547,88 @@ fn focal(fov_degrees: f32, resolution: (i32, i32)) -> f32 {
     FILM_WIDTH_APERTURE * 0.5 * aspect / half
 }
 
+/// One `volume` node, as a `VdbGeometry`.
+///
+/// The interface's `volume` node is OpenVDB and nothing else: a file
+/// and a set of named grids. MoonRay reads two of those grids --
+/// density and emission -- and has no notion of the rest, so what does
+/// not cross is named.
+fn volume(
+    scene: &Scene,
+    handle: &str,
+    shutter: Option<[f64; 2]>,
+    flushed: &mut Flushed,
+) -> Object {
+    let mut object = Object::new(VOLUME, handle);
+    object = with_transform(object, scene, handle, shutter, flushed);
+
+    let Some(node) = scene.node(handle) else {
+        return object;
+    };
+
+    let text = |name: &str| match node.effective(name).map(|arg| &arg.data) {
+        Some(OwnedData::String(values)) => values
+            .first()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+        _ => None,
+    };
+
+    match text("vdbfilename") {
+        Some(file) => object = object.set("model", Value::String(file)),
+        None => flushed.limitations.push(format!(
+            "volume {handle:?} names no \"vdbfilename\"; there is nothing \
+             to read"
+        )),
+    }
+
+    for (from, to) in [
+        ("densitygrid", "density_grid"),
+        ("velocitygrid", "velocity_grid"),
+    ] {
+        if let Some(grid) = text(from) {
+            object = object.set(to, Value::String(grid));
+        }
+    }
+
+    // **MoonRay's emission grid must be RGB.** Measured: a float grid
+    // named here is refused at render prep -- "is not an RGB grid" --
+    // and the whole volume then renders as nothing. So it is carried,
+    // because a colour grid is exactly what it wants, and the shape of
+    // the failure is said rather than discovered.
+    if let Some(grid) = text("emissiongrid") {
+        object = object.set("emission_grid", Value::String(grid.clone()));
+        flushed.limitations.push(format!(
+            "volume {handle:?} names emission grid {grid:?}; MoonRay reads \
+             only an RGB grid there and refuses a scalar one, which stops \
+             the volume rendering at all"
+        ));
+    }
+
+    if let Some(OwnedData::F64(values)) =
+        node.effective("velocityscale").map(|arg| &arg.data)
+        && let Some(scale) = values.first()
+    {
+        object = object.set("velocity_scale", Value::Float(*scale as f32));
+    }
+
+    for name in [
+        "colorgrid",
+        "emissionintensitygrid",
+        "temperaturegrid",
+        "velocityreferencetime",
+    ] {
+        if node.effective(name).is_some() {
+            flushed.limitations.push(format!(
+                "volume {handle:?} sets {name:?}, which MoonRay's \
+                 `VdbGeometry` has no counterpart for; it reads a density \
+                 grid and an emission grid and nothing else"
+            ));
+        }
+    }
+
+    object
+}
+
 /// One `RenderOutput` per ɴsɪ output layer.
 fn render_output(
     scene: &Scene,
@@ -3277,6 +3424,72 @@ mod tests {
 
         assert!(!beauty.contains("result"), "{beauty}");
         assert!(!beauty.contains("lpe"), "{beauty}");
+    }
+
+    /// **A `volume` node becomes a `VdbGeometry`.**
+    ///
+    /// The interface's volume node is OpenVDB and nothing else -- a
+    /// file and named grids -- and MoonRay's only volume geometry reads
+    /// exactly that, so the two meet with almost no translation. What
+    /// does not cross is named: MoonRay reads a density grid and an
+    /// emission grid, and has no notion of colour, temperature or
+    /// emission intensity.
+    #[test]
+    fn a_volume_becomes_vdb_geometry() {
+        let mut scene = Scene::default();
+        scene.create("smoke", "volume").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "smoke",
+                vec![
+                    arg(
+                        "vdbfilename",
+                        Type::String,
+                        OwnedData::String(vec![b"/tmp/explosion.vdb".to_vec()]),
+                    ),
+                    arg(
+                        "densitygrid",
+                        Type::String,
+                        OwnedData::String(vec![b"density".to_vec()]),
+                    ),
+                    arg(
+                        "temperaturegrid",
+                        Type::String,
+                        OwnedData::String(vec![b"temperature".to_vec()]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("smoke", None, ".root", "objects").unwrap();
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("VdbGeometry(\"smoke\") {"), "{rdla}");
+        assert!(
+            rdla.contains("[\"model\"] = \"/tmp/explosion.vdb\""),
+            "{rdla}"
+        );
+        assert!(rdla.contains("[\"density_grid\"] = \"density\""), "{rdla}");
+
+        // The sixth column, not the third: a material there does
+        // nothing and MoonRay renders the volume as nothing at all.
+        assert!(
+            rdla.contains(
+                "{VdbGeometry(\"smoke\"), \"\", undef(), undef(), undef(), \
+                 VdbVolume(\"/nsi/volume_shader\")"
+            ),
+            "{rdla}"
+        );
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("temperaturegrid")),
+            "{:?}",
+            flushed.limitations
+        );
     }
 
     fn triangle() -> Scene {

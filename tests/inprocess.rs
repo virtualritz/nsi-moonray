@@ -2748,3 +2748,117 @@ fn a_lobe_label_reaches_a_named_aov() {
          red against {specular_green} green"
     );
 }
+
+/// Where an OpenVDB file to render lives, if this machine has one.
+///
+/// `$NSI_MOONRAY_VDB` points at a `.vdb` with a `density` grid. Like
+/// 3Delight's shaders, it is an asset rather than something everyone
+/// building this crate has, so the test that needs it says why it did
+/// nothing rather than failing.
+fn vdb_file() -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(std::env::var("NSI_MOONRAY_VDB").ok()?);
+    path.exists().then_some(path)
+}
+
+/// **A `volume` node renders.**
+///
+/// The interface's volume node is OpenVDB and nothing else, and
+/// MoonRay's only volume geometry reads exactly that, so this is one of
+/// the closer mappings here — and it has one trap. A volume is shaded
+/// through the `Layer`'s *volume shader* column, not its material
+/// column, and a row with the wrong one renders **nothing**: no
+/// warning, no geometry, just the background.
+///
+/// So what is asserted is coverage. The camera is placed to look at the
+/// grid's own bounds, which the test reads off nothing — it takes them
+/// on faith from `$NSI_MOONRAY_VDB` being the asset it names — so it
+/// asks only that a good fraction of the frame stopped being background.
+#[test]
+fn a_volume_renders() {
+    use nsi_moonray::session::Session;
+
+    let Some(vdb) = vdb_file() else {
+        eprintln!(
+            "skipped: set $NSI_MOONRAY_VDB to an OpenVDB file with a \
+             `density` grid to run this"
+        );
+        return;
+    };
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (96usize, 72usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    // The quad the fixture builds would sit in front of the volume, so
+    // it goes.
+    nsi.disconnect("quad", None, ".root", "objects").unwrap();
+
+    nsi.create("smoke", "volume").unwrap();
+    nsi.set_attribute(
+        "smoke",
+        vec![
+            arg(
+                "vdbfilename",
+                Type::String,
+                OwnedData::String(vec![
+                    vdb.to_string_lossy().into_owned().into_bytes(),
+                ]),
+            ),
+            arg(
+                "densitygrid",
+                Type::String,
+                OwnedData::String(vec![b"density".to_vec()]),
+            ),
+        ],
+    )
+    .unwrap();
+    nsi.connect("smoke", None, ".root", "objects").unwrap();
+
+    // The grid is hundreds of units across in its own space, so the
+    // camera goes back far enough to see it whole.
+    nsi.set_attribute(
+        "cam",
+        vec![arg("fov", Type::F32, OwnedData::F32(vec![60.0]))],
+    )
+    .unwrap();
+    nsi.create("xform", "transform").unwrap();
+    nsi.set_attribute(
+        "xform",
+        vec![arg(
+            "transformationmatrix",
+            Type::MatrixF64,
+            OwnedData::F64(vec![
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                0.0, 0.0, 330.0, 1.0,
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.disconnect("cam", None, ".root", "objects").unwrap();
+    nsi.connect("xform", None, ".root", "objects").unwrap();
+    nsi.connect("cam", None, "xform", "objects").unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+    let covered = pixels
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] > 0.01)
+        .count();
+
+    assert!(
+        covered > pixels.len() / 4 / 20,
+        "the volume covered {covered} pixels of {}. Nothing at all means \
+         the layer row was given a material instead of a volume shader, \
+         which MoonRay renders as no geometry rather than as an error",
+        pixels.len() / 4
+    );
+}

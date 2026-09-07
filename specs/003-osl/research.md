@@ -637,11 +637,23 @@ shader's own default in place.
 
 ## Open questions
 
-- **Volumes.** OSL's `anisotropic_vdf` and `medium_vdf` against
-  MoonRay's `VolumeShader`, whose interface is four separate virtuals
-  -- extinction, albedo, emission, anisotropy -- against OSL's one
-  execution. And ɴsɪ volume geometry, which this backend does not carry
-  at all yet.
+- **An OSL volume shader.** The geometry crosses now -- the interface's
+  `volume` node is OpenVDB and nothing else, and `VdbGeometry` reads
+  exactly that -- but it is rendered with MoonRay's stock `VdbVolume`
+  rather than the OSL network bound through `volumeshader`. OSL's
+  `anisotropic_vdf` and `medium_vdf` against MoonRay's `VolumeShader`,
+  whose interface is four separate virtuals -- extinction, albedo,
+  emission, anisotropy -- against OSL's one execution, is the piece
+  that is missing.
+
+  Two things measured on the way: a volume is shaded through the
+  `Layer`'s **sixth** column and a row with a material in the third
+  renders *nothing*, with no warning; and MoonRay's `emission_grid`
+  must name an **RGB** grid -- a scalar one is refused at render prep
+  and takes the whole volume with it, which matters because the
+  interface's `emissiongrid` says nothing about the type.
+- **`vdbparticles`.** MoonRay has no point-cloud geometry that reads an
+  OpenVDB `PointDataGrid`.
 - **AOV forwarding.** 3Delight has a per-object attribute that puts a
   diffuse surface seen in a mirror into the *diffuse* AOV rather than
   the reflection one. MoonRay's LPEs have no equivalent, and inventing
