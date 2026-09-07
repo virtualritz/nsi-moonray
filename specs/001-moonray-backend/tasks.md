@@ -29,10 +29,26 @@ be built at all, and has.
       `AsciiReader` and out through `AsciiWriter`, and diff. Done:
       `oracle verify`. All four scenes round-trip; negative zero does
       not, which is upstream's asymmetry and is captured separately.
-- [ ] T0.6 An authoring twin of `RdlMeshGeometry`: a DSO built from
-      moonray's own `attributes.cc` with a stub implementation, so a
-      real mesh scene can be built and read back without the renderer.
-      Nothing else lets `T1.*` be checked on a modest host.
+- [x] T0.6 Authoring twins: `tools/twin`. Declarations with no
+      implementation, built against `scene_rdl2` alone, so a real mesh
+      scene can be built and read back on a host that has not built
+      MoonRay -- fifteen minutes from stock packages against fifty and
+      five packaging problems.
+      **MoonRay's own `attributes.cc`, compiled out of a source
+      checkout rather than copied**, so a twin cannot drift from what
+      the renderer declares. `RdlMeshGeometry`,
+      `RdlInstancerGeometry`, `PerspectiveCamera` and `EnvLight`.
+      `UsdPreviewSurface` has none and cannot: its `attributes.cc` is
+      *generated* from an `.ispc` by MoonRay's build, so a twin would
+      need the thing these exist to avoid needing -- and declaring its
+      six carried parameters by hand is the copy that drifts, which
+      would be worse than the gap. A scene checked this way reports it
+      as an unknown class, which is honest.
+      `apply::a_mesh_scene_applies_through_the_authoring_twins`, which
+      found that **an enumerable `Int` reads back as its enum name**:
+      the flush writes `subd_scheme` as `1` and rdl2's writer emits
+      `"catclark"`, so a text diff against the emitter differs on every
+      enumerable attribute even when the value is identical.
 - [~] T0.7 **Settle how to depend on `nsi-intermediate`.** Worked
       around, not settled: a path dependency on a sibling `nsi`
       checkout. `[patch]` was tried first and does not help -- Cargo

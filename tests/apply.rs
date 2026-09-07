@@ -226,3 +226,135 @@ fn applying_a_document_and_dumping_it_agrees_with_the_emitter() {
         }
     }
 }
+
+/// **`T0.6`.** A real mesh scene applied and read back through rdl2,
+/// with **no MoonRay** — only the authoring twins in `tools/twin`.
+///
+/// Everything else that checks a mesh either reads the emitted text
+/// (which proves the emitter agrees with itself) or renders it (which
+/// needs a fifty-minute build and five packaging workarounds). This is
+/// the middle: rdl2 itself resolving `RdlMeshGeometry`, accepting every
+/// attribute the flush sets, and writing them back.
+///
+/// The twins are built from **MoonRay's own `attributes.cc`**, compiled
+/// out of a source checkout rather than copied, so they cannot drift
+/// from what the renderer declares. A copy would go stale in exactly
+/// the way that renders plausibly and wrongly.
+///
+/// Skipped where `$NSI_MOONRAY_DSO` names no directory holding them.
+#[test]
+fn a_mesh_scene_applies_through_the_authoring_twins() {
+    use nsi_intermediate::{OwnedArg, Scene};
+    use nsi_moonray::flush::flush;
+    use nsi_trait::Type;
+
+    let Some(dso) = dso_path() else {
+        eprintln!("skipped: $NSI_MOONRAY_DSO names no scene classes");
+        return;
+    };
+    if !std::path::Path::new(&dso)
+        .join("RdlMeshGeometry.so")
+        .exists()
+    {
+        eprintln!("skipped: no RdlMeshGeometry.so in {dso}");
+        return;
+    }
+
+    fn arg(
+        name: &str,
+        type_tag: Type,
+        data: nsi_intermediate::OwnedData,
+    ) -> OwnedArg {
+        OwnedArg::new(name, type_tag, 1, 0, data)
+    }
+    use nsi_intermediate::OwnedData;
+
+    let mut scene = Scene::default();
+    scene.create("quad", "mesh").unwrap();
+    scene
+        .set_attribute(
+            "quad",
+            vec![
+                arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+                arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2, 3])),
+                arg(
+                    "P",
+                    Type::Point,
+                    OwnedData::F32(vec![
+                        -1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0,
+                        1.0, 0.0,
+                    ]),
+                ),
+                arg(
+                    "subdivision.scheme",
+                    Type::String,
+                    OwnedData::String(vec![b"catmull-clark".to_vec()]),
+                ),
+            ],
+        )
+        .unwrap();
+    scene.connect("quad", None, ".root", "objects").unwrap();
+
+    let context = context();
+    let flushed = flush(&scene);
+    let report = apply(&flushed.document, &context);
+
+    // The point of the twins: every attribute the flush sets is one
+    // rdl2 knows, because the declarations are MoonRay's own.
+    //
+    // `UsdPreviewSurface` is the one class with no twin, and the
+    // report naming it is correct rather than a gap in this test: its
+    // `attributes.cc` is *generated* from an `.ispc` by MoonRay's own
+    // build, so a twin for it would need the thing these exist to
+    // avoid needing. Declaring its parameters by hand instead is the
+    // copy that drifts, and would be worse than the gap.
+    let unexpected: Vec<&String> = report
+        .iter()
+        .filter(|line| !line.contains("UsdPreviewSurface"))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "rdl2 refused something the flush wrote, which means the \
+         emitter and MoonRay's declarations disagree: {unexpected:?}"
+    );
+
+    let out = std::env::temp_dir().join("nsi-moonray-twin.rdla");
+    context
+        .write_ascii(&out)
+        .expect("the live scene writes out");
+    let written = std::fs::read_to_string(&out).expect("read back");
+
+    assert!(
+        written.contains("RdlMeshGeometry(\"quad\")"),
+        "the mesh should have reached rdl2\n{written}"
+    );
+    // Values, not just presence: a class that loaded but ignored its
+    // attributes would pass the line above.
+    assert!(
+        written.contains("[\"face_vertex_count\"] = { 4}"),
+        "{written}"
+    );
+    assert!(
+        written.contains("[\"vertices_by_index\"] = { 0, 1, 2, 3}"),
+        "{written}"
+    );
+    assert!(written.contains("[\"is_subd\"] = true"), "{written}");
+
+    // **An enumerable `Int` reads back as its enum name.** The flush
+    // writes `subd_scheme` as `1`, rdl2 accepts it, and its writer
+    // emits `"catclark"`. So a text diff between what this crate
+    // writes and what rdl2 writes will differ on every enumerable
+    // attribute even when the value is identical — which is worth
+    // knowing before treating such a diff as a defect.
+    assert!(
+        written.contains("[\"subd_scheme\"] = \"catclark\""),
+        "the integer this crate wrote should read back as the enum \
+         name it means\n{written}"
+    );
+    assert!(
+        written.contains(
+            "[\"vertex_list_0\"] = { Vec3(-1, -1, 0), Vec3(1, -1, 0), Vec3(1, 1, 0), Vec3(-1, 1, 0)}"
+        ),
+        "the vertices should have crossed intact\n{written}"
+    );
+}

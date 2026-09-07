@@ -259,6 +259,28 @@ headers -- including that a missing attribute and a mistyped one come
 back as *different* codes, which is what a useful limitation report
 depends on.
 
+## Building The Authoring Twins
+
+Declarations of MoonRay's DSOs with no implementation, so a mesh scene
+can be built and read back with `scene_rdl2` alone -- no renderer.
+
+```bash
+cmake -S tools/twin -B build-twin \
+    -DSCENE_RDL2_ROOT=$PREFIX -DMOONRAY_SOURCE=/path/to/moonray
+cmake --build build-twin -j"$(nproc)"
+
+export NSI_MOONRAY_DSO=$PWD/build-twin   # for `tests/apply.rs`
+```
+
+`MOONRAY_SOURCE` is a *source checkout*, not an install: each twin
+compiles MoonRay's own `attributes.cc` verbatim, so it cannot drift
+from what the renderer declares. A clone is enough; nothing is built
+from it.
+
+`UsdPreviewSurface` has no twin. Its `attributes.cc` is generated from
+an `.ispc` by MoonRay's own build, so building one would need exactly
+what these avoid needing.
+
 ## Building The Crate
 
 `nsi-intermediate` is overlaid from a sibling checkout, so clone it next
