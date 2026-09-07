@@ -197,6 +197,140 @@ Sketched, not decided:
   looking for an emission closure, rather than by recognising a name.
   That is the right answer and it is only reachable from here.
 
+### O5: Lobe labels are a fixed vocabulary per scene class
+
+MoonRay's material AOVs and light-path expressions both key off **lobe
+labels**, and the plumbing is narrower than it first looks.
+
+A shader passes a small integer to each `BsdfBuilder::add*` call. Zero
+means "no label"; anything else indexes a `static const char *labels[]`
+that the DSO declares once, at class-declaration time:
+
+```cpp
+// generated into attributes.cc by ispc_dso.py from the DSO's .json
+static const char *labels[] = { "diffuse", "specular", ..., nullptr };
+sceneClass.declareDataPtr("labels", labels);
+```
+
+At render prep, `RenderContext` reads that array back off the
+`SceneClass` and matches each name against what the render outputs
+asked for, building `lobeLabelIds` (material AOVs) and
+`lpeLobeLabelIds` (light AOVs, each prefixed with the material's own
+label and a dot). `aovEncodeLabels` then packs the two global ids into
+one `int` -- a transformed bit, fifteen bits of material id, fifteen
+of LPE id.
+
+OSL's side is a **string**, and it is renderer-supplied: `"label"` is
+not part of the language but a keyword parameter the renderer
+registers on each closure. OSL's own `testrender` does exactly this --
+`CLOSURE_STRING_KEYPARAM(MxDielectricParams, label, "label")` -- so a
+shader writes
+
+```
+Ci = dielectric_bsdf(N, U, 1, 1, roughness, 0, ior, 0, "ggx") * w;
+```
+
+with `"label", "coat"` when it wants one.
+
+So the reconciliation is string-to-slot, and the awkward part is that
+**the slot table is per `SceneClass`, not per object**. One `Osl`
+material class serves every OSL shader in the scene, and each shader
+may use labels of its author's choosing.
+
+Two ways, and the first is what the first cut should do:
+
+1. **A fixed vocabulary.** The `Osl` class declares the conventional
+   lobe names -- `diffuse`, `specular`, `transmission`, `subsurface`,
+   `sheen`, `coat`, `emission`, the hair lobes -- and an OSL label
+   maps to whichever slot matches. A label outside the vocabulary
+   cannot be represented, and must be **reported**: an LPE naming it
+   would match nothing and its AOV would render black, which looks
+   like a lighting bug rather than a missing label.
+2. **Fill the array late.** `declareDataPtr` stores a *pointer*, and
+   `RenderContext` dereferences it at render prep -- nothing requires
+   the pointed-to strings to be fixed at declaration. The DSO could
+   own a mutable table and fill it with the union of labels the
+   scene's OSL shaders actually use, before render prep runs. Strictly
+   better, and strictly more fragile: it is global state written in
+   one phase and read in another, and getting the order wrong gives
+   silently wrong AOVs rather than a crash.
+
+Either way this is the answer to "which naming system wins": neither.
+OSL's strings are the input, MoonRay's integers are the output, and
+the table between them is ours to declare and to report the gaps in.
+
+### O6: rdl2 has no dynamic attributes, and OSL already solved it
+
+An ɴsɪ `shader` node carries whatever parameters its `.oso` declares.
+An rdl2 `SceneClass` declares its attributes **once**, statically, in
+`RDL2_DSO_ATTR_DEFINE`. One `Osl` class serving every OSL shader in
+existence therefore cannot have an attribute per parameter, and the
+obvious workaround -- parallel `StringVector` / `FloatVector` /
+`RgbVector` arrays with a name and type index -- is a serialization
+format invented badly.
+
+OSL ships the right one. `ShadingSystem::ShaderGroupBegin` has an
+overload taking a **group specification string**:
+
+```
+param <typename> <paramname> <value>... [[hints]] ;
+shader <shadername> <layername> ;
+connect <layername>.<paramname> <layername>.<paramname> ;
+```
+
+That is a whole shader network -- layers, parameter values and
+connections -- in one string. So the `Osl` material class needs
+essentially two attributes: the group name and the group spec.
+Parameters, types and topology all live in the spec, and ɴsɪ's named
+shader ports become `connect` lines.
+
+The consequence for this crate is the good one: **the flush's job
+becomes a text transformation**, from an ɴsɪ shader network to an OSL
+group spec. That is testable without a renderer, against strings, in
+exactly the shape the `.rdla` emitter already has -- and `oslc` and
+`oslinfo` are available to check that what is written parses and names
+parameters the shader really has.
+
+### O7: OSL runs here, and answers all three questions
+
+Built and measured rather than assumed. OSL 1.13.12.0 against LLVM
+18.1.3 and the system OpenImageIO 2.4.17; `tools/osl-probe` registers
+three closures, builds a group from a **spec string**, executes it at
+one shading point and walks the result:
+
+```
+diffuse             weight 0.2 0.7 0.9  N 0 0 1  label diffuse
+microfacet(ggx)     weight 0.25 0.25 0.25  alpha 0.3  refract 0  label specular
+emission            weight 2.6738 9.35831 12.0321
+```
+
+**O6 holds.** The diffuse weight is `0.2 0.7 0.9` -- the
+`param color Cs 0.2 0.7 0.9` from the group spec, not the shader's own
+compiled default of `0.8 0.4 0.1`. Parameters ride in the string and
+override defaults, so one rdl2 `String` attribute really can carry a
+whole shader network.
+
+**The tree flattens.** `Ci` came back as an `add` of `mul`s and walked
+to three lobes with weights folded in, which is the shape the
+`BsdfBuilder` mapping assumes.
+
+**O5 has an input.** `label diffuse` and `label specular` survived as
+strings.
+
+And the emission is arithmetically exact, which is the part worth
+keeping: the shader is the ɴsɪ specification's own listing 4.2,
+`power / (π · surfacearea) · Cs`. With `power` 42 and unit area,
+`42 / π = 13.369`, times `Cs` is `2.674, 9.358, 12.032` -- what the
+probe printed. **The specification's own emitter executes,
+unmodified.** Which is the whole point: this is not a translation of
+ɴsɪ's shading model, it *is* ɴsɪ's shading model.
+
+Two things the build needed that no document says: `llvm-18-dev` and
+`libclang-18-dev` (the runtime libraries alone are not enough), and a
+`libclang-cpp.so` symlink -- Ubuntu ships only `libclang-cpp.so.18.1`,
+so OSL's `FindLLVM` silently falls back to the static clang components
+and the link fails on `clang::SourceMgrAdapter`.
+
 ## Settled
 
 - **Texturing is OSL's, not MoonRay's.** OSL takes an OIIO

@@ -1,0 +1,28 @@
+// The specification's own emitter (listing 4.2), which is what a
+// hand-written ɴsɪ light uses, plus a diffuse lobe so one shader
+// exercises both halves of the reconciliation: a closure MoonRay has a
+// lobe for, and one it only has a light for.
+surface probe(
+    color Cs = color(0.8, 0.4, 0.1),
+    float power = 0,
+    float roughness = 0.3)
+{
+    // `"label", "..."` is a keyword parameter the *renderer*
+    // registers, not part of OSL. It is the only thing MoonRay's AOV
+    // and LPE labels can be mapped from, so the probe has to show one
+    // surviving the round trip.
+    Ci = Cs * diffuse(N, "label", "diffuse");
+
+    // A lobe MoonRay has a component for, to show a closure with real
+    // parameters coming through.
+    Ci += 0.25 * microfacet("ggx", N, vector(1, 0, 0),
+                            roughness, roughness, 1.5, 0,
+                            "label", "specular");
+
+    // The specification's own emitter, listing 4.2. This is what a
+    // hand-written ɴsɪ light is, and what `research.md` O2 says
+    // MoonRay cannot importance-sample as a material.
+    if (power > 0) {
+        Ci += (power / (M_PI * surfacearea())) * Cs * emission();
+    }
+}
