@@ -11,7 +11,14 @@ fn main() {
     println!("cargo::rerun-if-env-changed=SCENE_RDL2_ROOT");
     println!("cargo::rerun-if-env-changed=MOONRAY_ROOT");
     println!("cargo::rerun-if-changed=shim/src/render.cc");
+    println!("cargo::rerun-if-env-changed=OSL_ROOT");
+    println!("cargo::rerun-if-changed=dso/osl/Osl.cc");
+    println!("cargo::rerun-if-changed=dso/osl/attributes.cc");
+    println!("cargo::rerun-if-changed=dso/osl/shading_system.cc");
+    println!("cargo::rerun-if-changed=dso/osl/shading_system.h");
+    println!("cargo::rerun-if-changed=dso/osl/build.sh");
     println!("cargo::rustc-check-cfg=cfg(moonray)");
+    println!("cargo::rustc-check-cfg=cfg(osl)");
 
     if std::env::var_os("CARGO_FEATURE_RDL2").is_none() {
         return;
@@ -105,5 +112,57 @@ fn main() {
         // TBB itself rather than picking it up transitively.
         println!("cargo::rustc-link-lib=dylib=tbb");
         println!("cargo::rustc-link-arg=-Wl,-rpath,{moonray}/lib");
+
+        build_osl_dso(moonray);
+    }
+}
+
+/// Build the `Osl` material DSO, if there is an OSL to build it
+/// against.
+///
+/// A **separate** artefact from the shim, and it has to be: MoonRay
+/// loads a `SceneClass` by `dlopen`ing a `.so` named for the class out
+/// of its DSO path, so this cannot be linked into the shim however
+/// convenient that would be.
+///
+/// `$OSL_ROOT` is the ask, the way `$MOONRAY_ROOT` is for the renderer.
+/// Without it the flush keeps substituting `UsdPreviewSurface`, which
+/// is what every build did before OSL existed here -- so a host that
+/// cannot build OSL still renders, and says what it lost.
+///
+/// The DSO lands in `$OUT_DIR/rdl2dso`, and `cfg(osl)` tells the crate
+/// both that it exists and where: `env!("OUT_DIR")` is the only thing
+/// that knows.
+fn build_osl_dso(moonray: &str) {
+    let Ok(osl) = std::env::var("OSL_ROOT") else {
+        return;
+    };
+
+    let out = std::env::var("OUT_DIR").expect("cargo sets OUT_DIR");
+    let dso = format!("{out}/rdl2dso");
+
+    let status = std::process::Command::new("sh")
+        .arg("dso/osl/build.sh")
+        .arg(moonray)
+        .arg(&osl)
+        .arg(&dso)
+        .status();
+
+    match status {
+        Ok(status) if status.success() => {
+            println!("cargo::rustc-cfg=osl");
+            println!("cargo::rustc-env=NSI_MOONRAY_OSL_DSO={dso}");
+            // For the end-to-end test, which compiles a shader of its
+            // own with `oslc` to prove an *arbitrary* OSL shader
+            // crosses rather than a checked-in one.
+            println!("cargo::rustc-env=OSL_ROOT={osl}");
+        }
+        Ok(status) => panic!(
+            "$OSL_ROOT is set, so the `Osl` material DSO was built -- \
+             and `dso/osl/build.sh` exited with {status}. Unset \
+             $OSL_ROOT to build without OSL instead of building it \
+             wrong."
+        ),
+        Err(error) => panic!("running dso/osl/build.sh: {error}"),
     }
 }

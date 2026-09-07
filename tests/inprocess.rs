@@ -832,6 +832,236 @@ fn a_light_shader_lights_the_scene() {
     );
 }
 
+/// **`TN.2`.** An ɴsɪ shader renders, as itself.
+///
+/// The whole chain, and nothing in it is a substitute: an ɴsɪ `shader`
+/// node naming a compiled `.oso`, flushed to an OSL group
+/// specification, carried in one rdl2 `String` attribute, parsed by
+/// OSL, executed at every shading point, walked into `BsdfBuilder`
+/// calls, and lit.
+///
+/// The shader's colour is asserted per channel, because that is the
+/// only thing that can tell "OSL ran" from "something plausible
+/// happened": a `UsdPreviewSurface` at its defaults renders a
+/// perfectly good grey quad.
+///
+/// Needs the crate built with `$OSL_ROOT`, which is what puts the
+/// `Osl` material on MoonRay's DSO path.
+#[cfg(osl)]
+#[test]
+fn an_nsi_osl_shader_renders() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    // A shader compiled here rather than shipped: what is being tested
+    // is that an arbitrary OSL shader crosses, so it has to be one
+    // this crate has never seen.
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-render");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("teal.osl");
+    std::fs::write(
+        &source,
+        "surface teal(color tint = color(1, 1, 1))\n\
+         {\n    Ci = tint * diffuse(N);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("teal.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    nsi.create("attr", "attributes").unwrap();
+    nsi.create("teal", "shader").unwrap();
+    nsi.set_attribute(
+        "teal",
+        vec![
+            arg(
+                "shaderfilename",
+                Type::String,
+                OwnedData::String(vec![
+                    directory
+                        .join("teal.oso")
+                        .to_string_lossy()
+                        .into_owned()
+                        .into_bytes(),
+                ]),
+            ),
+            // A parameter no table in this crate has ever heard of.
+            arg("tint", Type::Color, OwnedData::F32(vec![0.05, 0.7, 0.6])),
+        ],
+    )
+    .unwrap();
+    nsi.connect("attr", None, "quad", "geometryattributes")
+        .unwrap();
+    nsi.connect("teal", None, "attr", "surfaceshader").unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+    // The centre of the quad, per channel.
+    let centre = ((height / 2) * width + width / 2) * 4;
+    let (red, green, blue) =
+        (pixels[centre], pixels[centre + 1], pixels[centre + 2]);
+
+    assert!(
+        green > 0.0,
+        "the shader should have shaded something: {red} {green} {blue}"
+    );
+    // `tint` is 0.05, 0.7, 0.6 — green well above blue, and red far
+    // below both. A default surface would be grey and fail all three.
+    assert!(
+        green > red * 5.0,
+        "green should dominate red: {red} {green} {blue}"
+    );
+    assert!(
+        blue > red * 5.0,
+        "blue should dominate red: {red} {green} {blue}"
+    );
+    assert!(
+        green > blue,
+        "green should exceed blue, as `tint` says: {red} {green} {blue}"
+    );
+}
+
+/// **A transform in a shader transforms.**
+///
+/// `RendererServices::get_matrix` returning identity is not an error
+/// anywhere: OSL asks, gets a matrix, and shades. It renders a
+/// plausible picture of the wrong coordinate system, which is the
+/// failure mode this whole backend is written against — so this has to
+/// be a test that can only pass if the matrix is real.
+///
+/// **Rotation, not translation.** MoonRay's render space follows the
+/// camera, so moving an object and the camera together leaves
+/// render-space `P` unchanged and an identity matrix looks correct. A
+/// first version of this test did exactly that and passed with
+/// `get_matrix` stubbed out to identity, which is the only reason it
+/// is written this way.
+///
+/// The quad is rotated 90° about z, so its **image footprint is
+/// unchanged** and only the shading can differ: object `(0.8, 0)` maps
+/// to render `(0, 0.8)`, the top of the frame. A shader colouring by
+/// `abs(P.x)` in object space is therefore bright at the top of the
+/// quad and dark at its centre; in render space it is dark at both.
+#[cfg(osl)]
+#[test]
+fn a_transform_in_a_shader_transforms() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-xform");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("where.osl");
+    std::fs::write(
+        &source,
+        "surface where()\n\
+         {\n    point q = transform(\"object\", P);\n\
+         \x20   Ci = color(abs(q[0]), 0, 0) * diffuse(N);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("where.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    // 90° about z, so object x becomes render y.
+    nsi.disconnect("quad", None, ".root", "objects").unwrap();
+    nsi.create("xform", "transform").unwrap();
+    nsi.set_attribute(
+        "xform",
+        vec![arg(
+            "transformationmatrix",
+            Type::MatrixF64,
+            OwnedData::F64(vec![
+                0.0, 1.0, 0.0, 0.0, //
+                -1.0, 0.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                0.0, 0.0, 0.0, 1.0,
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.connect("xform", None, ".root", "objects").unwrap();
+    nsi.connect("quad", None, "xform", "objects").unwrap();
+
+    nsi.create("attr", "attributes").unwrap();
+    nsi.create("where", "shader").unwrap();
+    nsi.set_attribute(
+        "where",
+        vec![arg(
+            "shaderfilename",
+            Type::String,
+            OwnedData::String(vec![
+                directory
+                    .join("where.oso")
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_bytes(),
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.connect("attr", None, "quad", "geometryattributes")
+        .unwrap();
+    nsi.connect("where", None, "attr", "surfaceshader").unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+    let red = |row: usize| pixels[(row * width + width / 2) * 4];
+
+    // The quad covers roughly the middle half of the frame, so row 16
+    // is well inside its upper half and row 24 is its centre.
+    let upper = red(16);
+    let centre = red(24);
+
+    assert!(
+        upper > centre + 0.1,
+        "object space should have rotated with the object: {upper} at \
+         the top of the quad against {centre} at its centre. Equal \
+         means the shader was handed render space, where `abs(P.x)` is \
+         near zero all the way up the middle."
+    );
+}
+
 /// **`T6.6`.** An instanced scene renders — two copies of one
 /// prototype, in two places.
 ///

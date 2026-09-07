@@ -275,6 +275,7 @@ unsafe extern "C" {
         dso_path: *const c_char,
         threads: u32,
         mode: c_int,
+        scalar: c_int,
     ) -> *mut NmrRender;
     pub fn nmr_render_free(render: *mut NmrRender);
     pub fn nmr_render_error(render: *const NmrRender) -> *const c_char;

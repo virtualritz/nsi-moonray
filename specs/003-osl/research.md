@@ -37,11 +37,31 @@ finline void shadev(...) const
 ```
 
 A material with no vectorised path is therefore not an error -- it
-silently contributes **no BSDF at all**, which renders black. And
-nothing catches it: `RenderContext::canRunVectorized` checks exactly
-four things -- overlapping dielectrics, volume rendering with deep
-output, and reflected or refracted cryptomatte -- and never asks
-whether the scene's materials have a `mShadeFuncv`.
+silently contributes **no BSDF at all**. And nothing catches it:
+`RenderContext::canRunVectorized` checks exactly four things --
+overlapping dielectrics, volume rendering with deep output, and
+reflected or refracted cryptomatte -- and never asks whether the
+scene's materials have a `mShadeFuncv`.
+
+**Measured, not deduced.** `tools/scalar-material` is a `Material` DSO
+with a scalar `shade` that adds one white Lambertian lobe, and
+`mShadeFuncv` left null. The same scene, the same material, the two
+execution modes:
+
+| | RGB max | RGB average | alpha |
+| --- | --- | --- | --- |
+| `-exec_mode vector` | **0.000000** | 0.000000 | 1.0 |
+| `-exec_mode scalar` | 1.018493 | 0.333256 | 1.0 |
+
+No warning either way. The alpha channel is the sharp part: it is 1.0
+in both, so the surface is present, opaque and covered -- the geometry
+is found and hit, and only the shading is missing. What an author sees
+is a silhouette-shaped hole, which looks like a lighting problem or a
+missing assignment rather than a material that never ran.
+
+Every material MoonRay ships is built with `moonray_ispc_dso`, so its
+own shaders never take this path. `moonray_dso_simple` -- the
+scalar-only DSO rule -- exists and is used for lights and geometry.
 
 The default execution mode is `AUTO`
 (`RenderOptions.cc:34`), which tries XPU, then vectorized, then
@@ -63,9 +83,10 @@ material has no ISPC `shadev` to give. The options are
    signature is a plain function pointer so this compiles, but the
    layouts are ISPC-generated and the pack-back is deep. Not first.
 
-Either way, **the missing check is worth reporting upstream**: a
-material class that silently renders black in one execution mode and
-correctly in another is the same shape of bug as `F12`.
+Either way, **the missing check is reported upstream**:
+`upstream/moonray-scalar-material-renders-black.md`. A material class
+that renders correctly in one execution mode and black in another,
+with no diagnostic, is the same shape of bug as `001` `F12`.
 
 ### O2: MoonRay's self-emission is hit-only, and this is the whole light problem
 
@@ -176,11 +197,243 @@ Sketched, not decided:
   looking for an emission closure, rather than by recognising a name.
   That is the right answer and it is only reachable from here.
 
+### O5: Lobe labels are a fixed vocabulary per scene class
+
+MoonRay's material AOVs and light-path expressions both key off **lobe
+labels**, and the plumbing is narrower than it first looks.
+
+A shader passes a small integer to each `BsdfBuilder::add*` call. Zero
+means "no label"; anything else indexes a `static const char *labels[]`
+that the DSO declares once, at class-declaration time:
+
+```cpp
+// generated into attributes.cc by ispc_dso.py from the DSO's .json
+static const char *labels[] = { "diffuse", "specular", ..., nullptr };
+sceneClass.declareDataPtr("labels", labels);
+```
+
+At render prep, `RenderContext` reads that array back off the
+`SceneClass` and matches each name against what the render outputs
+asked for, building `lobeLabelIds` (material AOVs) and
+`lpeLobeLabelIds` (light AOVs, each prefixed with the material's own
+label and a dot). `aovEncodeLabels` then packs the two global ids into
+one `int` -- a transformed bit, fifteen bits of material id, fifteen
+of LPE id.
+
+OSL's side is a **string**, and it is renderer-supplied: `"label"` is
+not part of the language but a keyword parameter the renderer
+registers on each closure. OSL's own `testrender` does exactly this --
+`CLOSURE_STRING_KEYPARAM(MxDielectricParams, label, "label")` -- so a
+shader writes
+
+```
+Ci = dielectric_bsdf(N, U, 1, 1, roughness, 0, ior, 0, "ggx") * w;
+```
+
+with `"label", "coat"` when it wants one.
+
+So the reconciliation is string-to-slot, and the awkward part is that
+**the slot table is per `SceneClass`, not per object**. One `Osl`
+material class serves every OSL shader in the scene, and each shader
+may use labels of its author's choosing.
+
+Two ways, and the first is what the first cut should do:
+
+1. **A fixed vocabulary.** The `Osl` class declares the conventional
+   lobe names -- `diffuse`, `specular`, `transmission`, `subsurface`,
+   `sheen`, `coat`, `emission`, the hair lobes -- and an OSL label
+   maps to whichever slot matches. A label outside the vocabulary
+   cannot be represented, and must be **reported**: an LPE naming it
+   would match nothing and its AOV would render black, which looks
+   like a lighting bug rather than a missing label.
+2. **Fill the array late.** `declareDataPtr` stores a *pointer*, and
+   `RenderContext` dereferences it at render prep -- nothing requires
+   the pointed-to strings to be fixed at declaration. The DSO could
+   own a mutable table and fill it with the union of labels the
+   scene's OSL shaders actually use, before render prep runs. Strictly
+   better, and strictly more fragile: it is global state written in
+   one phase and read in another, and getting the order wrong gives
+   silently wrong AOVs rather than a crash.
+
+Either way this is the answer to "which naming system wins": neither.
+OSL's strings are the input, MoonRay's integers are the output, and
+the table between them is ours to declare and to report the gaps in.
+
+### O6: rdl2 has no dynamic attributes, and OSL already solved it
+
+An ɴsɪ `shader` node carries whatever parameters its `.oso` declares.
+An rdl2 `SceneClass` declares its attributes **once**, statically, in
+`RDL2_DSO_ATTR_DEFINE`. One `Osl` class serving every OSL shader in
+existence therefore cannot have an attribute per parameter, and the
+obvious workaround -- parallel `StringVector` / `FloatVector` /
+`RgbVector` arrays with a name and type index -- is a serialization
+format invented badly.
+
+OSL ships the right one. `ShadingSystem::ShaderGroupBegin` has an
+overload taking a **group specification string**:
+
+```
+param <typename> <paramname> <value>... [[hints]] ;
+shader <shadername> <layername> ;
+connect <layername>.<paramname> <layername>.<paramname> ;
+```
+
+That is a whole shader network -- layers, parameter values and
+connections -- in one string. So the `Osl` material class needs
+essentially two attributes: the group name and the group spec.
+Parameters, types and topology all live in the spec, and ɴsɪ's named
+shader ports become `connect` lines.
+
+The consequence for this crate is the good one: **the flush's job
+becomes a text transformation**, from an ɴsɪ shader network to an OSL
+group spec. That is testable without a renderer, against strings, in
+exactly the shape the `.rdla` emitter already has -- and `oslc` and
+`oslinfo` are available to check that what is written parses and names
+parameters the shader really has.
+
+### O7: OSL runs here, and answers all three questions
+
+Built and measured rather than assumed. OSL 1.13.12.0 against LLVM
+18.1.3 and the system OpenImageIO 2.4.17; `tools/osl-probe` registers
+three closures, builds a group from a **spec string**, executes it at
+one shading point and walks the result:
+
+```
+diffuse             weight 0.2 0.7 0.9  N 0 0 1  label diffuse
+microfacet(ggx)     weight 0.25 0.25 0.25  alpha 0.3  refract 0  label specular
+emission            weight 2.6738 9.35831 12.0321
+```
+
+**O6 holds.** The diffuse weight is `0.2 0.7 0.9` -- the
+`param color Cs 0.2 0.7 0.9` from the group spec, not the shader's own
+compiled default of `0.8 0.4 0.1`. Parameters ride in the string and
+override defaults, so one rdl2 `String` attribute really can carry a
+whole shader network.
+
+**The tree flattens.** `Ci` came back as an `add` of `mul`s and walked
+to three lobes with weights folded in, which is the shape the
+`BsdfBuilder` mapping assumes.
+
+**O5 has an input.** `label diffuse` and `label specular` survived as
+strings.
+
+And the emission is arithmetically exact, which is the part worth
+keeping: the shader is the ɴsɪ specification's own listing 4.2,
+`power / (π · surfacearea) · Cs`. With `power` 42 and unit area,
+`42 / π = 13.369`, times `Cs` is `2.674, 9.358, 12.032` -- what the
+probe printed. **The specification's own emitter executes,
+unmodified.** Which is the whole point: this is not a translation of
+ɴsɪ's shading model, it *is* ɴsɪ's shading model.
+
+Two things the build needed that no document says: `llvm-18-dev` and
+`libclang-18-dev` (the runtime libraries alone are not enough), and a
+`libclang-cpp.so` symlink -- Ubuntu ships only `libclang-cpp.so.18.1`,
+so OSL's `FindLLVM` silently falls back to the static clang components
+and the link fails on `clang::SourceMgrAdapter`.
+
+### O8: An OSL shader renders through MoonRay
+
+`dso/osl/` is the `Osl` material, and it works.
+
+```
+Osl("/mat") {
+    ["group_spec"] = "param color Cs 0.1 0.8 0.2 ; param float roughness 0.25 ; shader red layer1 ;",
+    ["search_path"] = "...",
+}
+```
+
+```
+$ moonray -in osl.rdla -out osl.exr -exec_mode scalar -dso_path dso/osl/build:$MOONRAY_ROOT/rdl2dso
+$ oiiotool -stats osl.exr | grep 'Stats Max'
+    Stats Max: 0.101849 0.814795 0.203699 1.000000 (float)
+```
+
+Exactly `Cs`, scaled by the environment light -- and changing only the
+string in the `.rdla` changes the render, which is the whole chain:
+rdl2 attribute, OSL group, closure tree, `BsdfBuilder`, pixels. Run
+again with `0.9 0.1 0.1` it comes back `0.916644 0.101849 0.101849`,
+the same ratio.
+
+Nine closures are mapped (`diffuse`, `oren_nayar`, `translucent`,
+`reflection`, `refraction`, `microfacet` both ways, `emission`), and
+two are counted and reported rather than approximated: `transparent`,
+which MoonRay expresses as *presence* and evaluates on its own
+function before shading, and `background`, which is an environment
+rather than a surface.
+
+The one mapping decision worth stating is the **grey/coloured split**.
+MoonRay's `BsdfBuilder::add*` take a *scalar* weight, and OSL closure
+weights are colours. A lobe that carries no colour of its own --
+`MirrorBRDF`, `MicrofacetIsotropicBRDF` in its dielectric form -- has
+nowhere to put one, and folding it into a luminance renders a grey
+metal. So a grey weight goes to the dielectric constructor as the
+scalar weight, and a coloured one goes to the conductor constructor as
+reflectivity and edge tint. That is what `UsdPreviewSurface` does with
+`metallic` too, and it is exact for the case that matters.
+
+Still standing between this and ɴsɪ: **the flush emits
+`UsdPreviewSurface`**. Turning an ɴsɪ shader network into a group spec
+is the remaining work, and by O6 it is a text transformation --
+testable against strings, with `oslc` and `oslinfo` available to check
+that what is written parses and names parameters the shader really
+has.
+
+## Settled
+
+- **Texturing is OSL's, not MoonRay's.** OSL takes an OIIO
+  `TextureSystem` of its own and that is what it gets. MoonRay's
+  texture path -- `BasicTexture`, `UdimTexture`, `MipSelector` and the
+  map DSOs over them -- exists to serve shaders written as ISPC DSOs,
+  and those are exactly what OSL replaces. Sharing the two would be
+  work spent making a system interoperate with its own successor.
+  Decided by the author of the ɴsɪ side, not inferred here.
+
+### O9: Render space follows the camera, and it hid a broken test
+
+`RendererServices::get_matrix` is how a shader's `transform("object",
+P)` is answered, and returning identity is **not an error anywhere**:
+OSL asks, gets a matrix, and shades. The result is a plausible picture
+of the wrong coordinate system.
+
+MoonRay has the transforms -- `shading::Xform` gives render, world,
+camera, screen and object with a `State` -- and the material now holds
+one, built in `update()` as `Xform`'s own documentation asks, reached
+from `RendererServices` through `ShaderGlobals::renderstate`. Both the
+`State` and the `Xform` have to travel, because an instanced
+prototype's object transform is per shading *point*, not per material.
+
+The matrices are built from basis vectors -- the origin and three
+axes, transformed -- rather than read out of `ispc::Xform`'s fields.
+That struct exposes `mR2O` and its inverse directly, and reading them
+would be right for a plain mesh and silently wrong for a crowd, since
+its render-to-object entry resolves through a function pointer per
+shading point. Four calls through the documented interface are exact
+for every affine transform, which all of these are.
+
+**The test for this was wrong twice, and the second failure is the one
+worth recording.** It moved an object and the camera together and
+compared the two renders, reasoning that object space follows the
+object while render space does not. It passed with `get_matrix` stubbed
+to identity.
+
+The reason is that **MoonRay's render space follows the camera**. Move
+both and render-space `P` does not change either, so the two spaces
+agree and nothing can tell them apart. Translation cannot test this.
+
+Rotation can. The quad is rotated 90° about z, so its *image footprint
+is unchanged* -- only the shading can differ -- and object `(0.8, 0)`
+maps to render `(0, 0.8)`, the top of the frame. A shader colouring by
+`abs(P.x)` in object space is bright at the top of the quad and dark at
+its centre; in render space it is dark at both. Stubbed to identity the
+test now reads `0.0480` against `0.0480` and fails; with the real
+matrix it passes.
+
+The general lesson is the one this repository keeps relearning: a test
+that cannot fail is worse than no test, and the only way to know is to
+break the thing it tests and watch.
+
 ## Open questions
 
-- **Does OSL's texture path have to be MoonRay's?** Sharing
-  `TextureSystem` matters for memory and for consistency with
-  MoonRay's own maps; OSL will happily use its own OIIO one.
 - **Displacement.** ɴsɪ has `displacementshader`; MoonRay has a
   `Displacement` root shader with the same shape as `Material`. The
   same DSO trick should apply, with `displacement()` closures.

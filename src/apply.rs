@@ -73,14 +73,18 @@ pub fn apply_affected(
         return (report, true);
     }
 
-    if !changes.created.is_empty() || !changes.deleted.is_empty() {
+    // Counted rather than measured by length: upstream's journal is
+    // interned now and hands these out as iterators, which is the
+    // point -- a `Changes` is written on every edit of every frame and
+    // it no longer owns a `String` per handle.
+    let created = changes.created().count();
+    let deleted = changes.deleted().count();
+    if created > 0 || deleted > 0 {
         let mut report = apply(document, context);
         report.push(format!(
-            "{} node(s) created and {} deleted, which changes set \
-             and layer membership, so the whole scene was \
-             re-applied",
-            changes.created.len(),
-            changes.deleted.len()
+            "{created} node(s) created and {deleted} deleted, which \
+             changes set and layer membership, so the whole scene was \
+             re-applied"
         ));
         return (report, true);
     }

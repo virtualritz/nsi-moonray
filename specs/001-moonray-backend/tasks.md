@@ -506,7 +506,7 @@ says so in its own doc. This backend calls none of it.
 - [x] TN.1 Progressive rendering. `Mode::{Batch, Progressive,
       ProgressiveFast, Realtime}` in `src/rdl2/render.rs`; the drop-in
       renders `Progressive`. Reached through the shim, as predicted.
-- [~] TN.2 OSL. MoonRay has none, and ɴsɪ *is* OSL -- a `shader` node
+- [x] TN.2 **OSL runs.** MoonRay has none, and ɴsɪ *is* OSL -- a `shader` node
       names a compiled `.oso`, and a light is a shader that emits. So
       everything this backend does with shaders and lights is a table
       of names standing in for a language it cannot run.
@@ -530,3 +530,28 @@ says so in its own doc. This backend calls none of it.
         ray-traces the real mesh and `Scene::updateActiveLights` puts a
         bounded light in the camera-visible set. That is the
         reconciliation, and `T1.7a` now sets it.
+
+      Built: `dso/osl/` is an `Osl` material holding an OSL
+      `ShaderGroup`, executing it at each shading point and walking the
+      closure tree into `BsdfBuilder` calls; `src/osl.rs` turns an ɴsɪ
+      shader network into the group specification it carries, which is
+      a text transformation because rdl2 has no dynamic attributes and
+      `ShaderGroupBegin` takes one string (`003` O6). `build.rs` builds
+      the DSO when `$OSL_ROOT` is set and puts it on MoonRay's DSO
+      path; `Render::new` forces scalar execution, without which the
+      material renders black.
+
+      `Shading::{Osl, Substitute}` is the axis, defaulting to whichever
+      the build can do, and it is a *choice* rather than a `cfg` at the
+      point of use because the flush is a pure transformation -- a
+      scene dumped on a machine with no OSL and rendered on a farm that
+      has one should say `Osl`. A shader with no `shaderfilename` falls
+      back to the substitute for that shader alone, because ɴsɪ always
+      returns an image.
+
+      `inprocess::an_nsi_osl_shader_renders` compiles a shader with
+      `oslc` that this crate has never seen, records it as an ɴsɪ
+      shader node, and asserts its colour per channel -- which is the
+      only thing that separates "OSL ran" from "something plausible
+      happened", since a substitute at its defaults renders a perfectly
+      good grey quad.

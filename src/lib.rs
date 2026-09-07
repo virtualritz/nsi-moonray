@@ -58,6 +58,7 @@ pub mod display;
 pub mod document;
 pub mod flush;
 pub mod name;
+pub mod osl;
 #[cfg(feature = "rdl2")]
 pub mod rdl2;
 pub mod render;
