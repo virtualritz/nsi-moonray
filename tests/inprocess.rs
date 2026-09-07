@@ -21,6 +21,52 @@ fn dso_path() -> Option<String> {
     std::env::var("NSI_MOONRAY_DSO").ok()
 }
 
+/// What a driver does with buckets: paint each into a frame.
+///
+/// Buckets name a *rectangle*, not the whole frame — the first covers
+/// everything, later ones only what the renderer refined — so a test
+/// that looked at the last bucket alone would be looking at a corner.
+#[derive(Default)]
+struct Canvas {
+    pixels: Vec<f32>,
+    width: usize,
+    height: usize,
+    buckets: usize,
+}
+
+impl Canvas {
+    // The nine are the callback's own signature; renaming them into a
+    // struct here would only move the arity somewhere less obvious.
+    #[allow(clippy::too_many_arguments)]
+    fn paint(
+        &mut self,
+        width: usize,
+        height: usize,
+        x0: usize,
+        x1: usize,
+        y0: usize,
+        y1: usize,
+        channels: usize,
+        pixels: &[f32],
+    ) {
+        if self.pixels.is_empty() {
+            self.pixels = vec![0.0; width * height * channels];
+            self.width = width;
+            self.height = height;
+        }
+        self.buckets += 1;
+
+        for (row, y) in (y0..y1).enumerate() {
+            for (col, x) in (x0..x1).enumerate() {
+                let from = (row * (x1 - x0) + col) * channels;
+                let to = (y * width + x) * channels;
+                self.pixels[to..to + channels]
+                    .copy_from_slice(&pixels[from..from + channels]);
+            }
+        }
+    }
+}
+
 /// One renderer per process, so one test at a time.
 ///
 /// Not a test-harness nicety: MoonRay's driver state is global, and two
@@ -232,32 +278,35 @@ fn a_converging_render_streams_to_the_applications_closures() {
     };
     use nsi_intermediate::HostPtr;
     use nsi_moonray::stream::{Stopped, stream};
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::{Arc, Mutex};
 
     let Some(dso) = dso_path() else {
         panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
     };
 
-    let buckets = Arc::new(AtomicUsize::new(0));
-    let counted = Arc::clone(&buckets);
-    let last = Arc::new(Mutex::new(Vec::<f32>::new()));
-    let seen = Arc::clone(&last);
+    let canvas = Arc::new(Mutex::new(Canvas::default()));
+    let painting = Arc::clone(&canvas);
 
     let write = WriteCallback::<f32>::new(
         move |_name,
-              _width,
-              _height,
-              _x0,
-              _x1,
-              _y0,
-              _y1,
-              _format: &PixelFormat,
+              width,
+              height,
+              x0,
+              x1,
+              y0,
+              y1,
+              format: &PixelFormat,
               pixels: &[f32]| {
-            counted.fetch_add(1, Ordering::SeqCst);
-            *seen.lock().expect("not poisoned") = pixels.to_vec();
+            painting.lock().expect("not poisoned").paint(
+                width,
+                height,
+                x0,
+                x1,
+                y0,
+                y1,
+                format.channels(),
+                pixels,
+            );
             Error::None
         },
     );
@@ -299,23 +348,26 @@ fn a_converging_render_streams_to_the_applications_closures() {
     .expect("the loop runs");
 
     assert_eq!(outcome, Stopped::Complete, "the frame should finish");
-    // Six on the machine this was written on: the loop polls every
-    // 50ms and this frame converges in about a third of a second. The
-    // *count* is not asserted because it is a property of the host, not
-    // of the code -- a fast enough machine could finish inside one
-    // poll. That progressive delivery happens at all is what
-    // `a_frame_can_be_snapshotted_while_it_converges` pins down.
-    let count = buckets.load(Ordering::SeqCst);
-    assert!(count > 0, "the closure received nothing");
 
-    let pixels = last.lock().expect("not poisoned");
-    assert_eq!(pixels.len(), (width * height * 4) as usize);
+    let painted = canvas.lock().expect("not poisoned");
+    // The count is not asserted: it is a property of the host, not of
+    // the code -- a fast enough machine could finish inside one poll.
+    // That progressive delivery happens at all is what
+    // `a_frame_can_be_snapshotted_while_it_converges` pins down.
+    assert!(painted.buckets > 0, "the closure received nothing");
+    assert_eq!(
+        (painted.width, painted.height),
+        (width as usize, height as usize),
+        "the buckets should describe this frame"
+    );
 
     let centre =
         ((height as usize / 2) * width as usize + width as usize / 2) * 4;
     assert!(
-        pixels[centre..centre + 3].iter().any(|value| *value > 0.0),
-        "the closure received a black centre of frame"
+        painted.pixels[centre..centre + 3]
+            .iter()
+            .any(|value| *value > 0.0),
+        "the composited frame has a black centre, where the quad is"
     );
 }
 
@@ -390,10 +442,7 @@ fn the_c_api_renders_in_process_and_returns_pixels() {
         output::{Error, PixelFormat, WriteCallback},
     };
     use nsi_intermediate::HostPtr;
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::{Arc, Mutex};
 
     let Some(dso) = dso_path() else {
         panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
@@ -401,23 +450,29 @@ fn the_c_api_renders_in_process_and_returns_pixels() {
     // SAFETY: single-threaded here, under the renderer lock.
     unsafe { std::env::set_var("NSI_MOONRAY_DSO", &dso) };
 
-    let buckets = Arc::new(AtomicUsize::new(0));
-    let counted = Arc::clone(&buckets);
-    let last = Arc::new(Mutex::new(Vec::<f32>::new()));
-    let seen = Arc::clone(&last);
+    let canvas = Arc::new(Mutex::new(Canvas::default()));
+    let painting = Arc::clone(&canvas);
 
     let write = WriteCallback::<f32>::new(
         move |_name,
-              _w,
-              _h,
-              _x0,
-              _x1,
-              _y0,
-              _y1,
-              _format: &PixelFormat,
+              width,
+              height,
+              x0,
+              x1,
+              y0,
+              y1,
+              format: &PixelFormat,
               pixels: &[f32]| {
-            counted.fetch_add(1, Ordering::SeqCst);
-            *seen.lock().expect("not poisoned") = pixels.to_vec();
+            painting.lock().expect("not poisoned").paint(
+                width,
+                height,
+                x0,
+                x1,
+                y0,
+                y1,
+                format.channels(),
+                pixels,
+            );
             Error::None
         },
     );
@@ -448,18 +503,19 @@ fn the_c_api_renders_in_process_and_returns_pixels() {
         "the linked renderer should have taken the scene"
     );
 
-    assert!(
-        buckets.load(Ordering::SeqCst) > 0,
-        "the C API delivered no pixels"
+    let painted = canvas.lock().expect("not poisoned");
+    assert!(painted.buckets > 0, "the C API delivered no pixels");
+    assert_eq!(
+        (painted.width, painted.height),
+        (width as usize, height as usize)
     );
-
-    let pixels = last.lock().expect("not poisoned");
-    assert_eq!(pixels.len(), (width * height * 4) as usize);
 
     let centre =
         ((height as usize / 2) * width as usize + width as usize / 2) * 4;
     assert!(
-        pixels[centre..centre + 3].iter().any(|value| *value > 0.0),
+        painted.pixels[centre..centre + 3]
+            .iter()
+            .any(|value| *value > 0.0),
         "the C API delivered a black centre of frame"
     );
 }
@@ -1160,4 +1216,83 @@ fn a_moving_instancer_renders_blurred() {
         partial(&still),
         partial(&moving)
     );
+}
+
+/// **`T5.3a`.** A delta snapshot names the rectangle that changed, and
+/// its pixels agree with a full snapshot of the same frame.
+///
+/// The agreement is the whole test. `snapshotDelta` does "no resize, no
+/// extrapolation and no untiling" and its buffer is *not normalized by
+/// weight*, so the shim undoes the tiling and divides each pixel by its
+/// own sample count. Both of those have wrong versions that look
+/// plausible — a mis-untiled frame is scrambled, an unnormalised one is
+/// merely darker — and comparing against `snapshot`, which MoonRay
+/// normalises and untiles itself, catches either.
+#[test]
+fn a_delta_snapshot_agrees_with_a_full_one() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (64usize, 48usize);
+    let session = Session::new(scene(width as i32, height as i32), &dso)
+        .expect("a render");
+
+    // Converge, but do not stop: a stopped frame has nothing to
+    // snapshot a delta against.
+    while !session.render().frame_complete() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let (_, _, full) = session.render().snapshot().expect("a full frame");
+    let delta = session
+        .render()
+        .snapshot_delta()
+        .expect("a delta")
+        .expect("the first delta covers the whole frame");
+
+    // Nothing has been snapshotted as a delta before, so everything is
+    // new.
+    assert_eq!(
+        (delta.x, delta.y, delta.width, delta.height),
+        (0, 0, width as u32, height as u32),
+        "the first delta should cover the frame"
+    );
+    assert_eq!(delta.pixels.len(), width * height * 4);
+
+    // The comparison. A tolerance, not equality: the two snapshots are
+    // taken a moment apart from a live renderer, and MoonRay's own
+    // normalisation is not bit-identical to dividing by the weight.
+    let mut worst = 0.0f32;
+    for (a, b) in full.iter().zip(&delta.pixels) {
+        worst = worst.max((a - b).abs());
+    }
+    assert!(
+        worst < 0.01,
+        "a delta snapshot must agree with a full one; the worst \
+         channel differs by {worst}. A scrambled frame means the \
+         untiling is wrong, and a uniformly darker one means the \
+         weight normalisation is."
+    );
+
+    // And it is not comparing two black frames.
+    assert!(
+        full.iter().any(|value| *value > 0.0),
+        "the frame is black, so the comparison proves nothing"
+    );
+
+    // A second delta with nothing new between reports nothing.
+    let again = session.render().snapshot_delta().expect("a second delta");
+    assert!(
+        again.is_none(),
+        "a converged frame that nobody rendered into should have no \
+         changed pixels: {again:?}"
+    );
+
+    let _ = session.render().stop();
 }

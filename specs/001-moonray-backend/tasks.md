@@ -49,14 +49,20 @@ whoever renders to have it installed.
 - [x] T4.1 `mrr`, a CLI that hands a scene to MoonRay's own binary:
       `moonray -in scene.rdla -out image.exr`. Flags read from
       `RenderOptions.cc`.
-- [~] T4.2 **`libnsi_moonray.so`: a drop-in ɴsɪ renderer.** Built and
-      loadable: `src/capi.rs` exports all twelve symbols, records into
-      `nsi_intermediate::Scene`, and on `NSIRenderControl "start"`
-      writes the `.rdla` and runs MoonRay. `tests/dropin.rs` `dlopen`s
-      the artefact and drives a scene through it. A display driver's
-      callbacks are called (`T5.1`), but with one bucket at the end
-      rather than as the render converges (`T5.3`), and `NSIEvaluate`
-      is a no-op (`T4.3`).
+- [x] T4.2 **`libnsi_moonray.so`: a drop-in ɴsɪ renderer.**
+      `src/capi.rs` exports all twelve symbols, records into
+      `nsi_intermediate::Scene`, and renders **in process** through a
+      linked MoonRay: `"start"` with `"interactive"`, `"synchronize"`,
+      `"wait"` and `"stop"` all act on a live
+      [`Session`](../../src/session.rs), and the application's
+      `outputdriver` callbacks receive each snapshot as the frame
+      converges. Spawning the binary is the fallback for when there is
+      no linked renderer. `tests/dropin.rs` `dlopen`s the artefact and
+      drives a scene through it.
+      `"suspend"` and `"resume"` are deliberately unmapped: MoonRay can
+      `stopFrame`/`startFrame`, but restarting loses the samples taken
+      so far, and a viewport that dimmed whenever it was touched would
+      be worse than one that ignores the call.
       `nsi-ffi-wrap` loads a renderer through `dlopen` and looks up
       eleven C entry points -- `NSIBegin`, `NSIEnd`, `NSICreate`,
       `NSIDelete`, `NSISetAttribute`, `NSISetAttributeAtTime`,
@@ -80,12 +86,12 @@ whoever renders to have it installed.
       that is really `.rdla` is a thing that happens, and guessing from
       the name would fail with a parse error about the wrong format.
       `tests/nsi_input.rs`.
-- [ ] T4.4 Link `libmoonray` rather than spawning its CLI. **Moved to
-      [`002`](../002-interactive-updates/tasks.md)**, which is where the
-      reason for it lives. A spawned
-      batch render cannot stream samples back, so this is what
-      progressive rendering and the pixel-streaming driver both need.
-      See `TN.1`.
+- [x] T4.4 Link `libmoonray` rather than spawning its CLI. **Done in
+      [`002`](../002-interactive-updates/tasks.md)** `R1`, which is
+      where the reason for it lived: a spawned batch render has no
+      `SceneContext` to edit and no `RenderContext` to snapshot, so it
+      foreclosed incremental updates, progressive delivery and
+      concurrent rendering at once. `tests/inprocess.rs`.
 
 ## Getting Pixels Out
 
@@ -120,13 +126,23 @@ Rust on both sides, so **no ndspy marshalling is involved**.
       already (`research.md` F5) and wants to be *pulled* where ɴsɪ
       pushes. The only blocker was spawning, since a separate process
       has no `RenderContext` to snapshot.
-- [ ] T5.3a **A bucket is the whole frame, not a tile.**
-      `snapshotRenderBuffer` untiles, so the rectangle that is actually
-      *new* is not something the loop can name -- and naming a
-      sub-rectangle it has not verified would be a lie an application
-      would draw. `snapshotDelta` with its `ActivePixels` is what makes
-      a real sub-rectangle possible, and it is worth having for a large
-      frame, or for one crossing a network.
+- [x] T5.3a **A bucket is the rectangle that changed.** Through
+      `snapshotDelta` and its `ActivePixels`: the first covers the
+      frame, later ones only what the renderer refined -- which is what
+      a driver over a network wants and what `snapshotRenderBuffer`
+      cannot say.
+      **Not a drop-in.** `snapshotDelta` does "no resize, no
+      extrapolation and no untiling" and its buffer is *not normalized
+      by weight*, so the shim undoes the tiling and divides each pixel
+      by its own sample count. Both have wrong versions that look
+      plausible -- a mis-untiled frame is scrambled, an unnormalised
+      one merely darker -- so
+      `inprocess::a_delta_snapshot_agrees_with_a_full_one` compares the
+      two rather than eyeballing one.
+      Two things had to be given the frame's shape or MoonRay crashed
+      inside its own parallel loop: the buffers are **tile-aligned**
+      (8 either way), and `ActivePixels::init` allocates the per-tile
+      masks that `snapshotDelta` writes into.
 
 ## Needs MoonRay Installed
 
@@ -353,7 +369,7 @@ says so in its own doc. This backend calls none of it.
 
 ## Not Now
 
-- [ ] TN.1 Progressive rendering. MoonRay has `PROGRESSIVE`,
-      `PROGRESSIVE_FAST` and `REALTIME`; reaching them requires the
-      shim, not `.rdla`.
+- [x] TN.1 Progressive rendering. `Mode::{Batch, Progressive,
+      ProgressiveFast, Realtime}` in `src/rdl2/render.rs`; the drop-in
+      renders `Progressive`. Reached through the shim, as predicted.
 - [ ] TN.2 OSL. MoonRay has none. Shared work, separate surface.

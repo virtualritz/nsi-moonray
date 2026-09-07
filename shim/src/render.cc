@@ -11,9 +11,12 @@
 #include <moonray/rendering/rndr/RenderOptions.h>
 #include <moonray/rendering/rndr/RenderStatistics.h>
 #include <moonray/application/RaasApplication.h>
+#include <scene_rdl2/common/fb_util/ActivePixels.h>
 #include <scene_rdl2/common/fb_util/FbTypes.h>
+#include <scene_rdl2/common/fb_util/Tiler.h>
 #include <scene_rdl2/scene/rdl2/rdl2.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -33,6 +36,12 @@ struct NmrRender {
     rndr::RenderOptions options;
     std::unique_ptr<rndr::RenderContext> context;
     scene_rdl2::fb_util::RenderBuffer buffer;
+    // Kept across calls: `snapshotDelta` reports what changed *since
+    // the last one*, so these are the renderer's memory of the frame.
+    scene_rdl2::fb_util::RenderBuffer tiled;
+    scene_rdl2::fb_util::FloatBuffer weights;
+    scene_rdl2::fb_util::RenderBuffer linear;
+    scene_rdl2::fb_util::FloatBuffer linear_weights;
     std::string error;
     bool initialized = false;
     bool rendering = false;
@@ -376,6 +385,130 @@ int nmr_render_write(NmrRender* render)
             render->error = "one or more output images failed to write";
             return NMR_FAILED;
         }
+        return NMR_OK;
+    });
+}
+
+int nmr_render_snapshot_delta(NmrRender* render, float* pixels,
+                              size_t capacity, unsigned* x, unsigned* y,
+                              unsigned* width, unsigned* height)
+{
+    if (pixels == nullptr || x == nullptr || y == nullptr
+        || width == nullptr || height == nullptr) {
+        return NMR_BAD_ARGUMENT;
+    }
+    *x = *y = *width = *height = 0;
+
+    return guarded(render, [&] {
+        unsigned frame_width = 0;
+        unsigned frame_height = 0;
+        if (nmr_render_resolution(render, &frame_width, &frame_height)
+            != NMR_OK) {
+            return NMR_FAILED;
+        }
+
+        // Tiled and unnormalised, per the header's note -- so the
+        // buffers are **tile-aligned**, 8 pixels either way, not the
+        // frame's own size. Sizing them to the frame instead reads and
+        // writes past the end of the padding row, which crashes inside
+        // MoonRay's own parallel loop rather than anywhere near here.
+        scene_rdl2::fb_util::Tiler tiler(frame_width, frame_height);
+        render->tiled.init(tiler.mAlignedW, tiler.mAlignedH);
+        render->weights.init(tiler.mAlignedW, tiler.mAlignedH);
+
+        // And `ActivePixels` has to be told the frame's size: it
+        // allocates one 64-bit mask per tile, and an uninitialised one
+        // has no tiles to write into.
+        scene_rdl2::fb_util::ActivePixels active;
+        active.init(frame_width, frame_height);
+
+        render->context->snapshotDelta(&render->tiled, &render->weights,
+                                       active, true);
+
+        if (!active.isActive()) {
+            return NMR_OK;
+        }
+
+        // The bounding box of the changed tiles, narrowed to the
+        // changed pixels within them. Tiles are 8x8, one bit each in a
+        // 64-bit mask.
+        unsigned low_x = frame_width;
+        unsigned low_y = frame_height;
+        unsigned high_x = 0;
+        unsigned high_y = 0;
+        bool any = false;
+
+        for (unsigned tile = 0; tile < active.getNumTiles(); ++tile) {
+            const uint64_t mask = active.getTileMask(tile);
+            if (mask == 0) {
+                continue;
+            }
+            const unsigned tile_x = (tile % active.getNumTilesX()) * 8;
+            const unsigned tile_y = (tile / active.getNumTilesX()) * 8;
+
+            for (unsigned bit = 0; bit < 64; ++bit) {
+                if ((mask & (uint64_t(1) << bit)) == 0) {
+                    continue;
+                }
+                const unsigned px = tile_x + (bit & 7);
+                const unsigned py = tile_y + (bit >> 3);
+                if (px >= frame_width || py >= frame_height) {
+                    continue; // padding in an edge tile
+                }
+                low_x = std::min(low_x, px);
+                low_y = std::min(low_y, py);
+                high_x = std::max(high_x, px);
+                high_y = std::max(high_y, py);
+                any = true;
+            }
+        }
+
+        if (!any) {
+            return NMR_OK;
+        }
+
+        *x = low_x;
+        *y = low_y;
+        *width = high_x - low_x + 1;
+        *height = high_y - low_y + 1;
+
+        const size_t needed = size_t(*width) * size_t(*height) * 4;
+        if (capacity < needed) {
+            // The rectangle is written, so the caller can size a
+            // buffer and ask again.
+            return NMR_BAD_ARGUMENT;
+        }
+
+        // Undo the tiling, and normalise: the delta buffer carries
+        // accumulated radiance, not colour, until it is divided by the
+        // per-pixel sample weight.
+        render->linear.init(frame_width, frame_height);
+        render->linear_weights.init(frame_width, frame_height);
+        scene_rdl2::fb_util::untile(
+            &render->linear, render->tiled, tiler, true,
+            [](const scene_rdl2::fb_util::RenderColor& pixel,
+               unsigned) { return pixel; });
+        scene_rdl2::fb_util::untile(
+            &render->linear_weights, render->weights, tiler, true,
+            [](float weight, unsigned) { return weight; });
+
+        const scene_rdl2::fb_util::RenderColor* source =
+            render->linear.getData();
+        const float* weight = render->linear_weights.getData();
+
+        for (unsigned row = 0; row < *height; ++row) {
+            for (unsigned col = 0; col < *width; ++col) {
+                const size_t from =
+                    size_t(low_y + row) * frame_width + (low_x + col);
+                const size_t to = (size_t(row) * *width + col) * 4;
+                const float w = weight[from] > 0.0f ? weight[from] : 1.0f;
+                pixels[to + 0] = source[from].x / w;
+                pixels[to + 1] = source[from].y / w;
+                pixels[to + 2] = source[from].z / w;
+                pixels[to + 3] = source[from].w / w;
+            }
+        }
+
         return NMR_OK;
     });
 }

@@ -70,6 +70,19 @@ pub struct Cost {
     pub primitives_tessellated: usize,
 }
 
+/// The part of a frame that changed, and its pixels.
+///
+/// `pixels` is row major within the rectangle, RGBA float per pixel --
+/// `width * height * 4` values, not the whole frame's worth.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Delta {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<f32>,
+}
+
 /// A MoonRay renderer.
 pub struct Render {
     raw: *mut ffi::NmrRender,
@@ -181,6 +194,56 @@ impl Render {
     pub fn frame_complete(&self) -> bool {
         // SAFETY: a live renderer.
         unsafe { ffi::nmr_render_is_frame_complete(self.raw) != 0 }
+    }
+
+    /// The rectangle that changed since the last delta, and its
+    /// pixels.
+    ///
+    /// [`Render::snapshot`] hands over the whole frame however little
+    /// of it moved. This is what lets a driver send only what is new,
+    /// which matters for a large frame or one crossing a network.
+    ///
+    /// **Not a drop-in for `snapshot`.** MoonRay's `snapshotDelta`
+    /// does "no resize, no extrapolation and no untiling", and its
+    /// buffer is *not normalized by weight* -- so the shim undoes the
+    /// tiling and divides each pixel by its own sample count. An
+    /// unnormalised buffer is not obviously wrong; it is just darker,
+    /// which is why `a_delta_snapshot_agrees_with_a_full_one` compares
+    /// the two rather than eyeballing one.
+    ///
+    /// `None` when nothing changed. The first call after a frame
+    /// starts reports the whole frame, since everything is new.
+    pub fn snapshot_delta(&self) -> Result<Option<Delta>, Error> {
+        let (width, height) = self.resolution()?;
+        let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
+        let (mut x, mut y, mut w, mut h) = (0, 0, 0, 0);
+
+        // SAFETY: the buffer is the whole frame, so it is never
+        // smaller than the changed rectangle within it.
+        result(unsafe {
+            ffi::nmr_render_snapshot_delta(
+                self.raw,
+                pixels.as_mut_ptr(),
+                pixels.len(),
+                &mut x,
+                &mut y,
+                &mut w,
+                &mut h,
+            )
+        })?;
+
+        if w == 0 || h == 0 {
+            return Ok(None);
+        }
+
+        pixels.truncate(w as usize * h as usize * 4);
+        Ok(Some(Delta {
+            x,
+            y,
+            width: w,
+            height: h,
+            pixels,
+        }))
     }
 
     /// What the frames so far have cost.

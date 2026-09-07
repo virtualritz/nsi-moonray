@@ -436,19 +436,34 @@ fn a_session_runs_a_synchronise_loop() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let last = Arc::new(Mutex::new(Vec::<f32>::new()));
-    let seen = Arc::clone(&last);
+    // Buckets name a *rectangle* -- the first covers the frame, later
+    // ones only what the renderer refined -- so a driver paints them
+    // into a frame, and so does this.
+    let canvas = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let painting = Arc::clone(&canvas);
     let write = WriteCallback::<f32>::new(
         move |_name,
-              _w,
-              _h,
-              _x0,
-              _x1,
-              _y0,
-              _y1,
-              _format: &PixelFormat,
+              width,
+              height,
+              x0,
+              x1,
+              y0,
+              y1,
+              format: &PixelFormat,
               pixels: &[f32]| {
-            *seen.lock().expect("not poisoned") = pixels.to_vec();
+            let channels = format.channels();
+            let mut frame = painting.lock().expect("not poisoned");
+            if frame.is_empty() {
+                frame.resize(width * height * channels, 0.0);
+            }
+            for (row, y) in (y0..y1).enumerate() {
+                for (col, x) in (x0..x1).enumerate() {
+                    let from = (row * (x1 - x0) + col) * channels;
+                    let to = (y * width + x) * channels;
+                    frame[to..to + channels]
+                        .copy_from_slice(&pixels[from..from + channels]);
+                }
+            }
             Error::None
         },
     );
@@ -470,7 +485,7 @@ fn a_session_runs_a_synchronise_loop() {
     let mut session = Session::new(nsi, &dso).expect("an interactive render");
 
     session.wait();
-    let before = last.lock().expect("not poisoned").clone();
+    let before = canvas.lock().expect("not poisoned").clone();
     assert_eq!(before.len(), width * height * 4, "no first frame");
 
     // The edit: turn the surface green.
@@ -493,7 +508,7 @@ fn a_session_runs_a_synchronise_loop() {
     );
 
     session.wait();
-    let after = last.lock().expect("not poisoned").clone();
+    let after = canvas.lock().expect("not poisoned").clone();
 
     let [red_before, green_before, _] = channels(&before);
     let [red_after, green_after, _] = channels(&after);

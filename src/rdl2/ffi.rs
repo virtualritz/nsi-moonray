@@ -298,6 +298,15 @@ unsafe extern "C" {
         height: *mut u32,
     ) -> c_int;
     pub fn nmr_render_write(render: *mut NmrRender) -> c_int;
+    pub fn nmr_render_snapshot_delta(
+        render: *mut NmrRender,
+        pixels: *mut f32,
+        capacity: usize,
+        x: *mut u32,
+        y: *mut u32,
+        width: *mut u32,
+        height: *mut u32,
+    ) -> c_int;
     pub fn nmr_render_snapshot(
         render: *mut NmrRender,
         pixels: *mut f32,

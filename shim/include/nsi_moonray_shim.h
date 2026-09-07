@@ -271,6 +271,31 @@ int nmr_render_resolution(const NmrRender* render, unsigned* width,
 // application's callbacks and has no file to write.
 int nmr_render_write(NmrRender* render);
 
+// The rectangle of pixels that changed since the last delta snapshot,
+// and those pixels.
+//
+// `snapshotRenderBuffer` hands over the whole frame however little of
+// it moved. This is what lets a driver send only what is new, which
+// matters for a large frame or one crossing a network.
+//
+// **It is not a drop-in.** `RenderContext::snapshotDelta` does "no
+// resize, no extrapolation and no untiling", and its buffer is *not
+// normalized by weight* -- so the tiling has to be undone and each
+// pixel divided by its own sample weight before it means anything. An
+// unnormalised buffer is not obviously wrong; it is just darker.
+//
+// `x`, `y`, `width` and `height` receive the changed rectangle, and
+// `pixels` receives `width * height * 4` floats of it, row major. Pass
+// `capacity` as the length of `pixels`; when it is too small the
+// rectangle is still written and `NMR_BAD_ARGUMENT` returned, so a
+// caller can size a buffer and ask again.
+//
+// A frame with nothing new answers `NMR_OK` with a zero-sized
+// rectangle.
+int nmr_render_snapshot_delta(NmrRender* render, float* pixels,
+                              size_t capacity, unsigned* x, unsigned* y,
+                              unsigned* width, unsigned* height);
+
 // Copy the current frame into `pixels`, which must hold
 // `width * height * 4` floats: MoonRay's render buffer is RGBA float
 // per pixel. Returns `NMR_BAD_ARGUMENT` if it is shorter.

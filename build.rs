@@ -100,6 +100,10 @@ fn main() {
         ] {
             println!("cargo::rustc-link-lib=dylib={library}");
         }
+        // `fb_util`'s `untile` is a header template whose parallel
+        // path calls into TBB, so a consumer instantiating it links
+        // TBB itself rather than picking it up transitively.
+        println!("cargo::rustc-link-lib=dylib=tbb");
         println!("cargo::rustc-link-arg=-Wl,-rpath,{moonray}/lib");
     }
 }

@@ -14,12 +14,14 @@
 //!
 //! # What the application sees
 //!
-//! `open` once, then a `write` per snapshot covering the whole frame,
-//! then `finish`. Buckets covering the frame rather than tiles is
-//! deliberate: MoonRay renders in tile order and `snapshotRenderBuffer`
-//! untiles for us, so the rectangle that is actually *new* is not
-//! something this can name without `snapshotDelta`'s `ActivePixels`.
-//! Sending the frame is honest; naming a sub-rectangle would not be.
+//! `open` once, then a `write` per snapshot naming **the rectangle
+//! that changed**, then `finish`. The first covers the whole frame,
+//! since everything is new; later ones name only what the renderer
+//! refined, which is what a driver over a network wants.
+//!
+//! That comes from `snapshotDelta` and its `ActivePixels`, not from
+//! `snapshotRenderBuffer`, which hands over the whole frame however
+//! little of it moved and cannot say which part is new.
 //!
 //! # Stopping
 //!
@@ -101,25 +103,33 @@ pub fn stream(
         // snapshot before the coarse passes is a buffer of zeroes, and
         // an application cannot tell that from a black scene.
         if complete || render.coarse_passes_complete() {
-            let (_, _, pixels) = render.snapshot()?;
+            // Only what changed. The first one covers the frame, since
+            // everything is new; later ones name the rectangle the
+            // renderer actually refined, which is what a driver over a
+            // network wants and what `snapshotRenderBuffer` cannot say.
+            if let Some(delta) = render.snapshot_delta()? {
+                let (x, y) = (delta.x as usize, delta.y as usize);
+                let (w, h) = (delta.width as usize, delta.height as usize);
 
-            // SAFETY: as `open`; the slice is exactly the frame.
-            let answer = unsafe {
-                callbacks.write(
-                    name,
-                    width,
-                    height,
-                    0..width,
-                    0..height,
-                    &format,
-                    &pixels,
-                )
-            };
-            delivered = true;
+                // SAFETY: as `open`; the slice is exactly the
+                // rectangle, which `write` checks before handing it on.
+                let answer = unsafe {
+                    callbacks.write(
+                        name,
+                        width,
+                        height,
+                        x..x + w,
+                        y..y + h,
+                        &format,
+                        &delta.pixels,
+                    )
+                };
+                delivered = true;
 
-            if answer == Error::Stop {
-                outcome = Stopped::ByCallback;
-                break;
+                if answer == Error::Stop {
+                    outcome = Stopped::ByCallback;
+                    break;
+                }
             }
         }
 
@@ -137,6 +147,9 @@ pub fn stream(
         std::thread::sleep(POLL);
     }
 
+    // A frame that finished before the first poll, or one nothing
+    // changed in, still owes the driver a picture. The whole frame,
+    // since there is no delta to name.
     if !delivered {
         let (_, _, pixels) = render.snapshot()?;
         // SAFETY: as above.
