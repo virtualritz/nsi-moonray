@@ -5,8 +5,11 @@ integrated OSL into a MoonRay backend by hand
 (`specs/003-osl/research.md`, `dso/osl/`, `src/osl.rs`), so the shape
 below is what that work kept wanting and not having.
 
-Nothing here is built. It is a proposal with the reasoning attached,
-because the reasoning is the part worth arguing with.
+One of the three pieces is already built —
+[`oslquery-petite`](https://github.com/virtualritz/oslquery-petite) —
+and this is written around it. The other two are proposals with the
+reasoning attached, because the reasoning is the part worth arguing
+with.
 
 ## What it is for
 
@@ -16,8 +19,12 @@ itself:
 
 1. **Reading `.oso` without linking OSL.** A scene converter, a
    validator, a DCC exporter or an asset pipeline needs to know a
-   shader's parameters, types and defaults. Today that means linking
-   `liboslquery`, which drags in LLVM.
+   shader's parameters, types and defaults.
+   **[`oslquery-petite`](https://github.com/virtualritz/oslquery-petite)
+   already does this** — a pure-Rust `.oso` parser with no C++
+   dependencies, plus `oslq`, an `oslinfo` equivalent. So this one is
+   solved, and the rest is written around it rather than proposing it
+   again.
 2. **Describing a shader network.** OSL's own group-specification
    string is the only portable form, and every renderer re-derives how
    to build one. Getting it wrong is quiet: an integral float that
@@ -28,80 +35,28 @@ itself:
    `add`/`mul`/component and the flattening is the same everywhere;
    the lobe vocabulary is not.
 
-(1) and (2) need no OSL at all. (3) does, and should be a separate
-crate.
+(2) needs no OSL at all, which is the interesting part. (3) does, and
+should be a separate crate.
 
 ## Shape
 
-Four crates, so a consumer takes only what it needs. Names are
-placeholders.
-
 ```
-osl-oso        parse .oso            no deps beyond std
-osl-group      build a group spec    depends on osl-oso (optional)
-osl-closure    closure tree → lobes  needs liboslexec
-osl-sys        raw bindings          needs liboslexec
+oslquery-petite   parse .oso            EXISTS, pure Rust
+osl-group         build a group spec    depends on oslquery-petite (optional)
+osl-closure       closure tree → lobes  needs liboslexec
 ```
 
-`osl-intermediate` is then a facade re-exporting `osl-oso` and
+`osl-intermediate` is then a facade over `oslquery-petite` and
 `osl-group`, in the way `nsi-intermediate` is one thing with layers
-inside it. Someone who wants to *run* shaders adds `osl-closure`.
+inside it — or it is simply the name `osl-group` should have, if two
+crates is one too many. Someone who wants to *run* shaders adds
+`osl-closure`.
 
-**The split that matters is `osl-group` not needing LLVM.** Building a
-shader network is what an exporter, a converter and a scene format all
-do, and none of them wants a compiler.
-
-## `osl-oso` — reading a compiled shader
-
-`.oso` is a **text** format. The header is one line, then metadata,
-then `param`/`oparam` declarations, then code. The declarations are
-all a consumer needs:
-
-```
-surface dlPrincipled %meta{string,niceName,"Principled"}
-param	color	i_color	0.800000012 0
-param	float	roughness	0.300000012 0
-oparam	closure color	outColor	 %read{...} %write{...}
-```
-
-The current backend already greps these (`tools/probe/parameters.sh`)
-and it is enough to build a parameter table. A real parser gives:
-
-```rust
-pub struct Shader {
-    pub kind: ShaderKind,          // surface, displacement, volume, shader
-    pub name: String,
-    pub metadata: Vec<Metadata>,
-    pub parameters: Vec<Parameter>,
-}
-
-pub struct Parameter {
-    pub name: String,
-    pub kind: TypeDesc,            // float, color, point, matrix, string, arrays
-    pub output: bool,
-    pub default: Option<Value>,    // absent when computed rather than literal
-    pub metadata: Vec<Metadata>,   // `label`, `page`, `widget`, `min`, `max`
-    pub connectable: bool,
-}
-```
-
-**Why this earns its place:** a group spec that names a parameter the
-shader does not have fails at `ShaderGroupBegin`, and the message
-names the parameter but not who asked for it. With the declarations in
-hand, `osl-group` can refuse — or report — *before* OSL is involved,
-which is the difference between a diagnostic at export time and a
-render that does not start.
-
-Metadata matters more than it looks: `page`, `label`, `widget`, `min`
-and `max` are what a UI needs, and reading them is why `oslinfo`
-exists. A Rust crate that answers the same questions without a C++
-toolchain is immediately useful to tools that have no renderer at all.
-
-**Version tolerance.** `.oso` carries `OpenShadingLanguage 1.00` on its
-first line and has been stable for a decade, but a parser should keep
-unknown lines rather than reject them, and expose the raw text. The
-alternative — a crate that stops working on the next OSL release — is
-worse than no crate.
+**The split that matters is that `osl-group` needs no LLVM.** Building
+a shader network is what an exporter, a converter and a scene format
+all do, and none of them wants a compiler. `oslquery-petite` already
+holds that line; `osl-group` has to as well, which is why its
+dependency on it is optional rather than assumed.
 
 ## `osl-group` — describing a network
 
@@ -126,10 +81,33 @@ group.connect(texture, "outColor", surface, "i_color")?;
 let spec: String = group.finish();
 ```
 
-With `osl-oso` available, `set` and `connect` check the parameter
-exists and the types are compatible; without it they take the caller's
-word and only check syntax. Same API, two strengths — which is the
-"no lack of utility without" property.
+### Where `oslquery-petite` comes in
+
+With it, `set` and `connect` can check against the shader's real
+declarations before OSL is ever involved:
+
+- `OslQuery::open_with_searchpath` resolves the shader the same way
+  OSL will.
+- `param_by_name` says whether the parameter exists. A group spec that
+  names one the shader does not have fails at `ShaderGroupBegin`, and
+  the message names the parameter but not who asked for it. Catching
+  it here is the difference between a diagnostic at export time and a
+  render that does not start.
+- `TypedParameter` says what type it is, so `set(name, 0.25f32)` on a
+  `color` is a caught error rather than a parse failure later.
+- `output_params` and `Parameter::is_output` are what make `connect`
+  checkable: OSL refuses a connection from a parameter that is not an
+  output, and complains about "unknown" types when it does.
+
+Without it the same calls take the caller's word and check syntax
+only. Same API, two strengths — which is the "no lack of utility
+without" property.
+
+**One concrete note for whoever writes this.** Use `TypedParameter`'s
+`Display`, not `type_name()`, for the `param <typename>` field:
+`type_name()` answers `"int[]"` for a fixed array where the group
+syntax wants `int[4]`, and `Display` already produces the sized form.
+`type_name()` is right for a *message*, not for the spec.
 
 **Four things a correct emitter has to do**, every one of which the
 MoonRay backend got wrong first and fixed against OSL's own parser:
@@ -209,6 +187,11 @@ including its type mapping, and roughly half of it is the four
 correctness points above — which is exactly the half that should move
 into `osl-group`.
 
+`oslquery-petite` already interns with `ustr`, which is what
+`nsi-intermediate` uses for its handles — so a shader name crossing
+from one to the other is a pointer comparison rather than a `String`
+copy. Worth keeping in `osl-group` too.
+
 **Neither crate should depend on the other.** `nsi-intermediate` has
 no business knowing about OSL's serialization, and `osl-group` has no
 business knowing what an ɴsɪ handle is. The bridge is a function in
@@ -223,25 +206,38 @@ wanting OSL will otherwise write the same traversal.
 
 ## What to do first
 
-In order, because each one is useful alone:
+1. **`osl-group`**, with `oslquery-petite` optional. This is the piece
+   that does not exist, and the one every OSL-using renderer and
+   exporter writes badly by hand.
 
-1. **`osl-oso`.** No dependencies, a text format, and immediately
-   useful to anything that wants to know a shader's parameters. It is
-   also the easiest to test: OSL ships 178 compiled shaders in the
-   free 3Delight download, and `oslinfo` is the oracle — parse each
-   one and diff against `oslinfo`'s output. That is a real conformance
-   suite for an afternoon's work.
-2. **`osl-group`**, with `osl-oso` optional. Test it against OSL's own
-   parser through a tiny C shim, the way `src/osl.rs`'s
-   `what_this_emits_is_what_osl_parses` does — a test asserting what
-   the emitter was *expected* to write cannot catch a spec that is
-   well-formed to its author and refused by the parser. That test
-   failed on its first run here and was worth every line.
-3. **`osl-closure`**, once something needs to run shaders.
+   Test it **against OSL's own parser**, through a small C shim, the
+   way `src/osl.rs`'s `what_this_emits_is_what_osl_parses` does. A
+   test asserting what the emitter was *expected* to write cannot
+   catch a spec that is well-formed to its author and refused by the
+   parser. That test failed on its first run here and was worth every
+   line. `tools/osl-probe/probe.cc` in this repository is that shim,
+   at about 250 lines, and it already takes a spec file on the command
+   line.
+
+2. **`osl-closure`**, once something needs to run shaders.
+
+While you are there, `oslquery-petite` has a conformance suite
+available for nearly free: the free 3Delight download ships **178
+compiled shaders**, and `oslinfo` is the oracle — parse each one and
+diff `oslq`'s output against `oslinfo`'s. Its tests already point at
+four 3Delight shaders by absolute path; a fixture directory and a loop
+over all of them would turn that into real coverage of the format's
+corners — dynamic arrays, closures, `%meta{}` on outputs.
 
 ## Things to decide, not assumed here
 
-- **Whether `osl-sys` should exist separately** or each crate binds
+- **Whether `osl-group` should be a crate at all**, or a module of
+  `oslquery-petite` behind a feature. Reading and writing the two
+  halves of one format in one place is defensible, and it is one fewer
+  thing to name. Against it: `oslquery-petite` is a *query* crate, a
+  builder is not a query, and someone who only wants to build a
+  network should not need the parser.
+- **Whether `osl-sys` should exist separately** or `osl-closure` binds
   what it needs. OSL's C++ API has no C wrapper, so bindings mean a
   hand-written `extern "C"` shim regardless — `dso/osl/` in this
   repository is one, at about 200 lines for the shading half.
