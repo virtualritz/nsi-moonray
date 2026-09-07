@@ -12,6 +12,7 @@
 #include <OSL/rendererservices.h>
 
 #include <string>
+#include <vector>
 
 namespace moonray {
 namespace shading {
@@ -21,6 +22,8 @@ class Xform;
 } // namespace moonray
 
 namespace nsi_moonray {
+
+class Attributes;
 
 /// What the renderer knows about the point being shaded, for OSL to
 /// ask back.
@@ -36,6 +39,48 @@ struct ShadingPoint {
     /// prototype's object transform is per shading point, not per
     /// material.
     const moonray::shading::State* state;
+    /// The primitive attributes this material asked MoonRay for,
+    /// resolved once in `update()`.
+    ///
+    /// Resolved there rather than here because `TypedAttributeKey`'s
+    /// name lookup takes a lock, and `getattribute()` in a shader is
+    /// the inner loop.
+    const Attributes* attributes;
+};
+
+/// The primitive attributes one material's shader group reads.
+///
+/// Which ones is not guesswork: OSL's optimizer reports the name, the
+/// scope and the type of every `getattribute()` the group makes, and
+/// `Attributes::of` asks it. What MoonRay wants back is an
+/// `AttributeKey` per name, which is why they are resolved once rather
+/// than at every shading point.
+class Attributes {
+public:
+    /// The attributes a group reads, or nothing if it reads none.
+    static Attributes of(const OSL::ShaderGroupRef& group);
+
+    /// The MoonRay keys, for `Shader::mOptionalAttributes`.
+    const std::vector<int>& keys() const { return mKeys; }
+
+    /// Read one, into the memory OSL handed over.
+    ///
+    /// False when the name is not one this group declared, when the
+    /// geometry does not carry it, or when the types do not match --
+    /// in every case OSL leaves the shader's own default in place,
+    /// which is what `getattribute()` returning 0 means.
+    bool read(const moonray::shading::State& state, OSL::ustringhash name,
+              OSL::TypeDesc type, void* value) const;
+
+private:
+    struct Entry {
+        OSL::ustring name;
+        OSL::TypeDesc type;
+        int key;
+    };
+
+    std::vector<Entry> mEntries;
+    std::vector<int> mKeys;
 };
 
 

@@ -58,6 +58,10 @@ private:
     /// The scene's spaces, so `transform("object", P)` means what it
     /// says here as much as it does in a surface shader.
     std::unique_ptr<Xform> mXform;
+    /// The primitive attributes this group's shaders read. A
+    /// displacement reads them as much as a surface does -- more, in
+    /// practice, since that is where a height map lives.
+    Attributes mAttributes;
 
 RDL2_DSO_CLASS_END(OslDisplacement)
 
@@ -102,6 +106,10 @@ OslDisplacement::update()
         return;
     }
     shading.ShaderGroupEnd(*mGroup);
+
+    shading.optimize_group(mGroup.get(), nullptr, true);
+    mAttributes = Attributes::of(mGroup);
+    mOptionalAttributes = mAttributes.keys();
 }
 
 void
@@ -144,7 +152,7 @@ OslDisplacement::displace(const scene_rdl2::rdl2::Displacement* self,
     globals.flipHandedness = 0;
     globals.raytype = 1;
 
-    const ShadingPoint point { me->mXform.get(), &state };
+    const ShadingPoint point { me->mXform.get(), &state, &me->mAttributes };
     globals.renderstate = const_cast<ShadingPoint*>(&point);
     globals.object2common =
         reinterpret_cast<OSL::TransformationPtr>(&point);

@@ -2170,3 +2170,113 @@ fn an_nsi_st_reaches_osl() {
          {full} became {half}"
     );
 }
+
+/// **An ɴsɪ primitive variable reaches an OSL `getattribute()`.**
+///
+/// The whole chain again, and a longer one: an attribute on the ɴsɪ
+/// `mesh` that this backend has never heard of, expanded to
+/// face-varying, written as a MoonRay `UserData` in the mesh's
+/// `primitive_attributes`, requested from MoonRay because *OSL* said
+/// the group reads it, attached to the intersection, and read back
+/// through `RendererServices::get_attribute`.
+///
+/// The shader's own default is blue and the attribute is red, so what
+/// the frame shows says which of the two the shader got. A link
+/// missing anywhere in the chain renders the default, silently.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn an_nsi_primitive_variable_reaches_osl() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-primvar");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("attrshow.osl");
+    std::fs::write(
+        &source,
+        "surface attrshow()\n\
+         {\n    color tint = color(0, 0, 1);\n\
+         \x20   getattribute(\"mytint\", tint);\n\
+         \x20   Ci = tint * diffuse(N);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("attrshow.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    // Per vertex, so the expansion has to index it the way `P` is
+    // indexed rather than copy it across.
+    nsi.set_attribute(
+        "quad",
+        vec![arg(
+            "mytint",
+            Type::Color,
+            OwnedData::F32(vec![
+                0.9, 0.1, 0.05, 0.9, 0.1, 0.05, 0.9, 0.1, 0.05, 0.9, 0.1, 0.05,
+            ]),
+        )],
+    )
+    .unwrap();
+
+    nsi.create("attr", "attributes").unwrap();
+    nsi.create("attrshow", "shader").unwrap();
+    nsi.set_attribute(
+        "attrshow",
+        vec![arg(
+            "shaderfilename",
+            Type::String,
+            OwnedData::String(vec![
+                directory
+                    .join("attrshow.oso")
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_bytes(),
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.connect("attr", None, "quad", "geometryattributes")
+        .unwrap();
+    nsi.connect("attrshow", None, "attr", "surfaceshader")
+        .unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+    let centre = ((height / 2) * width + width / 2) * 4;
+    let (red, green, blue) =
+        (pixels[centre], pixels[centre + 1], pixels[centre + 2]);
+
+    assert!(
+        red > blue * 5.0,
+        "the shader should have read `mytint` off the geometry -- red, \
+         not the blue it defaults to: {red} {green} {blue}"
+    );
+    assert!(
+        red > green * 5.0,
+        "and red should dominate green, as `mytint` says: {red} {green} \
+         {blue}"
+    );
+}

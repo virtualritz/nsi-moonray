@@ -20,7 +20,9 @@ use crate::{
     name::Name,
     value::{Reference, Value},
 };
-use nsi_intermediate::{EdgeKind, IDENTITY, Node, OwnedData, Scene};
+use nsi_intermediate::{
+    EdgeKind, IDENTITY, Node, OwnedArgument, OwnedData, Scene,
+};
 use nsi_trait::{Flags, Type};
 use std::collections::HashSet;
 
@@ -108,6 +110,13 @@ const OSL_MATERIAL: &str = "Osl";
 /// dropped -- moving vertices is not something a stand-in surface can
 /// approximate.
 const OSL_DISPLACEMENT: &str = "OslDisplacement";
+
+/// The class one ɴsɪ primitive variable becomes.
+///
+/// MoonRay declares a geometry's attributes statically like everything
+/// else in rdl2, so an attribute nobody knew about in advance travels
+/// as a `UserData` object in the mesh's `primitive_attributes`.
+const USER_DATA: &str = "UserData";
 
 /// Every way MoonRay can see a piece of geometry.
 ///
@@ -314,13 +323,15 @@ pub fn flush_with(
                         // and skips the light otherwise. So the mesh is
                         // emitted, and left out of both the layer and
                         // the geometry set.
-                        objects.push(mesh(
+                        let (shape, data) = mesh(
                             scene,
                             handle,
                             prototypes.get(handle).copied(),
                             shutter,
                             &mut flushed,
-                        ));
+                        );
+                        objects.extend(data);
+                        objects.push(shape);
                         flushed.limitations.push(format!(
                             "{handle:?} is a {MESH_LIGHT}'s geometry and so \
                              is not in the render layer, which MoonRay \
@@ -334,13 +345,14 @@ pub fn flush_with(
                     continue;
                 }
 
-                let shape = mesh(
+                let (shape, data) = mesh(
                     scene,
                     handle,
                     prototypes.get(handle).copied(),
                     shutter,
                     &mut flushed,
                 );
+                objects.extend(data);
                 // A prototype does not reach `.root` and is not
                 // detached: its instancer is what places it.
                 let placed = prototypes.contains_key(handle);
@@ -1326,9 +1338,9 @@ fn mesh(
     prototype_of: Option<&str>,
     shutter: Option<[f64; 2]>,
     flushed: &mut Flushed,
-) -> Object {
+) -> (Object, Vec<Object>) {
     let Some(node) = scene.node(handle) else {
-        return Object::new(MESH, handle);
+        return (Object::new(MESH, handle), Vec::new());
     };
 
     let mut object = Object::new(MESH, handle);
@@ -1440,9 +1452,10 @@ fn mesh(
         object = object.set("orientation", Value::Int(1));
     }
 
-    object = primitive_variables(object, node, handle, flushed);
+    let mut data = Vec::new();
+    object = primitive_variables(object, node, handle, &mut data, flushed);
 
-    object
+    (object, data)
 }
 
 /// ɴsɪ's `st` and `N`, as MoonRay's `uv_list` and `normal_list`.
@@ -1460,6 +1473,7 @@ fn primitive_variables(
     mut object: Object,
     node: &Node,
     handle: &str,
+    data: &mut Vec<Object>,
     flushed: &mut Flushed,
 ) -> Object {
     let counts = match node.effective("nvertices").map(|arg| &arg.data) {
@@ -1505,7 +1519,127 @@ fn primitive_variables(
         );
     }
 
+    // Everything else the mesh carries, as `UserData` -- which is how
+    // an OSL shader's `getattribute("name", value)` is answered, and
+    // the only route MoonRay has for an attribute nobody declared in
+    // advance.
+    let mut references = Vec::new();
+    for (name, argument) in node.attributes() {
+        if STRUCTURE.contains(&name) || name.ends_with(".indices") {
+            continue;
+        }
+
+        let Some(user_data) =
+            user_data(node, name, argument, &mesh, handle, flushed)
+        else {
+            continue;
+        };
+        references.push(Value::Object(Reference::new(
+            USER_DATA,
+            user_data_name(handle, name),
+        )));
+        data.push(user_data);
+    }
+
+    if !references.is_empty() {
+        object = object.set("primitive_attributes", Value::Vector(references));
+    }
+
     object
+}
+
+/// The `mesh` attributes that describe the mesh rather than decorate
+/// it.
+///
+/// Everything else on the node is a primitive variable and crosses as
+/// one. Listed rather than inferred: an attribute this backend does
+/// not know is far more likely to be a shader's than to be a mesh
+/// attribute nobody implemented, and carrying it costs a `UserData` a
+/// shader may ignore -- while dropping it costs the look.
+const STRUCTURE: [&str; 15] = [
+    "P",
+    "N",
+    "st",
+    "nvertices",
+    "nholes",
+    "clockwisewinding",
+    "referencetime",
+    "quadraticmotion",
+    "outlinecreasethreshold",
+    "subdivision.scheme",
+    "subdivision.cornervertices",
+    "subdivision.cornersharpness",
+    "subdivision.creasevertices",
+    "subdivision.creasesharpness",
+    "subdivision.smoothcreasecorners",
+];
+
+/// A `UserData` object's rdl2 name.
+///
+/// The mesh's handle and the attribute's, which is unique because
+/// handles are and a mesh carries each attribute once.
+fn user_data_name(handle: &str, name: &str) -> String {
+    format!("{handle}/{name}")
+}
+
+/// One ɴsɪ primitive variable, as a `UserData`.
+///
+/// Face-varying, always: `expanded` has already put every
+/// interpolation into that one order, and a rate MoonRay has to guess
+/// at is a rate it can guess wrong.
+fn user_data(
+    node: &Node,
+    name: &str,
+    argument: &OwnedArgument,
+    mesh: &Mesh<'_>,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Option<Object> {
+    let (key, values, components): (&str, &str, usize) = match argument.type_tag
+    {
+        Type::Color => ("color_key", "color_values_0", 3),
+        Type::Point | Type::Vector | Type::Normal => {
+            ("vec3f_key", "vec3f_values_0", 3)
+        }
+        Type::F32 if argument.array_length == 2 => {
+            ("vec2f_key", "vec2f_values_0", 2)
+        }
+        Type::F32 => ("float_key", "float_values_0", 1),
+        _ => {
+            flushed.limitations.push(format!(
+                    "mesh {handle:?} carries {name:?}, whose ɴsɪ type has no                      MoonRay `UserData` counterpart; it was not carried"
+                ));
+            return None;
+        }
+    };
+
+    let expanded = expanded(node, name, components, mesh, handle, flushed)?;
+
+    let vector = Value::Vector(match components {
+        3 if argument.type_tag == Type::Color => expanded
+            .chunks_exact(3)
+            .map(|v| Value::Rgb([v[0], v[1], v[2]]))
+            .collect(),
+        3 => expanded
+            .chunks_exact(3)
+            .map(|v| Value::Vec3f([v[0], v[1], v[2]]))
+            .collect(),
+        2 => expanded
+            .chunks_exact(2)
+            .map(|v| Value::Vec2f([v[0], v[1]]))
+            .collect(),
+        _ => expanded.into_iter().map(Value::Float).collect(),
+    });
+
+    Some(
+        Object::new(USER_DATA, user_data_name(handle, name))
+            .set(key, Value::String(name.to_owned()))
+            .set(values, vector)
+            // 6 is "face varying" in `UserData`'s own `rate` enum. Its
+            // default, "auto", guesses from the count -- and on a mesh
+            // where the counts coincide it can guess wrong.
+            .set("rate", Value::Int(6)),
+    )
 }
 
 /// What an ɴsɪ mesh attribute's interpolation is measured against.
@@ -2639,6 +2773,78 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(normals.matches("Vec3(").count(), 8, "{rdla}");
         assert_eq!(normals.matches("Vec3(0, 1, 0)").count(), 4, "{normals}");
+    }
+
+    /// **An attribute nobody declared crosses as `UserData`.**
+    ///
+    /// rdl2 declares a geometry's attributes statically, so this is the
+    /// only route MoonRay has for one it could not know about -- and it
+    /// is what answers an OSL shader's `getattribute()`.
+    #[test]
+    fn an_unknown_mesh_attribute_becomes_user_data() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![arg(
+                    "mytint",
+                    Type::Color,
+                    OwnedData::F32(vec![
+                        1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, //
+                        0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("UserData(\"mesh/mytint\") {"), "{rdla}");
+        assert!(rdla.contains("[\"color_key\"] = \"mytint\""), "{rdla}");
+        // Face-varying, always: `rate` 6. "Auto" would guess from the
+        // count, and on a mesh where the counts coincide it can guess
+        // wrong.
+        assert!(rdla.contains("[\"rate\"] = 6,"), "{rdla}");
+        // Expanded to eight, by `P.indices`, like everything else.
+        let values = rdla
+            .split("[\"color_values_0\"] = ")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or_default();
+        assert_eq!(values.matches("Rgb(").count(), 8, "{rdla}");
+        // And the mesh points at it.
+        assert!(
+            rdla.contains(
+                "[\"primitive_attributes\"] = { UserData(\"mesh/mytint\")}"
+            ),
+            "{rdla}"
+        );
+    }
+
+    /// A mesh attribute this backend reads itself is not *also* a
+    /// primitive variable: `st` is `uv_list`, and a `UserData` beside
+    /// it would be the same values twice under two names.
+    #[test]
+    fn a_structural_attribute_is_not_user_data() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![arg(
+                    "st",
+                    Type::F32,
+                    OwnedData::F32(vec![
+                        0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0.5, 1.0, 1.0,
+                        1.0,
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("uv_list"), "{rdla}");
+        assert!(!rdla.contains("UserData"), "{rdla}");
     }
 
     fn triangle() -> Scene {

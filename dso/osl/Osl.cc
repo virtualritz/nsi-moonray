@@ -475,6 +475,9 @@ private:
     /// held: it is what makes `transform("object", P)` in a shader
     /// mean what it says instead of quietly being an identity.
     std::unique_ptr<Xform> mXform;
+    /// The primitive attributes this group's shaders read, resolved
+    /// once. See `Attributes`.
+    Attributes mAttributes;
 
 RDL2_DSO_CLASS_END(Osl)
 
@@ -524,6 +527,14 @@ Osl::update()
     }
     shading.ShaderGroupEnd(*mGroup);
 
+    // What the shaders read off the geometry, and what MoonRay has to
+    // be asked for so an intersection carries it. *Optional* rather
+    // than required: a mesh without the attribute should render with
+    // the shader's own default, which is what OSL does when
+    // `getattribute` returns 0.
+    mAttributes = Attributes::of(mGroup);
+    mOptionalAttributes = mAttributes.keys();
+
     // **Presence costs a second run of the network**, so it is only
     // installed for a group that can actually produce one. OSL knows:
     // `closures_needed` is what the optimizer found the group may
@@ -567,7 +578,7 @@ namespace {
 
 const OSL::ClosureColor*
 execute(const OSL::ShaderGroupRef& group, const Xform* xform,
-        const State& state)
+        const Attributes& attributes, const State& state)
 {
     OSL::ShadingSystem& shading = shading_system();
 
@@ -607,7 +618,7 @@ execute(const OSL::ShaderGroupRef& group, const Xform* xform,
     // needed: the `Xform` carries the scene's spaces, and the `State`
     // is what resolves *object* space, which for an instanced
     // prototype is per shading point rather than per material.
-    const ShadingPoint point { xform, &state };
+    const ShadingPoint point { xform, &state, &attributes };
     globals.renderstate = const_cast<ShadingPoint*>(&point);
     // OSL reaches object and shader space through these, and both
     // land on the same resolution as the named spaces.
@@ -634,7 +645,9 @@ Osl::shade(const scene_rdl2::rdl2::Material* self,
     }
 
     Walk walk { bsdfBuilder };
-    walk_closure(walk, execute(me->mGroup, me->mXform.get(), state),
+    walk_closure(walk,
+                 execute(me->mGroup, me->mXform.get(), me->mAttributes,
+                         state),
                  scene_rdl2::math::sWhite);
 
     if (!isBlack(walk.emission)) {
@@ -656,7 +669,8 @@ Osl::presence(const scene_rdl2::rdl2::Material* self,
     // installed only for a group OSL says may emit `transparent` --
     // see `update`.
     const scene_rdl2::math::Color through =
-        transparency(execute(me->mGroup, me->mXform.get(), state),
+        transparency(execute(me->mGroup, me->mXform.get(), me->mAttributes,
+                             state),
                      scene_rdl2::math::sWhite);
 
     // `transparent()` is the fraction that passes straight through, so

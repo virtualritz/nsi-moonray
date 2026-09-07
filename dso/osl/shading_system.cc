@@ -4,6 +4,7 @@
 // instantiates it. Whichever comes second loses, with
 // "specialization of 'std::atomic<float>' after instantiation" and a
 // backtrace that points at neither library's own code.
+#include <moonray/rendering/shading/AttributeKey.h>
 #include <moonray/rendering/shading/State.h>
 #include <moonray/rendering/shading/Xform.h>
 #include <moonray/rendering/shading/ispc/Xform_ispc_stubs.h>
@@ -43,6 +44,31 @@ public:
     explicit Services(OIIO::TextureSystem* texture)
         : OSL::RendererServices(texture)
     {
+    }
+
+    /// A `getattribute()` in a shader, answered from the shading
+    /// point's primitive attributes.
+    ///
+    /// The unscoped form only. OSL's scoped `getattribute("scope",
+    /// "name", val)` names a renderer concept -- an object's userdata,
+    /// a global setting -- and ɴsɪ has no vocabulary for one, so
+    /// answering it would be inventing a mapping. Unanswered means the
+    /// shader keeps its own default, which is what `getattribute`
+    /// returning 0 tells it.
+    bool get_attribute(OSL::ShaderGlobals* globals, bool /*derivatives*/,
+                       OSL::ustringhash object, OSL::TypeDesc type,
+                       OSL::ustringhash name, void* value) override
+    {
+        if (!object.empty() || globals == nullptr) {
+            return false;
+        }
+        const auto* point =
+            static_cast<const ShadingPoint*>(globals->renderstate);
+        if (point == nullptr || point->state == nullptr
+            || point->attributes == nullptr) {
+            return false;
+        }
+        return point->attributes->read(*point->state, name, type, value);
     }
 
     /// A named space, as the matrix that takes it to OSL's *common*
@@ -383,6 +409,153 @@ OSL::ShadingSystem&
 shading_system()
 {
     return system().shading;
+}
+
+namespace {
+
+/// One OSL type, as the MoonRay primitive-attribute key for a name.
+///
+/// -1 for a type MoonRay has no primitive attribute for. The list is
+/// MoonRay's, not OSL's: `AttributeKey` is templated on the storage
+/// type, and there are only so many.
+int
+key_of(const std::string& name, OSL::TypeDesc type)
+{
+    using namespace moonray::shading;
+
+    if (type == OSL::TypeDesc::TypeFloat) {
+        return TypedAttributeKey<float>(name);
+    }
+    if (type == OSL::TypeDesc::TypeInt) {
+        return TypedAttributeKey<int>(name);
+    }
+    if (type == OSL::TypeDesc::TypeColor) {
+        return TypedAttributeKey<scene_rdl2::math::Color>(name);
+    }
+    if (type == OSL::TypeDesc::TypePoint || type == OSL::TypeDesc::TypeVector
+        || type == OSL::TypeDesc::TypeNormal) {
+        return TypedAttributeKey<scene_rdl2::math::Vec3f>(name);
+    }
+    // OSL has no two-float type of its own; `float[2]` is how a shader
+    // spells a UV set other than `st`.
+    if (type.basetype == OSL::TypeDesc::FLOAT && type.aggregate == 1
+        && type.arraylen == 2) {
+        return TypedAttributeKey<scene_rdl2::math::Vec2f>(name);
+    }
+    if (type == OSL::TypeDesc::TypeString) {
+        return TypedAttributeKey<std::string>(name);
+    }
+    return -1;
+}
+
+} // namespace
+
+Attributes
+Attributes::of(const OSL::ShaderGroupRef& group)
+{
+    Attributes attributes;
+    if (!group) {
+        return attributes;
+    }
+
+    OSL::ShadingSystem& shading = shading_system();
+
+    int count = 0;
+    OSL::ustring* names = nullptr;
+    OSL::ustring* scopes = nullptr;
+    OSL::TypeDesc* types = nullptr;
+    if (!shading.getattribute(group.get(), "num_attributes_needed",
+                              OSL::TypeDesc::INT, &count)
+        || !shading.getattribute(group.get(), "attributes_needed",
+                                 OSL::TypeDesc::PTR, &names)
+        || !shading.getattribute(group.get(), "attribute_scopes",
+                                 OSL::TypeDesc::PTR, &scopes)
+        || !shading.getattribute(group.get(), "attribute_types",
+                                 OSL::TypeDesc::PTR, &types)
+        || names == nullptr || scopes == nullptr || types == nullptr) {
+        return attributes;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        // Scoped queries name a renderer concept ɴsɪ has no vocabulary
+        // for; see `Services::get_attribute`.
+        if (!scopes[i].empty()) {
+            continue;
+        }
+        const int key = key_of(names[i].string(), types[i]);
+        if (key < 0) {
+            continue;
+        }
+        attributes.mEntries.push_back({ names[i], types[i], key });
+        attributes.mKeys.push_back(key);
+    }
+
+    return attributes;
+}
+
+bool
+Attributes::read(const moonray::shading::State& state, OSL::ustringhash name,
+                 OSL::TypeDesc type, void* value) const
+{
+    using namespace moonray::shading;
+
+    for (const Entry& entry : mEntries) {
+        if (OSL::ustringhash(entry.name) != name || entry.type != type) {
+            continue;
+        }
+        const AttributeKey key(entry.key);
+        if (!state.isProvided(key)) {
+            return false;
+        }
+
+        if (type == OSL::TypeDesc::TypeFloat) {
+            *static_cast<float*>(value) =
+                state.getAttribute(TypedAttributeKey<float>(key));
+            return true;
+        }
+        if (type == OSL::TypeDesc::TypeInt) {
+            *static_cast<int*>(value) =
+                state.getAttribute(TypedAttributeKey<int>(key));
+            return true;
+        }
+        if (type == OSL::TypeDesc::TypeColor) {
+            const scene_rdl2::math::Color& colour = state.getAttribute(
+                TypedAttributeKey<scene_rdl2::math::Color>(key));
+            auto* out = static_cast<float*>(value);
+            out[0] = colour.r;
+            out[1] = colour.g;
+            out[2] = colour.b;
+            return true;
+        }
+        if (type == OSL::TypeDesc::TypePoint
+            || type == OSL::TypeDesc::TypeVector
+            || type == OSL::TypeDesc::TypeNormal) {
+            const scene_rdl2::math::Vec3f& vector = state.getAttribute(
+                TypedAttributeKey<scene_rdl2::math::Vec3f>(key));
+            auto* out = static_cast<float*>(value);
+            out[0] = vector.x;
+            out[1] = vector.y;
+            out[2] = vector.z;
+            return true;
+        }
+        if (type.basetype == OSL::TypeDesc::FLOAT && type.aggregate == 1
+            && type.arraylen == 2) {
+            const scene_rdl2::math::Vec2f& uv = state.getAttribute(
+                TypedAttributeKey<scene_rdl2::math::Vec2f>(key));
+            auto* out = static_cast<float*>(value);
+            out[0] = uv.x;
+            out[1] = uv.y;
+            return true;
+        }
+        if (type == OSL::TypeDesc::TypeString) {
+            *static_cast<OSL::ustring*>(value) = OSL::ustring(
+                state.getAttribute(TypedAttributeKey<std::string>(key)));
+            return true;
+        }
+        return false;
+    }
+
+    return false;
 }
 
 void

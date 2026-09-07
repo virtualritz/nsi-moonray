@@ -152,6 +152,31 @@ emitter meant to *light* the scene becomes a `MeshLight` in the flush
 instead, forced visible in camera so it is seen as well as sampled.
 `specs/003-osl/research.md` O2 and O3.
 
+## Primitive variables
+
+`getattribute("name", value)` in a shader reads a MoonRay primitive
+attribute — which is how an ɴsɪ mesh attribute nobody declared in
+advance arrives, as a `UserData` in the mesh's
+`primitive_attributes`.
+
+**Which ones to ask MoonRay for is not guesswork.** MoonRay attaches a
+primitive attribute to an intersection only if some shader asked for
+it, and OSL's optimizer already reports the name, scope and type of
+every `getattribute()` the group makes — `attributes_needed`,
+`attribute_scopes`, `attribute_types`. So `update()` asks OSL, resolves
+each to a MoonRay `AttributeKey` once, and puts them in
+`mOptionalAttributes`. Optional rather than required: a mesh without
+the attribute renders with the shader's own default, which is what
+`getattribute` returning 0 means.
+
+Only the unscoped form. OSL's scoped `getattribute("scope", "name",
+value)` names a renderer concept — an object's userdata, a global
+setting — and ɴsɪ has no vocabulary for one, so answering it would be
+inventing a mapping.
+
+`st` and `N` do not come this way: they have dedicated rdl2 attributes,
+`uv_list` and `normal_list`, and reach OSL as `u`, `v` and `N`.
+
 ## Labels
 
 MoonRay's material AOVs and LPEs key off an integer per lobe, indexing
