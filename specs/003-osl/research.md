@@ -534,6 +534,107 @@ for a quad is also 0..1. So a test asserting that `u` varies across the
 quad passes with `st` carried nowhere at all -- which is what the first
 draft of that test did. It scales instead.
 
+### O14: A shipped 3Delight shader is the test that finds things
+
+ɴsɪ is 3Delight's interface, so `dlPrincipled.oso` -- a compiled
+artefact of another renderer's shader library, built by a different
+`oslc`, with no source here -- is the strongest test of this path
+there is. Nothing about it can be adjusted to make it pass.
+
+It found three bugs in a row, each hidden behind the last:
+
+1. **A segfault inside OSL's own code generator**, before a pixel. The
+   `subsurface` registration declared five formal parameters where
+   `stdosl.h` declares four -- there is no `N` among them; 3Delight
+   passes the normal as the keyword `"N"`. `llvm_gen_keyword_fill`
+   computes where the keywords start from `nformal`, so the extra
+   formal shifted every one by a slot, and OSL called `strcmp` on a
+   *value* symbol it had taken for a key.
+
+2. **Black**, because every shader 3Delight ships builds its `Ci` out
+   of closures from its own `3delightosl.h`: `layer_closures`,
+   `outputvariable`, `outputconstant`, `occlusion`. A renderer that
+   does not register them gets an unsupported-closure error per call
+   and a `Ci` with nothing in it.
+
+3. **A white metal.** 3Delight passes a conductor's complex index of
+   refraction as the `realeta` and `complexeta` keywords on
+   `microfacet` rather than by tinting the closure weight -- its
+   documentation says the pair "replaces the eta parameter". Dropped,
+   a gold rendered `1.005, 1.005, 1.005`; carried, and routed to
+   MoonRay's conductor constructor, `0.955, 0.754, 0.352`. The
+   integrator's occasional NaN went with it: the artist-friendly
+   constructor was being handed a weight that was never a reflectivity.
+
+`gamma`, `thinfilmthickness`, `thinfilmeta` and `mediumeta` are not
+carried. OSL warns for each by name and shades on.
+
+### O15: OSL's `+` is a sum; MoonRay's default is a layering
+
+`Ci = a + b` says the two closures add. `BsdfBuilder` layers by the
+order lobes arrive, and `BSDFBUILDER_PHYSICAL` -- which its own header
+recommends for "a typical energy-conserving material" -- makes the
+first attenuate the second.
+
+So every shader written as `diffuse() + microfacet()` lost whichever
+term came second, silently, and *which* one depended on the order the
+shader author happened to write. Measured on a two-lobe shader with an
+AOV per lobe: one channel was black, and swapping the two terms in the
+shader swapped which.
+
+An `add` node walks its children `BSDFBUILDER_ADDITIVE` now, and the
+attenuation flags are turned on only by the closures that mean
+layering: MaterialX's `layer(top, base)` and 3Delight's
+`layer_closures(top, bottom, mask)`. They compose, so a layer inside a
+layer still layers. The two shader orderings now agree to within noise.
+
+### O16: A lobe label reaches an AOV, and the material must stay unlabelled
+
+The AOV question is closed, and the chain is measured end to end: an
+OSL `"label"` keyword -> `label_index` against the vocabulary
+`attributes.cc` declares as the scene class's `labels` -> MoonRay
+reading that array at render prep -> a light-path expression naming it
+-> a channel in the file. Checked by making `aov_label` return zero and
+watching the channel go black.
+
+Three things had to line up, each measured:
+
+- **The right kind of AOV.** MoonRay's *material* AOVs name a lobe's
+  properties -- `'diffuse'.albedo` is the albedo, not the
+  contribution. What an output layer with `variablesource "shader"`
+  asks for is the radiance, which is a *light* AOV: `C<..'diffuse'>L`.
+- **The material must carry no rdl2 `label`.** `RenderContext.cc`
+  registers a lobe label as `<material label>.<lobe>` when the material
+  has one and as the bare lobe name when it does not. Bare is what lets
+  one output layer name a lobe across every shader in the scene, which
+  is what a shader AOV means.
+- **`<..'x'>` wildcards both the event and the scattering type**, so
+  one expression covers a lobe however it was hit.
+
+3Delight's shaders label nothing directly -- they wrap each part of the
+surface in `outputvariable("reflection", ...)` -- so the wrapper sets
+the label for the closures inside it, and `reflection` becomes
+`specular`, `incandescence` becomes `emission`. That table lives twice,
+in `dso/osl/Osl.cc` and `src/flush.rs`, in two languages; they are one
+contract and a disagreement renders the AOV black rather than failing.
+
+### O17: `lockgeom` stays on, which is 3Delight's own position
+
+3Delight dropped `lockgeom` outright. Its argument: symbolic linking of
+geometry data to shader parameters by name is ill-defined -- what
+happens when two parameters in a network share a name? -- and an
+explicit connection to a node that calls `getattribute()` says the same
+thing unambiguously. Any parameter with no incoming connection is
+folded.
+
+That is exactly the shape here, arrived at separately: `lockgeom 1` on
+the shading system, so OSL may bake parameters that the group spec
+supplies, and `RendererServices::get_attribute` answering
+`getattribute()` from MoonRay's primitive attributes. The drawback
+3Delight names -- no default when the primitive variable is absent --
+does not apply, because `get_attribute` returning false leaves the
+shader's own default in place.
+
 ## Open questions
 
 - **Volumes.** OSL's `anisotropic_vdf` and `medium_vdf` against
@@ -541,12 +642,14 @@ draft of that test did. It scales instead.
   -- extinction, albedo, emission, anisotropy -- against OSL's one
   execution. And ɴsɪ volume geometry, which this backend does not carry
   at all yet.
-- **AOVs and LPEs.** MoonRay's lobe labels are how light-path
-  expressions work, and OSL closures carry their own AOV names. The
-  material declares the vocabulary and sets the index per lobe --
-  `RenderContext.cc` reads `labels` off the scene class and matches it
-  against the AOV schema, which is the mechanism -- but nothing in this
-  backend yet turns an ɴsɪ `outputlayer` into a material AOV, so the
-  plumbing is untested end to end.
+- **AOV forwarding.** 3Delight has a per-object attribute that puts a
+  diffuse surface seen in a mirror into the *diffuse* AOV rather than
+  the reflection one. MoonRay's LPEs have no equivalent, and inventing
+  one would mean rewriting the expression per object.
+- **3Delight's hair closure.** `hair(dPdv, eta, absorption,
+  sub-components)` with `hair_component("R" | "TT" | "TRT" | "TRRT",
+  ...)` inside it -- a Marschner model broken into lobes. MoonRay has
+  hair BSDFs of its own; whether the two decompose the same way is the
+  question.
 - **Scoped `getattribute`.** Answered for the unscoped form only. OSL's
   scoped form names a renderer concept ɴsɪ has no vocabulary for.
