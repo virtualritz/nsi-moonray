@@ -1,0 +1,7 @@
+SceneVariables {
+}
+
+ExtensiveObject("/oracle/signed_zero") {
+    ["float"] = -0,
+    ["double"] = -0,
+}

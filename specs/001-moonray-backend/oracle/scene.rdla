@@ -1,0 +1,31 @@
+SceneVariables {
+    ["layer"] = Layer("/oracle/layer"),
+    ["image_width"] = 320,
+    ["image_height"] = 240,
+}
+
+FakeTeapot("/oracle/geometry") {
+    ["node_xform"] = Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1),
+}
+
+GeometrySet("/oracle/geometries") {
+    FakeTeapot("/oracle/geometry"),
+}
+
+Layer("/oracle/layer") {
+    {FakeTeapot("/oracle/geometry"), "", FakeMaterial("/oracle/material"), LightSet("/oracle/lights"), undef(), undef(), undef(), undef(), undef()},
+}
+
+FakeMaterial("/oracle/material") {
+}
+
+FakeLight("/oracle/light") {
+}
+
+LightSet("/oracle/lights") {
+    FakeLight("/oracle/light"),
+}
+
+RenderOutput("/oracle/beauty") {
+    ["file_name"] = "beauty.exr",
+}

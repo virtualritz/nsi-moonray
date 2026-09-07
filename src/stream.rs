@@ -1,0 +1,180 @@
+//! The snapshot loop: a converging render reaching an application's
+//! closures.
+//!
+//! This is where the two halves finally meet. MoonRay renders
+//! progressively and expects to be **pulled** --
+//! `snapshotRenderBuffer`, paced by `areCoarsePassesComplete` and
+//! `isFrameComplete`. ɴsɪ **pushes**, to an `outputdriver`'s
+//! `callback.open` / `callback.write` / `callback.finish`. Neither side
+//! needed changing; the adapter is this loop.
+//!
+//! It could not exist while the renderer was a spawned process,
+//! because a separate process has no `RenderContext` to snapshot. That
+//! is the whole reason `002` put linking first.
+//!
+//! # What the application sees
+//!
+//! `open` once, then a `write` per snapshot naming **the rectangle
+//! that changed**, then `finish`. The first covers the whole frame,
+//! since everything is new; later ones name only what the renderer
+//! refined, which is what a driver over a network wants.
+//!
+//! That comes from `snapshotDelta` and its `ActivePixels`, not from
+//! `snapshotRenderBuffer`, which hands over the whole frame however
+//! little of it moved and cannot say which part is new.
+//!
+//! # Stopping
+//!
+//! A closure answering [`Error::Stop`] stops the render. That is what
+//! it is for -- a viewport closing, a user cancelling -- and ignoring
+//! it, as the file-delivery stopgap had to, means an application cannot
+//! get its renderer back.
+
+use crate::{
+    display::{Callbacks, pixel_format},
+    rdl2::Render,
+};
+use nsi_ffi_wrap::output::Error;
+use std::time::{Duration, Instant};
+
+/// How long to wait between snapshots.
+///
+/// Not a frame rate: it is how often the loop asks whether there is
+/// something new. Too short and the snapshot copy costs more than the
+/// render; too long and the viewport lags behind the samples.
+const POLL: Duration = Duration::from_millis(50);
+
+/// What stopped the loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// The frame finished.
+    Complete,
+    /// A closure answered `Error::Stop`.
+    ByCallback,
+    /// The deadline passed with the frame still converging.
+    TimedOut,
+}
+
+/// Render, delivering each snapshot to the callbacks as it converges.
+///
+/// Blocks until the frame completes, a callback stops it, or `deadline`
+/// passes.
+///
+/// **The frame is left running.** Stopping it is the caller's, because
+/// `stopFrame` resets MoonRay's statistics and a caller that wants to
+/// know what the frame cost has to read them first. Dropping the
+/// [`Render`] stops the frame safely, so nothing leaks either way.
+///
+/// # Errors
+///
+/// Only for a snapshot that cannot be taken. A callback answering with
+/// an error is *reported through the return value*, not as a failure:
+/// ɴsɪ always returns an image, and a driver refusing one bucket is not
+/// grounds for refusing the render.
+pub fn stream(
+    render: &Render,
+    callbacks: &Callbacks,
+    name: &str,
+    deadline: Option<Duration>,
+) -> Result<Stopped, crate::rdl2::Error> {
+    let (width, height) = render.resolution()?;
+    let (width, height) = (width as usize, height as usize);
+
+    // MoonRay's render buffer is `PixelBuffer<Vec4f>` -- RGBA float per
+    // pixel -- and the names go across lowercased, which is the
+    // spelling the channel heuristics expect.
+    let format = pixel_format(&["r", "g", "b", "a"]);
+
+    // SAFETY: the caller owns the closures and keeps them alive across
+    // the render; see `display`'s "one constraint".
+    unsafe { callbacks.open(name, width, height, &format) };
+
+    let started = Instant::now();
+    let mut outcome = Stopped::Complete;
+    // Deliver at least one frame even for a render that completes
+    // before the first poll -- otherwise a fast scene reaches `finish`
+    // having shown nothing.
+    let mut delivered = false;
+
+    loop {
+        let complete = render.frame_complete();
+
+        // Nothing worth sending until there is something to see. A
+        // snapshot before the coarse passes is a buffer of zeroes, and
+        // an application cannot tell that from a black scene.
+        if complete || render.coarse_passes_complete() {
+            // Only what changed. The first one covers the frame, since
+            // everything is new; later ones name the rectangle the
+            // renderer actually refined, which is what a driver over a
+            // network wants and what `snapshotRenderBuffer` cannot say.
+            if let Some(delta) = render.snapshot_delta()? {
+                let (x, y) = (delta.x as usize, delta.y as usize);
+                let (w, h) = (delta.width as usize, delta.height as usize);
+
+                // SAFETY: as `open`; the slice is exactly the
+                // rectangle, which `write` checks before handing it on.
+                let answer = unsafe {
+                    callbacks.write(
+                        name,
+                        width,
+                        height,
+                        x..x + w,
+                        y..y + h,
+                        &format,
+                        &delta.pixels,
+                    )
+                };
+                delivered = true;
+
+                if answer == Error::Stop {
+                    outcome = Stopped::ByCallback;
+                    break;
+                }
+            }
+        }
+
+        if complete {
+            break;
+        }
+
+        if let Some(deadline) = deadline
+            && started.elapsed() >= deadline
+        {
+            outcome = Stopped::TimedOut;
+            break;
+        }
+
+        std::thread::sleep(POLL);
+    }
+
+    // A frame that finished before the first poll, or one nothing
+    // changed in, still owes the driver a picture. The whole frame,
+    // since there is no delta to name.
+    if !delivered {
+        let (_, _, pixels) = render.snapshot()?;
+        // SAFETY: as above.
+        unsafe {
+            callbacks.write(
+                name,
+                width,
+                height,
+                0..width,
+                0..height,
+                &format,
+                &pixels,
+            )
+        };
+    }
+
+    // The frame is **not** stopped here. The caller owns its lifetime,
+    // and it matters: `RenderContext::stopFrame` calls
+    // `RenderStats::reset()`, so anything wanting to know what the
+    // frame cost has to read the counters first (`002` `research.md`
+    // F8). A loop that stopped the frame on the way out would make
+    // that impossible for every caller.
+
+    // SAFETY: as `open`.
+    unsafe { callbacks.finish(name, width, height, format) };
+
+    Ok(outcome)
+}

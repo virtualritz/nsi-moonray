@@ -1,0 +1,7 @@
+// The standard ɴsɪ emitter, from the specification's listing 4.2,
+// reduced to what these probes need: a surface that is visible without
+// a light, so the measurement is of geometry and framing alone.
+surface emitter(color Cs = color(1))
+{
+    Ci = Cs * emission();
+}

@@ -21,9 +21,12 @@ Project-specific specs live in `specs/`. Shared rules and templates live in
 
 ## Status
 
-**Spec only.** There is no crate yet, and that is deliberate: the
-binding strategy is undecided, and choosing it changes what the crate
-looks like. See `specs/001-moonray-backend/research.md`.
+The crate emits `.rdla`. The binding strategy is settled — generate
+`.rdla` now, an `extern "C"` shim over `scene_rdl2` later for
+progressive rendering. See `specs/001-moonray-backend/research.md`.
+
+Nothing renders yet, and the flush from `nsi_intermediate::Scene` is
+blocked on being able to depend on that crate (`T0.7`).
 
 ## This Repository
 
@@ -38,9 +41,12 @@ Consumers may alias the dependency for brevity:
 use nsi_intermediate as nsi_ir;
 ```
 
-## Before Writing Any Code
+## Before Changing The Emitter
 
-Settle the binding strategy. `.rdla` generation reuses the stream
-emitter that already exists upstream and reaches a first image sooner;
-an `extern "C"` shim over `scene_rdl2` is where it has to end up for
-progressive rendering. Both are viable; picking one is `T0.2`.
+**Do not infer the format.** `tools/oracle` writes scenes through the
+real `scene_rdl2` and its own `AsciiWriter`; the captured output is in
+`specs/001-moonray-backend/oracle/` and `tests/oracle.rs` asserts this
+crate reproduces it byte for byte. A new construct means capturing it
+first and then emitting it — four assumptions a reasonable person would
+have made about `.rdla` are wrong, and they are listed in `research.md`
+F8.

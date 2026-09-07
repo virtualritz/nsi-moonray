@@ -1,0 +1,16 @@
+[package]
+name = "polyhedron-demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Its own workspace, deliberately: `polyhedron-ops` declares `bevy` as a
+# non-optional dependency on Linux, and nothing about the backend should
+# have to build a game engine to run its tests.
+[workspace]
+
+[dependencies]
+nsi-core = "0.8"
+polyhedron-ops = { git = "https://github.com/virtualritz/polyhedron-ops", features = [
+    "nsi",
+] }
