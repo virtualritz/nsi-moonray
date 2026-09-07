@@ -23,7 +23,7 @@ use crate::{
 use nsi_intermediate::{
     EdgeKind, IDENTITY, Node, OwnedArgument, OwnedData, Scene,
 };
-use nsi_trait::{Flags, Type};
+use nsi_trait::Type;
 use std::collections::HashSet;
 
 /// MoonRay's mesh geometry, whose DSO is `moonray/dso/geometry/RdlMesh`.
@@ -1559,7 +1559,8 @@ fn mesh(
     }
 
     let mut data = Vec::new();
-    object = primitive_variables(object, node, handle, &mut data, flushed);
+    object =
+        primitive_variables(object, scene, node, handle, &mut data, flushed);
 
     (object, data)
 }
@@ -1577,31 +1578,13 @@ fn mesh(
 /// test that does not *change* the values proves nothing.
 fn primitive_variables(
     mut object: Object,
+    scene: &Scene,
     node: &Node,
     handle: &str,
     data: &mut Vec<Object>,
     flushed: &mut Flushed,
 ) -> Object {
-    let counts = match node.effective("nvertices").map(|arg| &arg.data) {
-        Some(OwnedData::I32(counts)) => counts.clone(),
-        _ => return object,
-    };
-    let indices = match node.effective("P.indices").map(|arg| &arg.data) {
-        Some(OwnedData::I32(indices)) => indices.clone(),
-        _ => return object,
-    };
-    let points = match node.effective("P").map(|arg| &arg.data) {
-        Some(OwnedData::F32(points)) => points.len() / 3,
-        _ => return object,
-    };
-
-    let mesh = Mesh {
-        counts: &counts,
-        vertices: &indices,
-        points,
-    };
-
-    if let Some(values) = expanded(node, "st", 2, &mesh, handle, flushed) {
+    if let Some(values) = expanded(scene, handle, "st", 2, flushed) {
         object = object.set(
             "uv_list",
             Value::Vector(
@@ -1613,7 +1596,7 @@ fn primitive_variables(
         );
     }
 
-    if let Some(values) = expanded(node, "N", 3, &mesh, handle, flushed) {
+    if let Some(values) = expanded(scene, handle, "N", 3, flushed) {
         object = object.set(
             "normal_list",
             Value::Vector(
@@ -1636,7 +1619,7 @@ fn primitive_variables(
         }
 
         let Some(user_data) =
-            user_data(node, name, argument, &mesh, handle, flushed)
+            user_data(scene, name, argument, handle, flushed)
         else {
             continue;
         };
@@ -1694,10 +1677,9 @@ fn user_data_name(handle: &str, name: &str) -> String {
 /// interpolation into that one order, and a rate MoonRay has to guess
 /// at is a rate it can guess wrong.
 fn user_data(
-    node: &Node,
+    scene: &Scene,
     name: &str,
     argument: &OwnedArgument,
-    mesh: &Mesh<'_>,
     handle: &str,
     flushed: &mut Flushed,
 ) -> Option<Object> {
@@ -1719,7 +1701,7 @@ fn user_data(
         }
     };
 
-    let expanded = expanded(node, name, components, mesh, handle, flushed)?;
+    let expanded = expanded(scene, handle, name, components, flushed)?;
 
     let vector = Value::Vector(match components {
         3 if argument.type_tag == Type::Color => expanded
@@ -1748,123 +1730,59 @@ fn user_data(
     )
 }
 
-/// What an ɴsɪ mesh attribute's interpolation is measured against.
-struct Mesh<'a> {
-    /// `nvertices`: how many vertices each face has.
-    counts: &'a [i32],
-    /// `P.indices`: one entry per face-vertex, which is the order
-    /// MoonRay wants everything else in too.
-    vertices: &'a [i32],
-    /// How many entries `P` has.
-    points: usize,
-}
-
-/// One ɴsɪ mesh attribute, expanded to one value per face-vertex.
+/// One ɴsɪ primitive variable, expanded to one float per face-vertex.
 ///
-/// ɴsɪ says an attribute is looked up indirectly through
-/// `<name>.indices` when that is given, and otherwise disambiguated by
-/// the `per_vertex` and `per_face` argument flags. Neither is always
-/// present, so the length decides what is left -- and where the length
-/// cannot decide, the attribute is reported and dropped rather than
-/// guessed at, because a normal read in the wrong interpolation shades
-/// plausibly and wrongly.
+/// The *interpolation* is `nsi-intermediate`'s to resolve -- `.indices`
+/// first, then the `per_vertex` and `per_face` flags, then the counts,
+/// and a refusal where those disagree. What is left here is the part
+/// that is MoonRay's: reading the floats out in the order it wants
+/// them, which is one per face-vertex in face order.
 fn expanded(
-    node: &Node,
+    scene: &Scene,
+    handle: &str,
     name: &str,
     components: usize,
-    mesh: &Mesh<'_>,
-    handle: &str,
     flushed: &mut Flushed,
 ) -> Option<Vec<f32>> {
-    let argument = node.effective(name)?;
-    let OwnedData::F32(values) = &argument.data else {
+    let variable = match scene.primitive_variable(handle, name) {
+        Ok(variable) => variable?,
+        Err(error) => {
+            // **The refusal is the point.** Four values on a mesh with
+            // four faces *and* four vertices is two different meshes
+            // depending which reading is taken, and ɴsɪ's own answer is
+            // the `per_face`/`per_vertex` flag -- so an unflagged one is
+            // reported rather than guessed. An earlier version of this
+            // code guessed, and guessed uniform.
+            flushed.limitations.push(format!(
+                "mesh {handle:?}: {name:?} was not carried ({error})"
+            ));
+            return None;
+        }
+    };
+
+    let OwnedData::F32(values) = &variable.values().data else {
         flushed.limitations.push(format!(
-            "mesh {handle:?} has a {name:?} that is not float data; it              was not carried"
+            "mesh {handle:?} has a {name:?} that is not float data; it was \
+             not carried"
         ));
         return None;
     };
 
     let count = values.len() / components;
-    let face_vertices = mesh.vertices.len();
-    let at = |index: usize, out: &mut Vec<f32>| {
-        let start = index * components;
-        out.extend_from_slice(&values[start..start + components]);
-    };
-
-    let mut out = Vec::with_capacity(face_vertices * components);
-
-    // Indirect lookup first: ɴsɪ says the `.indices` attribute "is read
-    // to know which values of the other parameter to use", and it says
-    // nothing about the length of the value array when it is there.
-    if let Some(OwnedData::I32(lookup)) = node
-        .effective(&format!("{name}.indices"))
-        .map(|arg| &arg.data)
-    {
-        if lookup.len() != face_vertices {
+    let mut out = Vec::with_capacity(variable.face_vertex_count() * components);
+    for index in variable.face_varying_indices() {
+        if index >= count {
             flushed.limitations.push(format!(
-                "mesh {handle:?} has {} {name:?} indices for {face_vertices}                  face-vertices; {name:?} was not carried",
-                lookup.len()
+                "mesh {handle:?} indexes {name:?} out of range; it was not \
+                 carried"
             ));
             return None;
         }
-        for index in lookup {
-            let index = *index as usize;
-            if index >= count {
-                flushed.limitations.push(format!(
-                    "mesh {handle:?} indexes {name:?} out of range; it was                      not carried"
-                ));
-                return None;
-            }
-            at(index, &mut out);
-        }
-        return Some(out);
+        let start = index * components;
+        out.extend_from_slice(&values[start..start + components]);
     }
 
-    let flags = Flags::from_bits_truncate(argument.flags);
-    let per_face =
-        flags.contains(Flags::PER_FACE) && count == mesh.counts.len();
-    let per_vertex = flags.contains(Flags::PER_VERTEX) && count == mesh.points;
-
-    // Uniform: one value a face, repeated across its vertices.
-    if per_face
-        || (!per_vertex && count == mesh.counts.len() && count != face_vertices)
-    {
-        for (face, vertices) in mesh.counts.iter().enumerate() {
-            for _ in 0..*vertices {
-                at(face, &mut out);
-            }
-        }
-        return Some(out);
-    }
-
-    // Face-varying: already in the order MoonRay wants.
-    if !per_vertex && count == face_vertices {
-        out.extend_from_slice(&values[..face_vertices * components]);
-        return Some(out);
-    }
-
-    // Per vertex: indexed the way `P` is.
-    if count == mesh.points {
-        for index in mesh.vertices {
-            at(*index as usize, &mut out);
-        }
-        return Some(out);
-    }
-
-    // Constant.
-    if count == 1 {
-        for _ in 0..face_vertices {
-            at(0, &mut out);
-        }
-        return Some(out);
-    }
-
-    flushed.limitations.push(format!(
-        "mesh {handle:?} has {count} {name:?} values, which is neither one          per face-vertex ({face_vertices}), per vertex ({}), per face ({})          nor constant; {name:?} was not carried",
-        mesh.points,
-        mesh.counts.len()
-    ));
-    None
+    Some(out)
 }
 
 /// Subdivision creases and corners, which ɴsɪ carries as four parallel
@@ -3011,6 +2929,19 @@ mod tests {
         OwnedArgument::new(name, type_tag, 1, 0, data)
     }
 
+    /// An argument whose values are fixed-size arrays -- how ɴsɪ spells a
+    /// UV set, `float[2]`. The array length is what tells one value from
+    /// two, and so what tells a per-vertex variable from a face-varying
+    /// one.
+    fn array_arg(
+        name: &str,
+        type_tag: Type,
+        length: usize,
+        data: OwnedData,
+    ) -> OwnedArgument {
+        OwnedArgument::new(name, type_tag, length, 0, data)
+    }
+
     /// The triangle, wearing a named shader.
     fn emissive(shader: &str, parameters: &[OwnedArgument]) -> Scene {
         let mut scene = triangle();
@@ -3097,9 +3028,10 @@ mod tests {
         scene
             .set_attribute(
                 "mesh",
-                vec![arg(
+                vec![array_arg(
                     "st",
                     Type::F32,
+                    2,
                     OwnedData::F32(vec![
                         0.0, 0.0, 0.5, 0.0, 1.0, 0.0, // the bottom row
                         0.0, 1.0, 0.5, 1.0, 1.0, 1.0, // the top row
@@ -3131,9 +3063,10 @@ mod tests {
             .set_attribute(
                 "mesh",
                 vec![
-                    arg(
+                    array_arg(
                         "st",
                         Type::F32,
+                        2,
                         OwnedData::F32(vec![0.0, 0.0, 1.0, 1.0]),
                     ),
                     arg(
@@ -3156,6 +3089,68 @@ mod tests {
         );
     }
 
+    /// **A variable the count cannot decide is refused, not guessed.**
+    ///
+    /// A tetrahedron has four faces and four vertices, so a four-value
+    /// variable on one is per-face or per-vertex depending on nothing
+    /// the count can see -- and the two are different meshes. ɴsɪ's
+    /// answer is the `per_face`/`per_vertex` flag, and `nsi-intermediate`
+    /// refuses an unflagged one rather than picking.
+    ///
+    /// This backend used to pick, and picked uniform.
+    #[test]
+    fn a_variable_the_count_cannot_decide_is_reported() {
+        let mut scene = Scene::default();
+        scene.create("tet", "mesh").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "tet",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![3; 4])),
+                    arg(
+                        "P.indices",
+                        Type::I32,
+                        OwnedData::I32(vec![
+                            0, 1, 2, 0, 2, 3, 0, 3, 1, 1, 3, 2,
+                        ]),
+                    ),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, //
+                            0.0, 1.0, 0.0, 0.0, 0.0, 1.0,
+                        ]),
+                    ),
+                    // Four values, four faces, four vertices, and no
+                    // flag to say which.
+                    arg(
+                        "heat",
+                        Type::F32,
+                        OwnedData::F32(vec![0.1, 0.2, 0.3, 0.4]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("tet", None, ".root", "objects").unwrap();
+
+        let flushed = flush(&scene);
+
+        assert!(
+            !flushed.to_rdla().contains("heat"),
+            "{}",
+            flushed.to_rdla()
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("heat") && line.contains("not carried")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
     /// A length that means nothing is said rather than reshaped into
     /// something plausible.
     #[test]
@@ -3164,9 +3159,10 @@ mod tests {
         scene
             .set_attribute(
                 "mesh",
-                vec![arg(
+                vec![array_arg(
                     "st",
                     Type::F32,
+                    2,
                     OwnedData::F32(vec![0.0, 0.0, 1.0, 1.0, 0.5, 0.5]),
                 )],
             )
@@ -3277,9 +3273,10 @@ mod tests {
         scene
             .set_attribute(
                 "mesh",
-                vec![arg(
+                vec![array_arg(
                     "st",
                     Type::F32,
+                    2,
                     OwnedData::F32(vec![
                         0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0.5, 1.0, 1.0,
                         1.0,

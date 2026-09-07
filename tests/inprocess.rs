@@ -17,6 +17,19 @@ fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArgument {
     OwnedArgument::new(name, type_tag, 1, 0, data)
 }
 
+/// An argument whose values are fixed-size arrays -- how ɴsɪ spells a
+/// UV set, `float[2]`. The array length is what tells one value from
+/// two, and so what tells a per-vertex variable from a face-varying
+/// one.
+fn array_arg(
+    name: &str,
+    type_tag: Type,
+    length: usize,
+    data: OwnedData,
+) -> OwnedArgument {
+    OwnedArgument::new(name, type_tag, length, 0, data)
+}
+
 fn dso_path() -> Option<String> {
     std::env::var("NSI_MOONRAY_DSO").ok()
 }
@@ -2115,9 +2128,10 @@ fn an_nsi_st_reaches_osl() {
         let mut nsi = scene(width as i32, height as i32);
         nsi.set_attribute(
             "quad",
-            vec![arg(
+            vec![array_arg(
                 "st",
                 Type::F32,
+                2,
                 OwnedData::F32(vec![
                     0.0, 0.0, scale, 0.0, scale, scale, 0.0, scale,
                 ]),
