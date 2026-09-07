@@ -37,11 +37,31 @@ finline void shadev(...) const
 ```
 
 A material with no vectorised path is therefore not an error -- it
-silently contributes **no BSDF at all**, which renders black. And
-nothing catches it: `RenderContext::canRunVectorized` checks exactly
-four things -- overlapping dielectrics, volume rendering with deep
-output, and reflected or refracted cryptomatte -- and never asks
-whether the scene's materials have a `mShadeFuncv`.
+silently contributes **no BSDF at all**. And nothing catches it:
+`RenderContext::canRunVectorized` checks exactly four things --
+overlapping dielectrics, volume rendering with deep output, and
+reflected or refracted cryptomatte -- and never asks whether the
+scene's materials have a `mShadeFuncv`.
+
+**Measured, not deduced.** `tools/scalar-material` is a `Material` DSO
+with a scalar `shade` that adds one white Lambertian lobe, and
+`mShadeFuncv` left null. The same scene, the same material, the two
+execution modes:
+
+| | RGB max | RGB average | alpha |
+| --- | --- | --- | --- |
+| `-exec_mode vector` | **0.000000** | 0.000000 | 1.0 |
+| `-exec_mode scalar` | 1.018493 | 0.333256 | 1.0 |
+
+No warning either way. The alpha channel is the sharp part: it is 1.0
+in both, so the surface is present, opaque and covered -- the geometry
+is found and hit, and only the shading is missing. What an author sees
+is a silhouette-shaped hole, which looks like a lighting problem or a
+missing assignment rather than a material that never ran.
+
+Every material MoonRay ships is built with `moonray_ispc_dso`, so its
+own shaders never take this path. `moonray_dso_simple` -- the
+scalar-only DSO rule -- exists and is used for lights and geometry.
 
 The default execution mode is `AUTO`
 (`RenderOptions.cc:34`), which tries XPU, then vectorized, then
@@ -63,9 +83,10 @@ material has no ISPC `shadev` to give. The options are
    signature is a plain function pointer so this compiles, but the
    layouts are ISPC-generated and the pack-back is deep. Not first.
 
-Either way, **the missing check is worth reporting upstream**: a
-material class that silently renders black in one execution mode and
-correctly in another is the same shape of bug as `F12`.
+Either way, **the missing check is reported upstream**:
+`upstream/moonray-scalar-material-renders-black.md`. A material class
+that renders correctly in one execution mode and black in another,
+with no diagnostic, is the same shape of bug as `001` `F12`.
 
 ### O2: MoonRay's self-emission is hit-only, and this is the whole light problem
 
@@ -176,11 +197,18 @@ Sketched, not decided:
   looking for an emission closure, rather than by recognising a name.
   That is the right answer and it is only reachable from here.
 
+## Settled
+
+- **Texturing is OSL's, not MoonRay's.** OSL takes an OIIO
+  `TextureSystem` of its own and that is what it gets. MoonRay's
+  texture path -- `BasicTexture`, `UdimTexture`, `MipSelector` and the
+  map DSOs over them -- exists to serve shaders written as ISPC DSOs,
+  and those are exactly what OSL replaces. Sharing the two would be
+  work spent making a system interoperate with its own successor.
+  Decided by the author of the ɴsɪ side, not inferred here.
+
 ## Open questions
 
-- **Does OSL's texture path have to be MoonRay's?** Sharing
-  `TextureSystem` matters for memory and for consistency with
-  MoonRay's own maps; OSL will happily use its own OIIO one.
 - **Displacement.** ɴsɪ has `displacementshader`; MoonRay has a
   `Displacement` root shader with the same shape as `Material`. The
   same DSO trick should apply, with `displacement()` closures.
