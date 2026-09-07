@@ -261,8 +261,9 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
                         flushed.limitations.push(format!(
                             "{handle:?} is a {MESH_LIGHT}'s geometry and so \
                              is not in the render layer, which MoonRay \
-                             refuses; in ɴsɪ an emissive mesh is also \
-                             visible to camera rays and here it is not"
+                             refuses; the light is forced visible in \
+                             camera instead, so it is seen as well as \
+                             sampled, but it cannot also wear a material"
                         ));
                     }
 
@@ -1624,6 +1625,12 @@ const LIGHTS: [(&str, &str); 6] = [
     ("emitter", MESH_LIGHT),
 ];
 
+/// `Light::visible_in_camera`'s "force on".
+///
+/// `Light.cc` declares it enumerable: 0 is off, 1 on, and 2 -- the
+/// default -- reads `SceneVariables::lights_visible_in_camera`.
+const VISIBLE_IN_CAMERA_ON: i32 = 1;
+
 /// MoonRay's light DSOs, for the ɴsɪ emitters above.
 const MESH_LIGHT: &str = "MeshLight";
 const SPHERE_LIGHT: &str = "SphereLight";
@@ -1704,8 +1711,24 @@ fn light(
     match class {
         MESH_LIGHT => {
             // The light *is* the mesh, so it points back at it.
+            //
+            // And it is seen as well as sampled. In ɴsɪ an emissive
+            // mesh is ordinary geometry: a camera ray hits it and sees
+            // it glow. A `MeshLight`'s geometry cannot be in the render
+            // layer (`research.md` F12), so that path is closed -- but
+            // `MeshLight::intersect` ray-traces the *real mesh* through
+            // an Embree scene of its own, and `Scene::updateActiveLights`
+            // puts a bounded light into the camera-visible set when this
+            // is on. So one object is both seen and sampled, which is
+            // what ɴsɪ means.
+            //
+            // Forced on rather than left at the default, which defers to
+            // `SceneVariables::lights_visible_in_camera` -- a scene-wide
+            // switch that would make an ɴsɪ emitter appear or vanish for
+            // a reason nothing in the ɴsɪ scene said.
             object = object
-                .set("geometry", Value::Object(Reference::new(MESH, handle)));
+                .set("geometry", Value::Object(Reference::new(MESH, handle)))
+                .set("visible_in_camera", Value::Int(VISIBLE_IN_CAMERA_ON));
         }
         SPOT_LIGHT => {
             let (outer, inner) = cone(node);
@@ -2508,6 +2531,10 @@ mod tests {
             rdla.contains("[\"geometry\"] = RdlMeshGeometry(\"tri\")"),
             "{rdla}"
         );
+        // Seen as well as sampled. `MeshLight::intersect` ray-traces
+        // the real mesh, so this is the whole of what ɴsɪ means by an
+        // emissive mesh being ordinary geometry.
+        assert!(rdla.contains("[\"visible_in_camera\"] = 1"), "{rdla}");
         assert!(
             rdla.contains(
                 "LightSet(\"/nsi/lights\") {\n    MeshLight(\"tri/light\"),"
@@ -2529,7 +2556,7 @@ mod tests {
             flushed
                 .limitations
                 .iter()
-                .any(|line| line.contains("visible to camera rays")),
+                .any(|line| line.contains("cannot also wear a material")),
             "{:?}",
             flushed.limitations
         );

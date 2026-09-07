@@ -529,6 +529,14 @@ this backend reports as a frame that did not start. A full OpenMoonRay
 install has `moonshine_dwa` and does not hit this; a minimal one does,
 and nothing in the scene says why.
 
+A `MeshLight` is not, however, invisible: `MeshLight::intersect`
+ray-traces the *real mesh* through an Embree scene of its own, and
+`Scene::updateActiveLights` puts a bounded light into the
+camera-visible set when `visible_in_camera` says so. So one object is
+both seen and sampled, which is what ɴsɪ means by an emissive mesh
+being ordinary geometry, and the flush forces that flag on.
+`specs/003-osl/research.md` O3 has the reading.
+
 That is why `T1.7a`'s render test uses a `pointLight` rather than an
 `areaLight`. The two differ only in which row of `LIGHTS` matches, so
 the recognition rule -- the thing the task was actually blocked on --

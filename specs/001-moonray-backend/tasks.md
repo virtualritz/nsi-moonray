@@ -506,4 +506,27 @@ says so in its own doc. This backend calls none of it.
 - [x] TN.1 Progressive rendering. `Mode::{Batch, Progressive,
       ProgressiveFast, Realtime}` in `src/rdl2/render.rs`; the drop-in
       renders `Progressive`. Reached through the shim, as predicted.
-- [ ] TN.2 OSL. MoonRay has none. Shared work, separate surface.
+- [~] TN.2 OSL. MoonRay has none, and ɴsɪ *is* OSL -- a `shader` node
+      names a compiled `.oso`, and a light is a shader that emits. So
+      everything this backend does with shaders and lights is a table
+      of names standing in for a language it cannot run.
+      `specs/003-osl/research.md` reads what closing that would take.
+      Three things came out of the reading and two are already acted
+      on:
+
+      - A `Material` with no vectorised `shade` renders **black**
+        rather than failing -- `Material::shadev` null-checks and
+        `canRunVectorized` never asks. The default execution mode is
+        `AUTO`, which picks vectorized, and OSL's `ShadingSystem` is
+        scalar. So an OSL material has to force scalar execution, and
+        the missing check is worth reporting upstream.
+      - MoonRay's self-emission is **hit-only**: the integrator does
+        `radiance += pathThroughput * bsdf->getSelfEmission()` and
+        nothing else. No next-event estimation, no shadow rays. So
+        `emission()` cannot simply become `addEmission` -- that turns
+        every ɴsɪ light into noise.
+      - A `MeshLight` with `visible_in_camera` forced on is **both seen
+        and sampled**, against its own geometry: `MeshLight::intersect`
+        ray-traces the real mesh and `Scene::updateActiveLights` puts a
+        bounded light in the camera-visible set. That is the
+        reconciliation, and `T1.7a` now sets it.
