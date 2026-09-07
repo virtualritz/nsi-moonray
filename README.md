@@ -21,8 +21,9 @@ written; see
 What crosses: polygon meshes and subdivision surfaces with creases and
 corners, instancing (native on both sides, nested, and blurred),
 transform and deformation motion blur on one scene-wide shutter,
-cameras, render outputs, and lights — which in ɴsɪ are geometry wearing
-an emissive shader rather than nodes of their own.
+cameras, render outputs, `st` and `N` in any of ɴsɪ's interpolations,
+and lights — which in ɴsɪ are geometry wearing an emissive shader
+rather than nodes of their own.
 
 Shading runs OSL. ɴsɪ *is* OSL — a `shader` node names a compiled
 `.oso` — so the network crosses as an OSL group specification and

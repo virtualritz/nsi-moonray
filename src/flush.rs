@@ -21,7 +21,7 @@ use crate::{
     value::{Reference, Value},
 };
 use nsi_intermediate::{EdgeKind, IDENTITY, Node, OwnedData, Scene};
-use nsi_trait::Type;
+use nsi_trait::{Flags, Type};
 use std::collections::HashSet;
 
 /// MoonRay's mesh geometry, whose DSO is `moonray/dso/geometry/RdlMesh`.
@@ -1440,7 +1440,191 @@ fn mesh(
         object = object.set("orientation", Value::Int(1));
     }
 
+    object = primitive_variables(object, node, handle, flushed);
+
     object
+}
+
+/// ɴsɪ's `st` and `N`, as MoonRay's `uv_list` and `normal_list`.
+///
+/// Both of MoonRay's are **per face-vertex** -- its own comment says so
+/// -- and ɴsɪ's may be given in any of four interpolations. So this is
+/// an expansion, not a rename: whatever ɴsɪ gave is written out once
+/// per face-vertex, in the same order as `vertices_by_index`.
+///
+/// Measured before implementing: `uv_list` is honoured, and halving it
+/// halves what an OSL shader reads as `u` and `v`. Without it MoonRay
+/// parametrises the face itself, which for a quad is also 0..1 -- so a
+/// test that does not *change* the values proves nothing.
+fn primitive_variables(
+    mut object: Object,
+    node: &Node,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    let counts = match node.effective("nvertices").map(|arg| &arg.data) {
+        Some(OwnedData::I32(counts)) => counts.clone(),
+        _ => return object,
+    };
+    let indices = match node.effective("P.indices").map(|arg| &arg.data) {
+        Some(OwnedData::I32(indices)) => indices.clone(),
+        _ => return object,
+    };
+    let points = match node.effective("P").map(|arg| &arg.data) {
+        Some(OwnedData::F32(points)) => points.len() / 3,
+        _ => return object,
+    };
+
+    let mesh = Mesh {
+        counts: &counts,
+        vertices: &indices,
+        points,
+    };
+
+    if let Some(values) = expanded(node, "st", 2, &mesh, handle, flushed) {
+        object = object.set(
+            "uv_list",
+            Value::Vector(
+                values
+                    .chunks_exact(2)
+                    .map(|st| Value::Vec2f([st[0], st[1]]))
+                    .collect(),
+            ),
+        );
+    }
+
+    if let Some(values) = expanded(node, "N", 3, &mesh, handle, flushed) {
+        object = object.set(
+            "normal_list",
+            Value::Vector(
+                values
+                    .chunks_exact(3)
+                    .map(|n| Value::Vec3f([n[0], n[1], n[2]]))
+                    .collect(),
+            ),
+        );
+    }
+
+    object
+}
+
+/// What an ɴsɪ mesh attribute's interpolation is measured against.
+struct Mesh<'a> {
+    /// `nvertices`: how many vertices each face has.
+    counts: &'a [i32],
+    /// `P.indices`: one entry per face-vertex, which is the order
+    /// MoonRay wants everything else in too.
+    vertices: &'a [i32],
+    /// How many entries `P` has.
+    points: usize,
+}
+
+/// One ɴsɪ mesh attribute, expanded to one value per face-vertex.
+///
+/// ɴsɪ says an attribute is looked up indirectly through
+/// `<name>.indices` when that is given, and otherwise disambiguated by
+/// the `per_vertex` and `per_face` argument flags. Neither is always
+/// present, so the length decides what is left -- and where the length
+/// cannot decide, the attribute is reported and dropped rather than
+/// guessed at, because a normal read in the wrong interpolation shades
+/// plausibly and wrongly.
+fn expanded(
+    node: &Node,
+    name: &str,
+    components: usize,
+    mesh: &Mesh<'_>,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Option<Vec<f32>> {
+    let argument = node.effective(name)?;
+    let OwnedData::F32(values) = &argument.data else {
+        flushed.limitations.push(format!(
+            "mesh {handle:?} has a {name:?} that is not float data; it              was not carried"
+        ));
+        return None;
+    };
+
+    let count = values.len() / components;
+    let face_vertices = mesh.vertices.len();
+    let at = |index: usize, out: &mut Vec<f32>| {
+        let start = index * components;
+        out.extend_from_slice(&values[start..start + components]);
+    };
+
+    let mut out = Vec::with_capacity(face_vertices * components);
+
+    // Indirect lookup first: ɴsɪ says the `.indices` attribute "is read
+    // to know which values of the other parameter to use", and it says
+    // nothing about the length of the value array when it is there.
+    if let Some(OwnedData::I32(lookup)) = node
+        .effective(&format!("{name}.indices"))
+        .map(|arg| &arg.data)
+    {
+        if lookup.len() != face_vertices {
+            flushed.limitations.push(format!(
+                "mesh {handle:?} has {} {name:?} indices for {face_vertices}                  face-vertices; {name:?} was not carried",
+                lookup.len()
+            ));
+            return None;
+        }
+        for index in lookup {
+            let index = *index as usize;
+            if index >= count {
+                flushed.limitations.push(format!(
+                    "mesh {handle:?} indexes {name:?} out of range; it was                      not carried"
+                ));
+                return None;
+            }
+            at(index, &mut out);
+        }
+        return Some(out);
+    }
+
+    let flags = Flags::from_bits_truncate(argument.flags);
+    let per_face =
+        flags.contains(Flags::PER_FACE) && count == mesh.counts.len();
+    let per_vertex = flags.contains(Flags::PER_VERTEX) && count == mesh.points;
+
+    // Uniform: one value a face, repeated across its vertices.
+    if per_face
+        || (!per_vertex && count == mesh.counts.len() && count != face_vertices)
+    {
+        for (face, vertices) in mesh.counts.iter().enumerate() {
+            for _ in 0..*vertices {
+                at(face, &mut out);
+            }
+        }
+        return Some(out);
+    }
+
+    // Face-varying: already in the order MoonRay wants.
+    if !per_vertex && count == face_vertices {
+        out.extend_from_slice(&values[..face_vertices * components]);
+        return Some(out);
+    }
+
+    // Per vertex: indexed the way `P` is.
+    if count == mesh.points {
+        for index in mesh.vertices {
+            at(*index as usize, &mut out);
+        }
+        return Some(out);
+    }
+
+    // Constant.
+    if count == 1 {
+        for _ in 0..face_vertices {
+            at(0, &mut out);
+        }
+        return Some(out);
+    }
+
+    flushed.limitations.push(format!(
+        "mesh {handle:?} has {count} {name:?} values, which is neither one          per face-vertex ({face_vertices}), per vertex ({}), per face ({})          nor constant; {name:?} was not carried",
+        mesh.points,
+        mesh.counts.len()
+    ));
+    None
 }
 
 /// Subdivision creases and corners, which ɴsɪ carries as four parallel
@@ -2277,6 +2461,186 @@ mod tests {
 
     /// A triangle, a camera, a screen and an output -- the smallest
     /// scene that is a scene.
+    /// Two faces sharing an edge, so per-vertex and face-varying are
+    /// different lengths and the expansion has something to do.
+    fn two_quads() -> Scene {
+        let mut scene = Scene::default();
+
+        scene.create("mesh", "mesh").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "mesh",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![4, 4])),
+                    arg(
+                        "P.indices",
+                        Type::I32,
+                        OwnedData::I32(vec![0, 1, 4, 3, 1, 2, 5, 4]),
+                    ),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, // 0
+                            1.0, 0.0, 0.0, // 1
+                            2.0, 0.0, 0.0, // 2
+                            0.0, 1.0, 0.0, // 3
+                            1.0, 1.0, 0.0, // 4
+                            2.0, 1.0, 0.0, // 5
+                        ]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("mesh", None, ".root", "objects").unwrap();
+
+        scene
+    }
+
+    fn uvs(rdla: &str) -> String {
+        rdla.split("[\"uv_list\"] = ")
+            .nth(1)
+            .map(|rest| rest.split('}').next().unwrap_or_default().to_string())
+            .unwrap_or_default()
+    }
+
+    /// **A per-vertex `st` is indexed the way `P` is.**
+    ///
+    /// Six values for eight face-vertices: the shared edge's two
+    /// vertices are written twice, which is exactly what MoonRay's
+    /// per-face-vertex `uv_list` wants and what a rename would get
+    /// wrong.
+    #[test]
+    fn a_per_vertex_st_is_expanded_by_the_vertex_indices() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![arg(
+                    "st",
+                    Type::F32,
+                    OwnedData::F32(vec![
+                        0.0, 0.0, 0.5, 0.0, 1.0, 0.0, // the bottom row
+                        0.0, 1.0, 0.5, 1.0, 1.0, 1.0, // the top row
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let rdla = flush(&scene).to_rdla();
+        let uvs = uvs(&rdla);
+
+        // Eight, in `P.indices` order: 0 1 4 3 1 2 5 4.
+        assert_eq!(uvs.matches("Vec2(").count(), 8, "{rdla}");
+        assert!(
+            uvs.contains(
+                "Vec2(0, 0), Vec2(0.5, 0), Vec2(0.5, 1), Vec2(0, 1), \
+                 Vec2(0.5, 0), Vec2(1, 0), Vec2(1, 1), Vec2(0.5, 1)"
+            ),
+            "{uvs}"
+        );
+    }
+
+    /// `st.indices` is ɴsɪ's own indirect lookup, and it wins over any
+    /// inference from the length.
+    #[test]
+    fn an_indexed_st_is_looked_up() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![
+                    arg(
+                        "st",
+                        Type::F32,
+                        OwnedData::F32(vec![0.0, 0.0, 1.0, 1.0]),
+                    ),
+                    arg(
+                        "st.indices",
+                        Type::I32,
+                        OwnedData::I32(vec![0, 1, 0, 1, 1, 0, 1, 0]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+
+        let uvs = uvs(&flush(&scene).to_rdla());
+
+        assert!(
+            uvs.contains(
+                "Vec2(0, 0), Vec2(1, 1), Vec2(0, 0), Vec2(1, 1), \
+                 Vec2(1, 1), Vec2(0, 0), Vec2(1, 1), Vec2(0, 0)"
+            ),
+            "{uvs}"
+        );
+    }
+
+    /// A length that means nothing is said rather than reshaped into
+    /// something plausible.
+    #[test]
+    fn an_st_of_no_recognisable_length_is_reported() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![arg(
+                    "st",
+                    Type::F32,
+                    OwnedData::F32(vec![0.0, 0.0, 1.0, 1.0, 0.5, 0.5]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+
+        assert!(
+            !flushed.to_rdla().contains("uv_list"),
+            "{}",
+            flushed.to_rdla()
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("was not carried")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// `N` travels the same road, into MoonRay's own per-face-vertex
+    /// list.
+    #[test]
+    fn a_per_vertex_normal_becomes_a_normal_list() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![arg(
+                    "N",
+                    Type::Normal,
+                    OwnedData::F32(vec![
+                        0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, //
+                        0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("[\"normal_list\"] = {"), "{rdla}");
+        // Eight, one a face-vertex, and the top row's `(0, 1, 0)` where
+        // `P.indices` names vertices 3, 4 and 5.
+        let normals = rdla
+            .split("[\"normal_list\"] = ")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or_default();
+        assert_eq!(normals.matches("Vec3(").count(), 8, "{rdla}");
+        assert_eq!(normals.matches("Vec3(0, 1, 0)").count(), 4, "{normals}");
+    }
+
     fn triangle() -> Scene {
         let mut scene = Scene::default();
 

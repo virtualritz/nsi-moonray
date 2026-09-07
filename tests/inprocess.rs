@@ -2058,3 +2058,115 @@ fn transparent_becomes_presence() {
          picture either way, only more of it."
     );
 }
+
+/// **`st` reaches an OSL shader as `u` and `v`.**
+///
+/// The whole chain, and each link is one that fails quietly: ɴsɪ's `st`
+/// expanded to MoonRay's per-face-vertex `uv_list`, carried into the
+/// mesh's primitive attributes, read back by the intersection as `St`,
+/// and handed to OSL as `u` and `v`.
+///
+/// **The values are scaled, not merely present.** Without any `uv_list`
+/// MoonRay parametrises the face itself, which for a quad is also
+/// 0..1 -- so a test asserting that `u` varies passes with `st`
+/// carried nowhere at all. Measured first: half the UVs, half the
+/// gradient.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn an_nsi_st_reaches_osl() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-st");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("uvshow.osl");
+    std::fs::write(
+        &source,
+        "surface uvshow()\n\
+         {\n    Ci = color(u, v, 0) * diffuse(N);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("uvshow.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    // The brightest red anywhere, which is the largest `u` the shader
+    // saw -- scaled by the light, but by the same factor either way.
+    let brightest = |scale: f32| {
+        let mut nsi = scene(width as i32, height as i32);
+        nsi.set_attribute(
+            "quad",
+            vec![arg(
+                "st",
+                Type::F32,
+                OwnedData::F32(vec![
+                    0.0, 0.0, scale, 0.0, scale, scale, 0.0, scale,
+                ]),
+            )],
+        )
+        .unwrap();
+
+        nsi.create("attr", "attributes").unwrap();
+        nsi.create("uvshow", "shader").unwrap();
+        nsi.set_attribute(
+            "uvshow",
+            vec![arg(
+                "shaderfilename",
+                Type::String,
+                OwnedData::String(vec![
+                    directory
+                        .join("uvshow.oso")
+                        .to_string_lossy()
+                        .into_owned()
+                        .into_bytes(),
+                ]),
+            )],
+        )
+        .unwrap();
+        nsi.connect("attr", None, "quad", "geometryattributes")
+            .unwrap();
+        nsi.connect("uvshow", None, "attr", "surfaceshader")
+            .unwrap();
+
+        let mut session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+        pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[0])
+            .fold(0.0f32, f32::max)
+    };
+
+    let full = brightest(1.0);
+    let half = brightest(0.5);
+
+    assert!(full > 0.1, "`u` never varied: {full}");
+    // Half the UVs, half the gradient. Equal means `st` was dropped and
+    // MoonRay's own parametrisation -- also 0..1 on a quad -- is what
+    // the shader read.
+    assert!(
+        half < full * 0.6 && half > full * 0.4,
+        "halving `st` should have halved what the shader read as `u`: \
+         {full} became {half}"
+    );
+}
