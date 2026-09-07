@@ -359,13 +359,16 @@ says so in its own doc. This backend calls none of it.
 
 ## Cost Of The Choices Above
 
-- [ ] T7.1 A detached shape is emitted and turned off rather than left
-      out, so the first flush hands MoonRay geometry it will never
-      draw -- tessellated, and in the accelerator. Right for an
-      interactive session, where it makes a hide an attribute edge
-      rather than a structural one; waste for a batch render that will
-      never show it. The flush knows which it is doing only if it is
-      told, so this wants a flag rather than a guess.
+- [x] T7.1 A detached shape is emitted and turned off for an
+      interactive session and **left out** for a batch render.
+      `flush::Purpose`, and the flush is told rather than guessing.
+      Keeping it is right where something will show it again -- hiding
+      becomes nine attribute writes on an object MoonRay already has,
+      an accelerator rebuild rather than a re-tessellation -- and waste
+      where nothing will: a tessellation and a place in the accelerator
+      for something never drawn. `mrr` and the spawned path ask for
+      `Batch`; a `Session` is `Interactive` by construction.
+      `flush::tests::a_batch_flush_omits_a_detached_shape`.
 
 ## Not Now
 

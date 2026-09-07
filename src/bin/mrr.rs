@@ -17,7 +17,7 @@
 //! write here but the wiring.
 
 use nsi_moonray::{
-    flush::flush,
+    flush::{Purpose, flush_for},
     render::{self, Render},
 };
 use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
@@ -141,7 +141,9 @@ fn prepared(scene: &PathBuf) -> Result<PathBuf, String> {
     nsi_parse::parse_compressed(&bytes, &recorder)
         .map_err(|error| format!("{}: {error}", scene.display()))?;
 
-    let flushed = flush(&recorder.into_scene());
+    // Rendered once, so geometry ɴsɪ hid is left out rather than
+    // tessellated and never drawn.
+    let flushed = flush_for(&recorder.into_scene(), Purpose::Batch);
     for limitation in &flushed.limitations {
         eprintln!("mrr: {limitation}");
     }

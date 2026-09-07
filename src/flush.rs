@@ -145,7 +145,39 @@ impl Flushed {
 }
 
 /// Flush a recorded scene.
+/// What the flushed scene is for.
+///
+/// The one thing it decides is what happens to geometry that does not
+/// reach `.root` -- which ɴsɪ uses to mean "hidden", and which a
+/// viewport toggles constantly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Purpose {
+    /// A scene that will be edited: hidden geometry is **kept**, with
+    /// its visibility off.
+    ///
+    /// That keeps the scene's shape constant, so hiding and showing a
+    /// shape is nine attribute writes on an object MoonRay already
+    /// has -- an accelerator rebuild rather than a re-tessellation
+    /// (`002` `research.md` F3) -- instead of a change of set and
+    /// layer membership, which is structural and forces a full
+    /// re-apply.
+    #[default]
+    Interactive,
+    /// A scene that will be rendered once: hidden geometry is **left
+    /// out**.
+    ///
+    /// Nothing will toggle it, so carrying it costs a tessellation and
+    /// a place in the accelerator for something that will never be
+    /// drawn.
+    Batch,
+}
+
 pub fn flush(scene: &Scene) -> Flushed {
+    flush_for(scene, Purpose::default())
+}
+
+/// Flush a recorded scene for a particular [`Purpose`].
+pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
     let mut flushed = Flushed::default();
 
     // `SceneVariables` is written first, as rdl2's own writer does, but
@@ -198,11 +230,16 @@ pub fn flush(scene: &Scene) -> Flushed {
                 // A prototype does not reach `.root` and is not
                 // detached: its instancer is what places it.
                 let placed = prototypes.contains_key(handle);
-                objects.push(if !placed && detached(scene, handle) {
-                    hidden(shape)
+                if !placed && detached(scene, handle) {
+                    if purpose == Purpose::Batch {
+                        // Nothing will show it again, so it is not
+                        // worth tessellating.
+                        continue;
+                    }
+                    objects.push(hidden(shape));
                 } else {
-                    shape
-                });
+                    objects.push(shape);
+                }
                 geometries.push(Reference::new(MESH, handle));
 
                 // Every mesh gets a row, bound or not: MoonRay renders
@@ -235,11 +272,14 @@ pub fn flush(scene: &Scene) -> Flushed {
                 if let Some(object) =
                     instancer(scene, handle, shutter, &mut flushed)
                 {
-                    objects.push(if detached(scene, handle) {
-                        hidden(object)
+                    if detached(scene, handle) {
+                        if purpose == Purpose::Batch {
+                            continue;
+                        }
+                        objects.push(hidden(object));
                     } else {
-                        object
-                    });
+                        objects.push(object);
+                    }
                     geometries.push(Reference::new(INSTANCER, handle));
                     // An instancer needs a `Layer` row like any other
                     // geometry: MoonRay renders what the `Layer` names,
@@ -2308,6 +2348,31 @@ mod tests {
             "{:?}",
             flushed.limitations
         );
+    }
+
+    /// A batch flush leaves hidden geometry out entirely.
+    ///
+    /// Nothing will show it again, so carrying it costs a
+    /// tessellation and a place in the accelerator for something that
+    /// will never be drawn. `T7.1`.
+    #[test]
+    fn a_batch_flush_omits_a_detached_shape() {
+        let mut scene = triangle();
+        scene
+            .disconnect("tri", None, ".root", "objects")
+            .expect("a recordable edit");
+
+        let rdla = flush_for(&scene, Purpose::Batch).to_rdla();
+
+        assert!(!rdla.contains("RdlMeshGeometry(\"tri\")"), "{rdla}");
+        assert!(!rdla.contains("visible_in_camera"), "{rdla}");
+
+        // And it is gone from the layer, not merely from the objects.
+        let layer = rdla
+            .split("Layer(\"/nsi/layer\") {")
+            .nth(1)
+            .expect("a layer");
+        assert!(!layer.contains("\"tri\""), "{layer}");
     }
 
     /// **A shape disconnected from `.root` is not in the scene.**

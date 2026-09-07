@@ -59,7 +59,6 @@
 
 use crate::{
     display::{self, Callbacks},
-    flush::flush,
     render::Render,
 };
 use nsi_intermediate::{HostPtr, OwnedArg, OwnedData, Scene};
@@ -644,7 +643,12 @@ pub unsafe extern "C" fn NSIRenderControl(
     }
 
     with(ctx, |context| {
-        let flushed = flush(&context.scene);
+        // The spawned path renders once and exits, so hidden geometry
+        // is left out rather than carried.
+        let flushed = crate::flush::flush_for(
+            &context.scene,
+            crate::flush::Purpose::Batch,
+        );
 
         for limitation in &flushed.limitations {
             eprintln!("nsi-moonray: {limitation}");
