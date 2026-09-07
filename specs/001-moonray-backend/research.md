@@ -357,3 +357,133 @@ default, or the conversion depends on a number nobody stated.
 that rotates or scales across the shutter needs the decomposed form
 (`method` 0, with `orientations` and `use_rotation_motion_blur`).
 Reporting that is part of the task.
+
+### F11: 3Delight itself, as the oracle for the ɴsɪ side
+
+Everything above reads MoonRay. Four tasks were parked because they
+needed the *other* side -- what ɴsɪ means -- and reading it off a
+plausible-looking name is the failure `T1.3a` refuses. 3Delight
+2.9.209 for Linux is a free download; it ships `doc/nsi.pdf` (the
+specification), `renderdl`, `oslc`, and 178 compiled ɴsɪ shaders. That
+turns three of the four from opinion into measurement and the fourth
+into a table.
+
+The probes are `tools/probe/`, run against a 3Delight unpacked
+anywhere; `tools/probe/README.md` says how.
+
+#### `fov` is vertical -- measured, not inferred
+
+The specification says only "the field of view angle, in degrees" for
+`perspectivecamera`. Two hints point at vertical:
+`depthoffield.focallength` is documented as the *vertical* focal
+length, and the default screen window is `[-f, -1] .. [f, 1]` for
+`f = xres / yres`, whose vertical extent is fixed while the horizontal
+grows with aspect. `cylindricalcamera` says "vertical" outright.
+
+Hints are not a measurement, so:
+
+```
+quad, half-extent 1, at z = -1     camera at the origin, fov = 90
+resolution 400 x 200               (aspect 2, so vertical and
+                                    horizontal cannot be confused)
+```
+
+At `fov = 90` the visible half-extent at distance 1 is 1 along
+whichever axis the angle names. 3Delight lit:
+
+```
+x: 100..299   (200 of 400 columns, centred)
+y:   0..199   (all 200 rows)
+```
+
+The quad fills the **height** exactly and half the width. `fov` is
+**vertical**. Had it been horizontal the quad would have filled the
+width and overflowed the height.
+
+`focal()` already read it as vertical, from how
+`nsi_toolbelt::look_at_bounding_box_perspective_camera` uses it. That
+reading is now confirmed rather than borrowed, and
+`inprocess::the_frame_matches_3delights_framing` renders the same
+probe through MoonRay and asserts the same lit rectangle.
+
+#### ɴsɪ has no velocity attribute for meshes
+
+`T2.4` was parked on "which ɴsɪ attribute carries velocity". The
+answer is that none does. The specification defines velocity only on
+the two OpenVDB nodes:
+
+| Node | Attributes |
+| --- | --- |
+| `volume` | `velocitygrid` (a grid *name* inside the `.vdb`), `velocityscale`, `velocityreferencetime` |
+| `vdbparticles` | the grid's own `v` attribute, `velocityscale`, `velocityreferencetime` |
+
+`mesh`, `particles` and `curves` have none. Their motion is
+`NSISetAttributeAtTime` on `P`, which is `T2.3` and is done. The
+`mesh` node's `referencetime`, whose text mentions "velocity blur", is
+the reference time *for that VDB machinery*; on a mesh it has nothing
+to point at.
+
+Measured rather than read: the same quad rendered six times with a
+one-frame shutter, once per candidate attribute name.
+
+| What was set | Lit columns |
+| --- | --- |
+| nothing | 167..232 |
+| `P` at `t=0` and `t=1` | **218..313** |
+| `velocity` | 167..232 |
+| `v` | 167..232 |
+| `V` | 167..232 |
+| `vel` | 167..232 |
+| `motion` | 167..232 |
+
+Two position samples smear. Every velocity name is ignored silently.
+So MoonRay's `velocity_list_0` / `velocity_list_1` have no ɴsɪ input to
+carry, and `T2.4` is closed as not applicable rather than unfinished.
+The `velocity()` function in `flush.rs` is unaffected -- that one
+converts a *transform* delta for `RdlInstancerGeometry`, which is
+MoonRay's own requirement (`F10`), not an ɴsɪ attribute.
+
+#### Shader parameter names belong to the shader, and the shaders are enumerable
+
+`T1.3a` is right that there is no ɴsɪ-level naming: an ɴsɪ shader node
+carries a `shaderfilename` and whatever parameters that OSL shader
+declares. What was missing is that the shaders in practical use are a
+short, readable list -- 3Delight ships them compiled, and `.oso` is a
+text format, so the parameter names can be read rather than guessed:
+
+```
+grep -a '^param' dlPrincipled.oso
+```
+
+| Shader | Base colour | Roughness | Metallic | IOR | Opacity | Emission |
+| --- | --- | --- | --- | --- | --- | --- |
+| `dlPrincipled` | `i_color` | `roughness` | `metallic` | `refract_ior` | `opacity` | `incandescence` |
+| `dlStandard` | `base_color` | `specular_roughness` | `metalness` | `specular_IOR` | `opacity` | `emission_color` |
+| `openPBRSurface` | `baseColor` | `specularRoughness` | `baseMetalness` | `specularIOR` | `geometryOpacity` | `emissionColor` |
+| `dlMetal` | `i_color` | `roughness` | — (always 1) | — | `opacity` | — |
+| `dlGlass` | `i_color` | `refract_roughness` | — | `refract_ior` | — | `incandescence` |
+| `dlPrelit` | `i_color` | — | — | — | — | `i_incandescence` |
+| `UsdPreviewSurface` | `diffuseColor` | `roughness` | `metallic` | `ior` | `opacity` | `emissiveColor` |
+
+This is a table, not a heuristic. A shader not in it still carries the
+six `UsdPreviewSurface` names by exact match, and everything else is
+reported by name.
+
+#### An area light is geometry whose shader emits, and nothing else
+
+Section 4.5 is unambiguous: "There are no special light source nodes
+in ɴsɪ ... Any scene geometry can become a light source if its surface
+shader produces an `emission()` closure." An area light is a mesh
+wearing an emitter; a spot light is "an epsilon sized geometry (a
+small disk, a particle, etc.)" wearing a shader that shapes the
+emission with a cone angle; a directional light is an `environment`
+node with `angle` 0.
+
+So recognising one means knowing what the shader does, and MoonRay
+runs no OSL (`F6`). There is no attribute to read. What *is* readable
+is the shader's name and its parameters, which is the table above: a
+shader that is one of the known emitters, or that carries a known
+emissive parameter set to something other than black, is emissive.
+Anything else is reported rather than guessed at -- a mesh silently
+promoted to a light is worse than a mesh that stays a mesh and says
+so.
