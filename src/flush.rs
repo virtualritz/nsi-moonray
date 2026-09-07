@@ -1338,26 +1338,140 @@ fn material(
 /// The parameters carried from an ɴsɪ shader into the substitute
 /// surface, paired with the `UsdPreviewSurface` attribute each feeds.
 ///
-/// Matched by **exact name only**. An ɴsɪ shader is an OSL shader and
-/// its parameter names are whatever its author chose, so anything
-/// cleverer than this is guesswork -- and a guessed name table that
-/// silently maps the wrong parameter is worse than carrying nothing,
-/// because the render looks plausible. Everything not on this list is
-/// reported by name rather than dropped quietly.
-const CARRIED: [(&str, &str); 6] = [
-    ("diffuseColor", "diffuseColor"),
-    ("emissiveColor", "emissiveColor"),
-    ("roughness", "roughness"),
-    ("metallic", "metallic"),
-    ("ior", "ior"),
-    ("opacity", "opacity"),
+/// An ɴsɪ shader is an OSL shader: it names a compiled shader in
+/// `shaderfilename` and carries whatever parameters *that* shader
+/// declares. So there is no ɴsɪ spelling of "roughness" to look up, and
+/// inventing one is the failure this table exists to avoid -- a wrong
+/// name renders plausibly and silently.
+///
+/// What there is, instead, is a short list of shaders in practical use,
+/// shipped compiled with 3Delight. `.oso` is a text format, so each row
+/// below was **read** off one, with `tools/probe/parameters.sh`, rather
+/// than guessed; `research.md` F11 has the table and where it came
+/// from. `UsdPreviewSurface`'s own names are the last row, and stand in
+/// for a shader this list does not know: matching them by exact name is
+/// the behaviour that was here before the probe existed.
+///
+/// Everything not carried is reported by name rather than dropped
+/// quietly.
+const PARAMETERS: [(&str, &[(&str, &str)]); 7] = [
+    (
+        "dlPrincipled",
+        &[
+            ("i_color", "diffuseColor"),
+            ("incandescence", "emissiveColor"),
+            ("roughness", "roughness"),
+            ("metallic", "metallic"),
+            ("refract_ior", "ior"),
+            ("opacity", "opacity"),
+        ],
+    ),
+    (
+        "dlStandard",
+        &[
+            ("base_color", "diffuseColor"),
+            ("emission_color", "emissiveColor"),
+            ("specular_roughness", "roughness"),
+            ("metalness", "metallic"),
+            ("specular_IOR", "ior"),
+            ("opacity", "opacity"),
+        ],
+    ),
+    (
+        "openPBRSurface",
+        &[
+            ("baseColor", "diffuseColor"),
+            ("emissionColor", "emissiveColor"),
+            ("specularRoughness", "roughness"),
+            ("baseMetalness", "metallic"),
+            ("specularIOR", "ior"),
+            ("geometryOpacity", "opacity"),
+        ],
+    ),
+    (
+        // Always metal, so `metallic` is 1 rather than read.
+        "dlMetal",
+        &[
+            ("i_color", "diffuseColor"),
+            ("roughness", "roughness"),
+            ("opacity", "opacity"),
+        ],
+    ),
+    (
+        "dlGlass",
+        &[
+            ("i_color", "diffuseColor"),
+            ("incandescence", "emissiveColor"),
+            ("refract_roughness", "roughness"),
+            ("refract_ior", "ior"),
+        ],
+    ),
+    (
+        "dlPrelit",
+        &[
+            ("i_color", "diffuseColor"),
+            ("i_incandescence", "emissiveColor"),
+        ],
+    ),
+    (
+        "UsdPreviewSurface",
+        &[
+            ("diffuseColor", "diffuseColor"),
+            ("emissiveColor", "emissiveColor"),
+            ("roughness", "roughness"),
+            ("metallic", "metallic"),
+            ("ior", "ior"),
+            ("opacity", "opacity"),
+        ],
+    ),
 ];
+
+/// What `PARAMETERS` says to carry for a shader.
+///
+/// `shaderfilename` is a path to a compiled shader, so what identifies
+/// it is the file stem: `dlPrincipled`, `/opt/3delight/osl/dlPrincipled`
+/// and `dlPrincipled.oso` are the same shader. A shader the table does
+/// not know falls back to `UsdPreviewSurface`'s own names, matched
+/// exactly -- which is right as often as the two happen to agree, and
+/// wrong in no case that carrying nothing would have got right.
+fn parameters(node: &Node) -> &'static [(&'static str, &'static str)] {
+    let named = match node.effective("shaderfilename").map(|arg| &arg.data) {
+        Some(OwnedData::String(names)) => names
+            .first()
+            .map(|name| String::from_utf8_lossy(name).into_owned()),
+        _ => None,
+    };
+
+    let stem = named.as_deref().map(|name| {
+        let after_slash = name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+
+        after_slash
+            .strip_suffix(".oso")
+            .unwrap_or(&after_slash)
+            .to_owned()
+    });
+
+    let fallback = PARAMETERS[PARAMETERS.len() - 1].1;
+
+    let Some(stem) = stem else {
+        return fallback;
+    };
+
+    PARAMETERS
+        .iter()
+        .find(|(shader, _)| *shader == stem)
+        .map_or(fallback, |(_, carried)| *carried)
+}
 
 /// One ɴsɪ shader, as MoonRay's stock PBR surface.
 ///
 /// MoonRay runs no OSL (`research.md` F6), so the shader itself cannot
-/// cross. What crosses is a `UsdPreviewSurface` carrying the handful of
-/// parameters that share a name with one of its attributes.
+/// cross. What crosses is a `UsdPreviewSurface` carrying the parameters
+/// `PARAMETERS` knows how to name for this shader.
 fn shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     let mut object = Object::new(MATERIAL, handle);
     let Some(node) = scene.node(handle) else {
@@ -1365,7 +1479,8 @@ fn shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     };
 
     let mut carried = Vec::new();
-    for (from, to) in CARRIED {
+    for (from, to) in parameters(node) {
+        let (from, to) = (*from, *to);
         let Some(arg) = node.effective(from) else {
             continue;
         };
@@ -1391,11 +1506,14 @@ fn shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
         }
     }
 
+    // `shaderfilename` names the shader rather than parametrising it,
+    // and reporting it as a lost parameter would be noise in every
+    // message.
     let dropped: Vec<&str> = node
         .attrs
         .keys()
         .map(String::as_str)
-        .filter(|name| !carried.contains(name))
+        .filter(|name| *name != "shaderfilename" && !carried.contains(name))
         .collect();
 
     if dropped.is_empty() {
@@ -1493,9 +1611,11 @@ fn camera(
 /// `atan(halfFilmWidth * height / width / focal)`. Inverting that gives
 /// the focal length below.
 ///
-/// ɴsɪ's `fov` is read as **vertical**, which is how
-/// `nsi_toolbelt::look_at_bounding_box_perspective_camera` uses it.
-/// Unverified against a 3Delight render; see `contracts/flush.md`.
+/// ɴsɪ's `fov` is **vertical**, measured against 3Delight rather than
+/// inferred: a quad of half-extent 1 one unit in front of the camera,
+/// at `fov` 90 on a 400x200 frame, fills all 200 rows and 200 of the
+/// 400 columns. `tools/probe/framing.nsi` is the probe and
+/// `research.md` F11 the write-up.
 fn focal(fov_degrees: f32, resolution: (i32, i32)) -> f32 {
     let aspect = resolution.1 as f32 / resolution.0 as f32;
     let half = (fov_degrees.to_radians() * 0.5).tan();
@@ -1914,6 +2034,147 @@ mod tests {
                 .any(|line| line.contains("stands in for it")),
             "{:?}",
             flushed.limitations
+        );
+    }
+
+    /// A shader names an OSL shader, and its parameters are that
+    /// shader's, so the table is keyed on `shaderfilename`.
+    ///
+    /// `dlPrincipled` is 3Delight's supershader. Its base colour is
+    /// `i_color` and its index of refraction is `refract_ior`, neither
+    /// of which shares a name with anything on `UsdPreviewSurface`.
+    /// Read off the shipped `.oso`; see `research.md` F11.
+    #[test]
+    fn a_known_shader_is_carried_by_its_own_parameter_names() {
+        let mut scene = triangle();
+
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("shader", "shader").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "shader",
+                vec![
+                    arg(
+                        "shaderfilename",
+                        Type::String,
+                        OwnedData::String(vec![b"dlPrincipled".to_vec()]),
+                    ),
+                    arg(
+                        "i_color",
+                        Type::Color,
+                        OwnedData::F32(vec![0.25, 0.5, 0.75]),
+                    ),
+                    arg("refract_ior", Type::F32, OwnedData::F32(vec![1.6])),
+                    arg("roughness", Type::F32, OwnedData::F32(vec![0.3])),
+                ],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("shader", None, "attr", "surfaceshader")
+            .unwrap();
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(
+            rdla.contains("[\"diffuseColor\"] = Rgb(0.25, 0.5, 0.75)"),
+            "{rdla}"
+        );
+        assert!(rdla.contains("[\"ior\"] = 1.6"), "{rdla}");
+        assert!(rdla.contains("[\"roughness\"] = 0.3"), "{rdla}");
+
+        // The shader's own name is not a lost parameter.
+        assert!(
+            !flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("shaderfilename")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// A shader the table does not know keeps the old behaviour:
+    /// `UsdPreviewSurface`'s own names, matched exactly.
+    #[test]
+    fn an_unknown_shader_falls_back_to_exact_names() {
+        let mut scene = triangle();
+
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("shader", "shader").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "shader",
+                vec![
+                    arg(
+                        "shaderfilename",
+                        Type::String,
+                        OwnedData::String(vec![
+                            b"/some/studio/osl/houseShader.oso".to_vec(),
+                        ]),
+                    ),
+                    arg(
+                        "diffuseColor",
+                        Type::Color,
+                        OwnedData::F32(vec![1.0, 0.0, 0.0]),
+                    ),
+                    arg("gloopiness", Type::F32, OwnedData::F32(vec![7.0])),
+                ],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("shader", None, "attr", "surfaceshader")
+            .unwrap();
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("[\"diffuseColor\"] = Rgb(1, 0, 0)"), "{rdla}");
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("gloopiness")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// The shader is identified by the file stem, so a path and an
+    /// extension do not hide it.
+    #[test]
+    fn a_shader_path_still_names_its_shader() {
+        let mut scene = Scene::default();
+        scene.create("shader", "shader").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "shader",
+                vec![arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![
+                        b"/opt/3delight/osl/openPBRSurface.oso".to_vec(),
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let carried = parameters(scene.node("shader").expect("the node"));
+
+        assert!(
+            carried.iter().any(|(from, to)| *from == "baseColor"
+                && *to == "diffuseColor"),
+            "{carried:?}"
         );
     }
 

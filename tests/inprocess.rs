@@ -610,6 +610,116 @@ fn column(pixels: &[f32], width: usize, height: usize, x: usize) -> f32 {
         .sum()
 }
 
+/// The covered rectangle in a frame.
+///
+/// Alpha is what says a pixel is covered; colour would make this a
+/// measurement of the light as well as of the geometry. The cut is at
+/// **half the frame's own maximum** rather than at a fixed value: a
+/// flat quad lit by one environment carries the same alpha everywhere
+/// inside it, whatever that value turns out to be, and half of it is
+/// the half-covered contour -- which is what 3Delight's box filter
+/// draws too.
+fn covered(
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    let peak = pixels
+        .iter()
+        .skip(3)
+        .step_by(4)
+        .fold(0.0f32, |peak, alpha| peak.max(*alpha));
+    if peak <= 0.0 {
+        return None;
+    }
+
+    let (mut left, mut right, mut top, mut bottom) =
+        (usize::MAX, 0usize, usize::MAX, 0usize);
+
+    for y in 0..height {
+        for x in 0..width {
+            if pixels[(y * width + x) * 4 + 3] > peak * 0.5 {
+                left = left.min(x);
+                right = right.max(x);
+                top = top.min(y);
+                bottom = bottom.max(y);
+            }
+        }
+    }
+
+    (left != usize::MAX).then_some((left, right, top, bottom))
+}
+
+/// **`T1.6`.** The frame matches 3Delight's, so `fov` is vertical here
+/// too.
+///
+/// ɴsɪ's specification says only "the field of view angle, in degrees",
+/// and reading it as horizontal is an entirely plausible mistake that
+/// renders a plausible picture -- just framed wrong, in a way that
+/// looks like the camera was placed differently.
+///
+/// So this is the same probe 3Delight was measured with
+/// (`tools/probe/framing.nsi`, `research.md` F11): a quad of half-extent
+/// 1, one unit in front of the camera, `fov` 90, on a 400x200 frame
+/// where the two axes cannot be confused. 3Delight lit x 100..299 and
+/// y 0..199 -- the full height and half the width. Were `fov`
+/// horizontal, the quad would fill the width instead.
+#[test]
+fn the_frame_matches_3delights_framing() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (400usize, 200usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    nsi.set_attribute(
+        "quad",
+        vec![arg(
+            "P",
+            Type::Point,
+            OwnedData::F32(vec![
+                -1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0,
+                -1.0,
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.set_attribute(
+        "cam",
+        vec![arg("fov", Type::F32, OwnedData::F32(vec![90.0]))],
+    )
+    .unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let pixels = session.render().snapshot().expect("a frame").2;
+
+    let (left, right, top, bottom) =
+        covered(&pixels, width, height).expect("the quad should be drawn");
+
+    // A pixel of slack at each edge: the two renderers do not have to
+    // agree on where a partly covered pixel tips over, only on where
+    // the quad is.
+    let close = |got: usize, want: usize, what: &str| {
+        assert!(
+            got.abs_diff(want) <= 1,
+            "{what}: {got}, 3Delight said {want} \
+             (x {left}..{right}, y {top}..{bottom})"
+        );
+    };
+
+    close(top, 0, "the top of the quad");
+    close(bottom, height - 1, "the bottom of the quad");
+    close(left, 100, "the left of the quad");
+    close(right, 299, "the right of the quad");
+}
+
 /// **`T6.6`.** An instanced scene renders — two copies of one
 /// prototype, in two places.
 ///

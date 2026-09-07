@@ -181,13 +181,22 @@ Rust on both sides, so **no ndspy marshalling is involved**.
       `UsdPreviewSurface` at its defaults -- stock MoonRay's PBR
       surface -- and the row points at it. MoonRay runs no OSL, so the
       shader itself cannot be translated; the substitution is reported.
-- [~] T1.3a Carry what parameters can be carried into the substitute
-      surface. Six are, **by exact name only** -- `diffuseColor`,
-      `emissiveColor`, `roughness`, `metallic`, `ior`, `opacity` -- and
-      every other parameter on the shader is reported by name rather
-      than dropped quietly. Mapping by anything looser is guesswork: an
-      ɴsɪ shader is an OSL shader and its parameter names are its
-      author's, so a wrong guess renders plausibly and silently.
+- [x] T1.3a Carry what parameters can be carried into the substitute
+      surface. An ɴsɪ shader is an OSL shader and its parameter names
+      are its author's, so there is no ɴsɪ spelling of "roughness" to
+      look up and a guessed one renders plausibly and silently. What
+      there is instead is a short list of shaders in practical use,
+      shipped compiled with 3Delight, and `.oso` is a text format: the
+      `PARAMETERS` table in `flush.rs` was **read** off them with
+      `tools/probe/parameters.sh`, keyed on `shaderfilename`. Six
+      shaders are known -- `dlPrincipled`, `dlStandard`,
+      `openPBRSurface`, `dlMetal`, `dlGlass`, `dlPrelit` -- and a
+      seventh row carries `UsdPreviewSurface`'s own names for anything
+      the table does not know, which is the exact-name behaviour that
+      was here before. Everything not carried is still reported by
+      name. `research.md` F11;
+      `flush::tests::a_known_shader_is_carried_by_its_own_parameter_names`
+      and two siblings.
 - [x] T1.4 **Two shapes, two materials, each correct.** Inherited top
       risk, and now checked by reading pixels rather than the file: two
       quads, red left and green right, asserted per channel.
@@ -205,10 +214,17 @@ Rust on both sides, so **no ndspy marshalling is involved**.
       run. MoonRay has `RectLight`, `DiskLight`, `SphereLight`,
       `DistantLight`, `SpotLight` and `CylinderLight` waiting; what is
       missing is a rule for recognising them that is not a guess.
-- [ ] T1.6 Confirm ɴsɪ's `fov` is vertical, and the focal length
-      derived from it. Read as vertical because
-      `nsi_toolbelt::look_at_bounding_box_perspective_camera` treats it
-      that way; unverified against a 3Delight render.
+- [x] T1.6 ɴsɪ's `fov` is **vertical** -- measured against 3Delight,
+      not inferred. The specification says only "the field of view
+      angle, in degrees", and reading it as horizontal renders a
+      plausible picture framed wrong, in a way that looks like the
+      camera was placed differently. `tools/probe/framing.nsi` puts a
+      quad of half-extent 1 one unit in front of the camera at `fov`
+      90, on a 400x200 frame where the two axes cannot be confused;
+      3Delight lit the full 200 rows and 200 of the 400 columns.
+      `inprocess::the_frame_matches_3delights_framing` renders the same
+      probe through MoonRay and lands on the same rectangle to within a
+      pixel. `research.md` F11.
 
 ## User Story 2: Motion Blur (P1)
 
@@ -249,8 +265,8 @@ The capability that distinguishes this backend.
       siblings; `inprocess::a_deforming_mesh_renders_blurred` counts
       the partially covered columns a smear leaves and a sharp edge
       does not.
-- [~] T2.4 Velocity-based motion. **MoonRay's side is fully known; ɴsɪ's
-      name is not.** `RdlMesh` declares `velocity_list_0` and
+- [x] T2.4 Velocity-based motion. **Not applicable: ɴsɪ has no such
+      attribute.** `RdlMesh` declares `velocity_list_0` and
       `velocity_list_1` (`Vec3fVector`), the first documented as being
       used "instead of vertex positions from a second motion step", and
       `CommonAttributes.h` declares `motion_blur_type` with
@@ -259,11 +275,22 @@ The capability that distinguishes this backend.
       no flag: `BEST` picks the two-position path when two positions
       are what it has. There is no `use velocity` boolean; an earlier
       draft of these specs was wrong about that.
-      What is missing is **which ɴsɪ attribute carries velocity**.
-      `nsi-intermediate` has no concept of one, and guessing a name is
-      the same failure `T1.3a` refuses: a wrong guess renders
-      plausibly, blurred by the wrong amount, and looks like a shutter
-      setting. Whoever has the spec can finish this in minutes.
+      **ɴsɪ has no velocity attribute for meshes**, so there is
+      nothing to carry and this is closed as not applicable rather than
+      left unfinished. The specification defines velocity only on the
+      two OpenVDB nodes, as the *name of a grid* inside the `.vdb`
+      (`velocitygrid`, `velocityscale`, `velocityreferencetime`);
+      `mesh`, `particles` and `curves` have none, and their motion is
+      `NSISetAttributeAtTime` on `P`, which is `T2.3`. Measured as well
+      as read: `tools/probe/motion.sh` renders the same quad once per
+      candidate name, and two position samples smear while `velocity`,
+      `v`, `V`, `vel` and `motion` are ignored in silence.
+      `research.md` F11.
+
+      The `velocity()` function in `flush.rs` is a different thing and
+      is unaffected: it converts a *transform* delta for
+      `RdlInstancerGeometry`, which is MoonRay's own requirement
+      (`F10`), not an ɴsɪ attribute.
 - [x] T2.5 Report, never flatten, a scene with more than two motion
       samples on one attribute. rdl2 has exactly two timesteps.
       `flush::tests::more_than_two_motion_samples_are_reported` for a
