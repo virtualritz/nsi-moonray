@@ -5,8 +5,13 @@
 surface probe(
     color Cs = color(0.8, 0.4, 0.1),
     float power = 0,
-    float roughness = 0.3)
+    float roughness = 0.3,
+    // An output, so this shader can stand at both ends of a
+    // `connect` when the probe is checking a spec that wires two
+    // layers together.
+    output color Cout = color(0))
 {
+    Cout = Cs;
     // `"label", "..."` is a keyword parameter the *renderer*
     // registers, not part of OSL. It is the only thing MoonRay's AOV
     // and LPE labels can be mapped from, so the probe has to show one

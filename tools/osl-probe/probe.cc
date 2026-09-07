@@ -21,6 +21,7 @@
 #include <OpenImageIO/texture.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -191,6 +192,22 @@ walk(const ClosureColor* closure, const Color3& weight, int depth)
 
 } // namespace
 
+/// Read a whole file, for the spec-checking mode.
+std::string
+read(const char* path)
+{
+    std::string text;
+    if (FILE* file = std::fopen(path, "rb")) {
+        char buffer[4096];
+        size_t got;
+        while ((got = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
+            text.append(buffer, got);
+        }
+        std::fclose(file);
+    }
+    return text;
+}
+
 int
 main(int argc, char** argv)
 {
@@ -208,11 +225,25 @@ main(int argc, char** argv)
     // as one string, which is what an rdl2 `String` attribute can
     // carry and what a class with statically declared attributes
     // otherwise cannot.
-    const char* group_spec = R"(
+    //
+    // A second argument names a file holding a spec instead, which is
+    // how `src/osl.rs`'s output is checked against the parser that has
+    // to read it rather than against what this expected it to say.
+    std::string from_file;
+    if (argc > 2) {
+        from_file = read(argv[2]);
+        if (from_file.empty()) {
+            std::fprintf(stderr, "%s: empty or unreadable\n", argv[2]);
+            return 2;
+        }
+    }
+
+    const char* group_spec = from_file.empty() ? R"(
         param color Cs 0.2 0.7 0.9 ;
         param float power 42 ;
         shader probe layer1 ;
-    )";
+    )"
+                                               : from_file.c_str();
 
     ShaderGroupRef group = shading.ShaderGroupBegin("nsi", "surface",
                                                     group_spec);
