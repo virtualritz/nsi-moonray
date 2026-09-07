@@ -1,4 +1,10 @@
-/// The `Osl` material's attributes.
+/// The attributes both OSL root shaders declare.
+///
+/// Included by `Osl.cc` and `OslDisplacement.cc` alike -- the two
+/// differ in what they do with the group, not in what they are given.
+/// `NSI_MOONRAY_OSL_ROOT` is the rdl2 base class, and
+/// `NSI_MOONRAY_OSL_LABELS` asks for the lobe-label table, which only
+/// a material has lobes to carry.
 ///
 /// **Two strings, not a parameter list.** rdl2 declares a class's
 /// attributes once, statically, so one class serving every OSL shader
@@ -13,6 +19,11 @@
 
 using namespace scene_rdl2;
 
+#ifndef NSI_MOONRAY_OSL_ROOT
+#error "define NSI_MOONRAY_OSL_ROOT before including attributes.cc"
+#endif
+
+#ifdef NSI_MOONRAY_OSL_LABELS
 /// The lobe labels this class can name.
 ///
 /// MoonRay's material AOVs and light-path expressions key off an
@@ -38,6 +49,7 @@ static const char* labels[] = {
     "hair",          //  8
     nullptr,
 };
+#endif
 
 RDL2_DSO_ATTR_DECLARE
 
@@ -45,7 +57,7 @@ RDL2_DSO_ATTR_DECLARE
     rdl2::AttributeKey<rdl2::String> attrGroupName;
     rdl2::AttributeKey<rdl2::String> attrSearchPath;
 
-RDL2_DSO_ATTR_DEFINE(rdl2::Material)
+RDL2_DSO_ATTR_DEFINE(NSI_MOONRAY_OSL_ROOT)
 
     attrGroupSpec = sceneClass.declareAttribute<rdl2::String>(
         "group_spec", "");
@@ -68,6 +80,8 @@ RDL2_DSO_ATTR_DEFINE(rdl2::Material)
         "Where to find compiled `.oso` shaders. Empty reads "
         "$OSL_SHADER_PATH, then the working directory.");
 
+#ifdef NSI_MOONRAY_OSL_LABELS
     sceneClass.declareDataPtr("labels", labels);
+#endif
 
 RDL2_DSO_ATTR_END

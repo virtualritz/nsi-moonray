@@ -20,8 +20,11 @@ use crate::{
     name::Name,
     value::{Reference, Value},
 };
-use nsi_intermediate::{IDENTITY, Node, OwnedData, Scene};
+use nsi_intermediate::{
+    EdgeKind, IDENTITY, Node, OwnedArgument, OwnedData, Scene,
+};
 use nsi_trait::Type;
+use std::collections::HashSet;
 
 /// MoonRay's mesh geometry, whose DSO is `moonray/dso/geometry/RdlMesh`.
 const MESH: &str = "RdlMeshGeometry";
@@ -46,6 +49,34 @@ const XFORM_LIST: i32 = 2;
 
 /// MoonRay's perspective camera DSO.
 const PERSPECTIVE_CAMERA: &str = "PerspectiveCamera";
+
+/// The camera classes, by the node type each comes from.
+///
+/// Four of the interface's five have a MoonRay counterpart and the
+/// mapping is a rename; the fifth, `cylindricalcamera`, has none.
+/// Getting this wrong is the quiet kind of wrong -- a scene shot
+/// through an orthographic camera rendered in perspective is a
+/// perfectly good image of the wrong thing -- which is why the class
+/// travels with the handle rather than being assumed at the reference.
+const CAMERAS: [(&str, &str); 4] = [
+    ("perspectivecamera", PERSPECTIVE_CAMERA),
+    ("orthographiccamera", "OrthographicCamera"),
+    ("fisheyecamera", "FisheyeCamera"),
+    ("sphericalcamera", "SphericalCamera"),
+];
+
+/// The MoonRay class one camera node becomes.
+fn camera_class(scene: &Scene, handle: &str) -> &'static str {
+    scene
+        .node(handle)
+        .and_then(|node| {
+            CAMERAS
+                .iter()
+                .find(|(nsi, _)| *nsi == node.node_type())
+                .map(|(_, class)| *class)
+        })
+        .unwrap_or(PERSPECTIVE_CAMERA)
+}
 
 /// MoonRay's environment light DSO.
 const ENVIRONMENT_LIGHT: &str = "EnvLight";
@@ -98,6 +129,43 @@ const MATERIAL: &str = "UsdPreviewSurface";
 /// MoonRay, so it has to be on MoonRay's DSO path for a scene naming
 /// it to load at all.
 const OSL_MATERIAL: &str = "Osl";
+
+/// The root shader an ɴsɪ `displacementshader` becomes.
+///
+/// Built by this repository beside the material, from the same shading
+/// system: the group is identical, the *usage* is not. There is no
+/// substitute for it, so without OSL a displacement is reported and
+/// dropped -- moving vertices is not something a stand-in surface can
+/// approximate.
+const OSL_DISPLACEMENT: &str = "OslDisplacement";
+
+/// The class one ɴsɪ primitive variable becomes.
+///
+/// MoonRay declares a geometry's attributes statically like everything
+/// else in rdl2, so an attribute nobody knew about in advance travels
+/// as a `UserData` object in the mesh's `primitive_attributes`.
+const USER_DATA: &str = "UserData";
+
+/// What a `volume` node becomes.
+///
+/// The interface's `volume` node is *defined* as OpenVDB -- a file and
+/// a set of named grids, and nothing else -- and `VdbGeometry` is
+/// MoonRay's only volume geometry, so this is one of the closer
+/// mappings in this backend.
+const VOLUME: &str = "VdbGeometry";
+
+/// The volume shader a `VdbGeometry` is rendered with.
+///
+/// MoonRay's stock one, standing in for the OSL volume shader the
+/// interface binds through `volumeshader` -- which needs a
+/// `VolumeShader` root of its own, whose four separate virtuals
+/// (extinction, albedo, emission, anisotropy) do not fit OSL's one
+/// execution. A `Layer` row with no volume shader renders nothing at
+/// all, so the substitute is what makes a volume appear.
+const VOLUME_SHADER: &str = "VdbVolume";
+
+/// The one `VdbVolume` every volume in the scene is rendered with.
+const DEFAULT_VOLUME_SHADER: &str = "/nsi/volume_shader";
 
 /// Every way MoonRay can see a piece of geometry.
 ///
@@ -241,12 +309,20 @@ pub fn flush_with(
     // Handles borrow from the scene now rather than being copied:
     // upstream interns them, and a flush that cloned every one back
     // into a `String` would hand that saving straight back.
-    let mut bindings: Vec<(&'static str, &str, Option<Reference>)> = Vec::new();
+    let mut bindings: Vec<(
+        &'static str,
+        &str,
+        Option<Reference>,
+        Option<Reference>,
+    )> = Vec::new();
     let mut objects = Vec::new();
     // Handles of the instancers seen, so a prototype can be told from
     // an ordinary shape after the walk -- a prototype is drawn by its
     // instancer and must not also be drawn on its own.
     let mut instancers: Vec<&str> = Vec::new();
+    // Handles of the volumes seen, so their layer rows can be given a
+    // volume shader rather than a material after the walk.
+    let mut volumes: Vec<&str> = Vec::new();
     // A scene with none gets one, because MoonRay crashes rather than
     // complains. See `DEFAULT_CAMERA`.
     let mut cameras = 0usize;
@@ -262,6 +338,11 @@ pub fn flush_with(
     // prototype's transform has to be resolved *relative to* its
     // instancer rather than to the world.
     let prototypes = prototypes(scene);
+    // Which shaders are bound in which slot. Built from the edges
+    // rather than per geometry because the *class* a shader node
+    // becomes is a property of the shader, and the node walk reaches it
+    // in whatever order the scene was recorded in.
+    let (surfaces, displaces) = shader_roles(scene);
 
     for (handle, node) in scene.nodes() {
         match node.node_type() {
@@ -294,13 +375,15 @@ pub fn flush_with(
                         // and skips the light otherwise. So the mesh is
                         // emitted, and left out of both the layer and
                         // the geometry set.
-                        objects.push(mesh(
+                        let (shape, data) = mesh(
                             scene,
                             handle,
                             prototypes.get(handle).copied(),
                             shutter,
                             &mut flushed,
-                        ));
+                        );
+                        objects.extend(data);
+                        objects.push(shape);
                         flushed.limitations.push(format!(
                             "{handle:?} is a {MESH_LIGHT}'s geometry and so \
                              is not in the render layer, which MoonRay \
@@ -314,13 +397,14 @@ pub fn flush_with(
                     continue;
                 }
 
-                let shape = mesh(
+                let (shape, data) = mesh(
                     scene,
                     handle,
                     prototypes.get(handle).copied(),
                     shutter,
                     &mut flushed,
                 );
+                objects.extend(data);
                 // A prototype does not reach `.root` and is not
                 // detached: its instancer is what places it.
                 let placed = prototypes.contains_key(handle);
@@ -343,10 +427,34 @@ pub fn flush_with(
                     MESH,
                     handle,
                     material(scene, handle, shading, &mut flushed),
+                    displacement(scene, handle, shading, &mut flushed),
                 ));
             }
 
-            "perspectivecamera" => {
+            "volume" => {
+                objects.push(volume(scene, handle, shutter, &mut flushed));
+                geometries.push(Reference::new(VOLUME, handle));
+                // A volume's row carries a *volume shader* rather than
+                // a material, and the two columns are not
+                // interchangeable: MoonRay reads the volume through the
+                // sixth and would render nothing from the third.
+                bindings.push((VOLUME, handle, None, None));
+                volumes.push(handle);
+            }
+
+            "vdbparticles" => flushed.limitations.push(format!(
+                "{handle:?} is a `vdbparticles` node; MoonRay has no \
+                 point-cloud geometry that reads an OpenVDB \
+                 `PointDataGrid`, and it was skipped"
+            )),
+
+            "cylindricalcamera" => flushed.limitations.push(format!(
+                "{handle:?} is a `cylindricalcamera`; MoonRay has no \
+                 cylindrical projection, and the camera was skipped"
+            )),
+
+            "perspectivecamera" | "orthographiccamera" | "fisheyecamera"
+            | "sphericalcamera" => {
                 objects.push(camera(
                     scene,
                     handle,
@@ -395,6 +503,7 @@ pub fn flush_with(
                         INSTANCER,
                         handle,
                         material(scene, handle, shading, &mut flushed),
+                        displacement(scene, handle, shading, &mut flushed),
                     ));
                     instancers.push(handle);
                 }
@@ -406,12 +515,35 @@ pub fn flush_with(
             "outputdriver" | "outputlayer" => {}
 
             "shader" => {
+                // rdl2 names are unique across classes -- creating a
+                // second object under a name another class already
+                // holds is an error, not a shadowing -- so a shader
+                // becomes *one* object and its binding decides which.
+                if shading == Shading::Osl && displaces.contains(&handle) {
+                    if surfaces.contains(&handle) {
+                        flushed.limitations.push(format!(
+                            "shader {handle:?} is bound as both a surface                              and a displacement shader; it crossed as the                              surface, because a MoonRay object has one                              class and one name"
+                        ));
+                        objects.push(shader(
+                            scene,
+                            handle,
+                            shading,
+                            &mut flushed,
+                        ));
+                    } else {
+                        objects.push(osl_displacement(
+                            scene,
+                            handle,
+                            &mut flushed,
+                        ));
+                    }
+                }
                 // An emitter is carried by the light it makes, not by
                 // a stand-in surface nothing references. With OSL
                 // running the question is answered by *executing* the
                 // shader rather than by recognising its name, so the
                 // check only applies to the substitute.
-                if shading == Shading::Osl
+                else if shading == Shading::Osl
                     || light_class(scene, handle).is_none()
                 {
                     objects.push(shader(scene, handle, shading, &mut flushed));
@@ -427,7 +559,12 @@ pub fn flush_with(
 
     for output in scene.render_outputs() {
         for layer in &output.layers {
-            objects.push(render_output(scene, &layer.handle, &layer.drivers));
+            objects.push(render_output(
+                scene,
+                &layer.handle,
+                &layer.drivers,
+                &mut flushed,
+            ));
         }
 
         // `SceneVariables`' own output file defaults to `scene.exr` in
@@ -444,8 +581,10 @@ pub fn flush_with(
             variables = variables.set("output_file", Value::String(file));
         }
 
-        variables = variables
-            .set("camera", Value::Object(camera_reference(&output.camera)));
+        variables = variables.set(
+            "camera",
+            Value::Object(camera_reference(scene, &output.camera)),
+        );
     }
 
     if cameras == 0 {
@@ -489,21 +628,48 @@ pub fn flush_with(
     };
 
     let mut unshaded = 0;
+    let mut volumes_shaded = false;
     let assignments = bindings
         .into_iter()
-        .map(|(class, handle, material)| {
+        .map(|(class, handle, material, displacement)| {
+            // **A volume's row is shaded through the sixth column, not
+            // the third.** MoonRay reads a volume through its
+            // `VolumeShader` and a material there does nothing; the row
+            // still needs one, or the volume renders as nothing at all.
+            if class == VOLUME {
+                volumes_shaded = true;
+                return Assignment {
+                    volume_shader: Some(Reference::new(
+                        VOLUME_SHADER,
+                        DEFAULT_VOLUME_SHADER,
+                    )),
+                    ..Assignment::new(
+                        Reference::new(class, handle),
+                        None,
+                        light_set.clone(),
+                    )
+                };
+            }
+
             let material = material.unwrap_or_else(|| {
                 unshaded += 1;
                 Reference::new(MATERIAL, DEFAULT_MATERIAL)
             });
 
-            Assignment::new(
-                Reference::new(class, handle),
-                Some(material),
-                light_set.clone(),
-            )
+            Assignment {
+                displacement,
+                ..Assignment::new(
+                    Reference::new(class, handle),
+                    Some(material),
+                    light_set.clone(),
+                )
+            }
         })
         .collect();
+
+    if volumes_shaded {
+        objects.push(Object::new(VOLUME_SHADER, DEFAULT_VOLUME_SHADER));
+    }
 
     if unshaded > 0 {
         objects.push(Object::new(MATERIAL, DEFAULT_MATERIAL));
@@ -1278,9 +1444,9 @@ fn mesh(
     prototype_of: Option<&str>,
     shutter: Option<[f64; 2]>,
     flushed: &mut Flushed,
-) -> Object {
+) -> (Object, Vec<Object>) {
     let Some(node) = scene.node(handle) else {
-        return Object::new(MESH, handle);
+        return (Object::new(MESH, handle), Vec::new());
     };
 
     let mut object = Object::new(MESH, handle);
@@ -1392,7 +1558,231 @@ fn mesh(
         object = object.set("orientation", Value::Int(1));
     }
 
+    let mut data = Vec::new();
+    object =
+        primitive_variables(object, scene, node, handle, &mut data, flushed);
+
+    (object, data)
+}
+
+/// ɴsɪ's `st` and `N`, as MoonRay's `uv_list` and `normal_list`.
+///
+/// Both of MoonRay's are **per face-vertex** -- its own comment says so
+/// -- and ɴsɪ's may be given in any of four interpolations. So this is
+/// an expansion, not a rename: whatever ɴsɪ gave is written out once
+/// per face-vertex, in the same order as `vertices_by_index`.
+///
+/// Measured before implementing: `uv_list` is honoured, and halving it
+/// halves what an OSL shader reads as `u` and `v`. Without it MoonRay
+/// parametrises the face itself, which for a quad is also 0..1 -- so a
+/// test that does not *change* the values proves nothing.
+fn primitive_variables(
+    mut object: Object,
+    scene: &Scene,
+    node: &Node,
+    handle: &str,
+    data: &mut Vec<Object>,
+    flushed: &mut Flushed,
+) -> Object {
+    if let Some(values) = expanded(scene, handle, "st", 2, flushed) {
+        object = object.set(
+            "uv_list",
+            Value::Vector(
+                values
+                    .chunks_exact(2)
+                    .map(|st| Value::Vec2f([st[0], st[1]]))
+                    .collect(),
+            ),
+        );
+    }
+
+    if let Some(values) = expanded(scene, handle, "N", 3, flushed) {
+        object = object.set(
+            "normal_list",
+            Value::Vector(
+                values
+                    .chunks_exact(3)
+                    .map(|n| Value::Vec3f([n[0], n[1], n[2]]))
+                    .collect(),
+            ),
+        );
+    }
+
+    // Everything else the mesh carries, as `UserData` -- which is how
+    // an OSL shader's `getattribute("name", value)` is answered, and
+    // the only route MoonRay has for an attribute nobody declared in
+    // advance.
+    let mut references = Vec::new();
+    for (name, argument) in node.attributes() {
+        if STRUCTURE.contains(&name) || name.ends_with(".indices") {
+            continue;
+        }
+
+        let Some(user_data) =
+            user_data(scene, name, argument, handle, flushed)
+        else {
+            continue;
+        };
+        references.push(Value::Object(Reference::new(
+            USER_DATA,
+            user_data_name(handle, name),
+        )));
+        data.push(user_data);
+    }
+
+    if !references.is_empty() {
+        object = object.set("primitive_attributes", Value::Vector(references));
+    }
+
     object
+}
+
+/// The `mesh` attributes that describe the mesh rather than decorate
+/// it.
+///
+/// Everything else on the node is a primitive variable and crosses as
+/// one. Listed rather than inferred: an attribute this backend does
+/// not know is far more likely to be a shader's than to be a mesh
+/// attribute nobody implemented, and carrying it costs a `UserData` a
+/// shader may ignore -- while dropping it costs the look.
+const STRUCTURE: [&str; 15] = [
+    "P",
+    "N",
+    "st",
+    "nvertices",
+    "nholes",
+    "clockwisewinding",
+    "referencetime",
+    "quadraticmotion",
+    "outlinecreasethreshold",
+    "subdivision.scheme",
+    "subdivision.cornervertices",
+    "subdivision.cornersharpness",
+    "subdivision.creasevertices",
+    "subdivision.creasesharpness",
+    "subdivision.smoothcreasecorners",
+];
+
+/// A `UserData` object's rdl2 name.
+///
+/// The mesh's handle and the attribute's, which is unique because
+/// handles are and a mesh carries each attribute once.
+fn user_data_name(handle: &str, name: &str) -> String {
+    format!("{handle}/{name}")
+}
+
+/// One ɴsɪ primitive variable, as a `UserData`.
+///
+/// Face-varying, always: `expanded` has already put every
+/// interpolation into that one order, and a rate MoonRay has to guess
+/// at is a rate it can guess wrong.
+fn user_data(
+    scene: &Scene,
+    name: &str,
+    argument: &OwnedArgument,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Option<Object> {
+    let (key, values, components): (&str, &str, usize) = match argument.type_tag
+    {
+        Type::Color => ("color_key", "color_values_0", 3),
+        Type::Point | Type::Vector | Type::Normal => {
+            ("vec3f_key", "vec3f_values_0", 3)
+        }
+        Type::F32 if argument.array_length == 2 => {
+            ("vec2f_key", "vec2f_values_0", 2)
+        }
+        Type::F32 => ("float_key", "float_values_0", 1),
+        _ => {
+            flushed.limitations.push(format!(
+                    "mesh {handle:?} carries {name:?}, whose ɴsɪ type has no                      MoonRay `UserData` counterpart; it was not carried"
+                ));
+            return None;
+        }
+    };
+
+    let expanded = expanded(scene, handle, name, components, flushed)?;
+
+    let vector = Value::Vector(match components {
+        3 if argument.type_tag == Type::Color => expanded
+            .chunks_exact(3)
+            .map(|v| Value::Rgb([v[0], v[1], v[2]]))
+            .collect(),
+        3 => expanded
+            .chunks_exact(3)
+            .map(|v| Value::Vec3f([v[0], v[1], v[2]]))
+            .collect(),
+        2 => expanded
+            .chunks_exact(2)
+            .map(|v| Value::Vec2f([v[0], v[1]]))
+            .collect(),
+        _ => expanded.into_iter().map(Value::Float).collect(),
+    });
+
+    Some(
+        Object::new(USER_DATA, user_data_name(handle, name))
+            .set(key, Value::String(name.to_owned()))
+            .set(values, vector)
+            // 6 is "face varying" in `UserData`'s own `rate` enum. Its
+            // default, "auto", guesses from the count -- and on a mesh
+            // where the counts coincide it can guess wrong.
+            .set("rate", Value::Int(6)),
+    )
+}
+
+/// One ɴsɪ primitive variable, expanded to one float per face-vertex.
+///
+/// The *interpolation* is `nsi-intermediate`'s to resolve -- `.indices`
+/// first, then the `per_vertex` and `per_face` flags, then the counts,
+/// and a refusal where those disagree. What is left here is the part
+/// that is MoonRay's: reading the floats out in the order it wants
+/// them, which is one per face-vertex in face order.
+fn expanded(
+    scene: &Scene,
+    handle: &str,
+    name: &str,
+    components: usize,
+    flushed: &mut Flushed,
+) -> Option<Vec<f32>> {
+    let variable = match scene.primitive_variable(handle, name) {
+        Ok(variable) => variable?,
+        Err(error) => {
+            // **The refusal is the point.** Four values on a mesh with
+            // four faces *and* four vertices is two different meshes
+            // depending which reading is taken, and ɴsɪ's own answer is
+            // the `per_face`/`per_vertex` flag -- so an unflagged one is
+            // reported rather than guessed. An earlier version of this
+            // code guessed, and guessed uniform.
+            flushed.limitations.push(format!(
+                "mesh {handle:?}: {name:?} was not carried ({error})"
+            ));
+            return None;
+        }
+    };
+
+    let OwnedData::F32(values) = &variable.values().data else {
+        flushed.limitations.push(format!(
+            "mesh {handle:?} has a {name:?} that is not float data; it was \
+             not carried"
+        ));
+        return None;
+    };
+
+    let count = values.len() / components;
+    let mut out = Vec::with_capacity(variable.face_vertex_count() * components);
+    for index in variable.face_varying_indices() {
+        if index >= count {
+            flushed.limitations.push(format!(
+                "mesh {handle:?} indexes {name:?} out of range; it was not \
+                 carried"
+            ));
+            return None;
+        }
+        let start = index * components;
+        out.extend_from_slice(&values[start..start + components]);
+    }
+
+    Some(out)
 }
 
 /// Subdivision creases and corners, which ɴsɪ carries as four parallel
@@ -1470,6 +1860,63 @@ fn material(
             None
         }
     }
+}
+
+/// The shader handles bound in each shader slot: surfaces, then
+/// displacements.
+///
+/// Read off the edges rather than resolved per geometry, and
+/// deliberately: this decides what *class* a shader node becomes, which
+/// has to be the same answer everywhere the shader is named. An edge
+/// that loses ɴsɪ's precedence rule to another still leaves an object
+/// nothing references, which costs a few lines of `.rdla`; getting the
+/// class wrong costs the surface.
+fn shader_roles(scene: &Scene) -> (HashSet<&str>, HashSet<&str>) {
+    let mut surfaces = HashSet::new();
+    let mut displaces = HashSet::new();
+
+    for edge in scene.edges() {
+        match edge.kind {
+            EdgeKind::SurfaceShader => {
+                surfaces.insert(edge.from());
+            }
+            EdgeKind::DisplacementShader => {
+                displaces.insert(edge.from());
+            }
+            _ => {}
+        }
+    }
+
+    (surfaces, displaces)
+}
+
+/// The displacement bound to one piece of geometry, if any.
+///
+/// There is no substitute for a displacement the way `UsdPreviewSurface`
+/// substitutes for a surface: a displacement *moves vertices*, and a
+/// stand-in that does not move them renders a different shape. So
+/// without OSL -- or with a shader OSL cannot load -- it is reported and
+/// the geometry keeps its own silhouette.
+fn displacement(
+    scene: &Scene,
+    handle: &str,
+    shading: Shading,
+    flushed: &mut Flushed,
+) -> Option<Reference> {
+    let shader = scene
+        .geometry_binding(handle)
+        .ok()
+        .flatten()?
+        .displacement_shader?;
+
+    if shading != Shading::Osl || !crate::osl::is_runnable(scene, &shader) {
+        flushed.limitations.push(format!(
+            "{handle:?} has displacement shader {shader:?} bound, which              needs OSL; the geometry is not displaced"
+        ));
+        return None;
+    }
+
+    Some(Reference::new(OSL_DISPLACEMENT, shader))
 }
 
 /// The parameters carried from an ɴsɪ shader into the substitute
@@ -1949,6 +2396,21 @@ fn osl_shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     object
 }
 
+/// One ɴsɪ shader network, as MoonRay's `OslDisplacement`.
+///
+/// The same group specification a material would carry: OSL decides
+/// what a shader may do from the *usage* it is compiled into a group
+/// with, and that is the root shader's business, not the flush's.
+fn osl_displacement(
+    scene: &Scene,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    let mut object = osl_shader(scene, handle, flushed);
+    object.class = Name::new(OSL_DISPLACEMENT);
+    object
+}
+
 /// One `EnvLight`.
 ///
 /// ɴsɪ puts the environment's *look* in an OSL shader hanging off an
@@ -1990,32 +2452,89 @@ fn camera(
     shutter: Option<[f64; 2]>,
     flushed: &mut Flushed,
 ) -> Object {
+    let class = camera_class(scene, handle);
     let Some(node) = scene.node(handle) else {
-        return Object::new(PERSPECTIVE_CAMERA, handle);
+        return Object::new(class, handle);
     };
 
-    let mut object = Object::new(PERSPECTIVE_CAMERA, handle);
+    let mut object = Object::new(class, handle);
 
     object = with_transform(object, scene, handle, shutter, flushed);
 
-    match node.effective("fov").map(|arg| &arg.data) {
-        Some(OwnedData::F32(values)) if !values.is_empty() => {
-            object =
-                object.set("focal", Value::Float(focal(values[0], resolution)));
+    let degrees = match node.effective("fov").map(|arg| &arg.data) {
+        Some(OwnedData::F32(values)) => values.first().copied(),
+        Some(OwnedData::F64(values)) => values.first().map(|v| *v as f32),
+        _ => None,
+    };
+
+    match class {
+        // A perspective camera's field of view is a focal length in
+        // MoonRay, against a fixed film aperture. See `focal`.
+        PERSPECTIVE_CAMERA => match degrees {
+            Some(degrees) => {
+                object = object
+                    .set("focal", Value::Float(focal(degrees, resolution)));
+            }
+            None => flushed.limitations.push(format!(
+                "camera {handle:?} has no \"fov\"; MoonRay's default focal \
+                 length is used"
+            )),
+        },
+
+        // A fisheye's is an angle on both sides, so it crosses as
+        // itself.
+        "FisheyeCamera" => {
+            if let Some(degrees) = degrees {
+                object = object.set("fov", Value::Float(degrees));
+            }
+            object = fisheye_mapping(object, node, handle, flushed);
         }
-        Some(OwnedData::F64(values)) if !values.is_empty() => {
-            object = object.set(
-                "focal",
-                Value::Float(focal(values[0] as f32, resolution)),
-            );
-        }
-        _ => flushed.limitations.push(format!(
-            "camera {handle:?} has no \"fov\"; MoonRay's default focal \
-             length is used"
-        )),
+
+        // Orthographic and spherical cameras have no attributes of
+        // their own on either side.
+        _ => {}
     }
 
     object
+}
+
+/// The interface's fisheye mappings, as MoonRay's `mapping` enum.
+///
+/// Three of the four are the same idea under the same name. The fourth
+/// is not: `equisolidangle` is MoonRay's `equisolid angle`, with a
+/// space, and a name it does not know leaves the enum at its default
+/// rather than failing -- so an unrecognised one is reported.
+fn fisheye_mapping(
+    object: Object,
+    node: &Node,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    let Some(OwnedData::String(values)) =
+        node.effective("mapping").map(|arg| &arg.data)
+    else {
+        return object;
+    };
+    let Some(name) = values.first() else {
+        return object;
+    };
+    let name = String::from_utf8_lossy(name).into_owned();
+
+    let mapping = match name.as_str() {
+        "equidistant" => "equidistant",
+        "equisolidangle" => "equisolid angle",
+        "orthographic" => "orthographic",
+        "stereographic" => "stereographic",
+        other => {
+            flushed.limitations.push(format!(
+                "camera {handle:?} asks for fisheye mapping {other:?}, \
+                 which MoonRay does not have; its default is used"
+            ));
+            return object;
+        }
+    };
+
+    object.set("mapping", Value::String(mapping.to_owned()))
 }
 
 /// ɴsɪ's vertical field of view, in degrees, as MoonRay's focal length
@@ -2039,19 +2558,139 @@ fn focal(fov_degrees: f32, resolution: (i32, i32)) -> f32 {
     FILM_WIDTH_APERTURE * 0.5 * aspect / half
 }
 
+/// One `volume` node, as a `VdbGeometry`.
+///
+/// The interface's `volume` node is OpenVDB and nothing else: a file
+/// and a set of named grids. MoonRay reads two of those grids --
+/// density and emission -- and has no notion of the rest, so what does
+/// not cross is named.
+fn volume(
+    scene: &Scene,
+    handle: &str,
+    shutter: Option<[f64; 2]>,
+    flushed: &mut Flushed,
+) -> Object {
+    let mut object = Object::new(VOLUME, handle);
+    object = with_transform(object, scene, handle, shutter, flushed);
+
+    let Some(node) = scene.node(handle) else {
+        return object;
+    };
+
+    let text = |name: &str| match node.effective(name).map(|arg| &arg.data) {
+        Some(OwnedData::String(values)) => values
+            .first()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+        _ => None,
+    };
+
+    match text("vdbfilename") {
+        Some(file) => object = object.set("model", Value::String(file)),
+        None => flushed.limitations.push(format!(
+            "volume {handle:?} names no \"vdbfilename\"; there is nothing \
+             to read"
+        )),
+    }
+
+    for (from, to) in [
+        ("densitygrid", "density_grid"),
+        ("velocitygrid", "velocity_grid"),
+    ] {
+        if let Some(grid) = text(from) {
+            object = object.set(to, Value::String(grid));
+        }
+    }
+
+    // **MoonRay's emission grid must be RGB.** Measured: a float grid
+    // named here is refused at render prep -- "is not an RGB grid" --
+    // and the whole volume then renders as nothing. So it is carried,
+    // because a colour grid is exactly what it wants, and the shape of
+    // the failure is said rather than discovered.
+    if let Some(grid) = text("emissiongrid") {
+        object = object.set("emission_grid", Value::String(grid.clone()));
+        flushed.limitations.push(format!(
+            "volume {handle:?} names emission grid {grid:?}; MoonRay reads \
+             only an RGB grid there and refuses a scalar one, which stops \
+             the volume rendering at all"
+        ));
+    }
+
+    if let Some(OwnedData::F64(values)) =
+        node.effective("velocityscale").map(|arg| &arg.data)
+        && let Some(scale) = values.first()
+    {
+        object = object.set("velocity_scale", Value::Float(*scale as f32));
+    }
+
+    for name in [
+        "colorgrid",
+        "emissionintensitygrid",
+        "temperaturegrid",
+        "velocityreferencetime",
+    ] {
+        if node.effective(name).is_some() {
+            flushed.limitations.push(format!(
+                "volume {handle:?} sets {name:?}, which MoonRay's \
+                 `VdbGeometry` has no counterpart for; it reads a density \
+                 grid and an emission grid and nothing else"
+            ));
+        }
+    }
+
+    object
+}
+
 /// One `RenderOutput` per ɴsɪ output layer.
-fn render_output(scene: &Scene, layer: &str, drivers: &[String]) -> Object {
+fn render_output(
+    scene: &Scene,
+    layer: &str,
+    drivers: &[String],
+    flushed: &mut Flushed,
+) -> Object {
     let mut object = Object::new("RenderOutput", layer);
 
-    if let Some(node) = scene.node(layer)
-        && let Some(OwnedData::String(names)) =
-            node.effective("variablename").map(|arg| &arg.data)
-        && let Some(name) = names.first()
-    {
-        object = object.set(
-            "channel_name",
-            Value::String(String::from_utf8_lossy(name).into_owned()),
-        );
+    let node = scene.node(layer);
+    let text = |name: &str| {
+        node.and_then(|node| node.effective(name))
+            .and_then(|argument| match &argument.data {
+                OwnedData::String(values) => values
+                    .first()
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                _ => None,
+            })
+    };
+
+    let variable = text("variablename");
+    // `layername` "will be name of the layer as written by the output
+    // driver", which is `channel_name`. Without one the variable's own
+    // name is what a driver would call it.
+    if let Some(name) = text("layername").or_else(|| variable.clone()) {
+        object = object.set("channel_name", Value::String(name));
+    }
+
+    // ɴsɪ defaults `variablesource` to `shader`, and `Ci` there is the
+    // beauty -- which is `RenderOutput`'s own default, so the common
+    // layer sets nothing.
+    let source = text("variablesource").unwrap_or_else(|| "shader".into());
+    // ɴsɪ's own default is `color`, and it is what MoonRay has to be
+    // told for a primitive attribute -- rdl2 declares the channel count
+    // statically and will not work it out from the data.
+    let kind = text("layertype").unwrap_or_else(|| "color".into());
+    object =
+        result(object, &source, variable.as_deref(), &kind, layer, flushed);
+
+    // `scalarformat` is ɴsɪ's quantization; MoonRay's `channel_format`
+    // has two of the eight. The integer formats have no counterpart at
+    // all -- rdl2 writes float or half EXR -- so they are reported
+    // rather than silently rounded to one.
+    match text("scalarformat").as_deref() {
+        None | Some("half") => {}
+        Some("float") => {
+            object = object.set("channel_format", Value::String("float".into()))
+        }
+        Some(other) => flushed.limitations.push(format!(
+            "output layer {layer:?} asks for {other:?} scalars, which              MoonRay's `RenderOutput` cannot encode; half float is written"
+        )),
     }
 
     // A layer may fan out to several drivers. rdl2 writes one file per
@@ -2065,6 +2704,170 @@ fn render_output(scene: &Scene, layer: &str, drivers: &[String]) -> Object {
     }
 
     object
+}
+
+/// What an output layer asks for, as MoonRay's `result` and whatever
+/// that result needs beside it.
+///
+/// ɴsɪ says where a variable comes from with `variablesource` and names
+/// it with `variablename`; MoonRay has an enum and a second attribute
+/// per case. The two do not cover each other, and what does not cross
+/// is named rather than defaulted to the beauty -- an AOV that renders
+/// the beauty under another name is worse than a missing one.
+fn result(
+    object: Object,
+    source: &str,
+    variable: Option<&str>,
+    kind: &str,
+    layer: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    let unmapped = |flushed: &mut Flushed, why: &str| {
+        flushed.limitations.push(format!(
+            "output layer {layer:?} asks for {why}, which MoonRay's              `RenderOutput` has no result for; the layer renders the beauty"
+        ));
+    };
+
+    match (source, variable) {
+        // The beauty, however it was spelled.
+        ("shader", None | Some("Ci")) => object,
+
+        ("builtin", Some(name)) => match name {
+            "alpha" => object.set("result", Value::String("alpha".into())),
+            // ɴsɪ's `z` is camera-space depth, which is exactly what
+            // MoonRay's `depth` result is.
+            "z" => object.set("result", Value::String("depth".into())),
+            _ => match state_variable(name) {
+                Some(variable) => object
+                    .set("result", Value::String("state variable".into()))
+                    .set("state_variable", Value::String(variable.into())),
+                None => {
+                    unmapped(flushed, &format!("built-in {name:?}"));
+                    object
+                }
+            },
+        },
+
+        // A primitive variable, straight off the geometry.
+        ("attribute", Some(name)) => {
+            let object = object
+                .set("result", Value::String("primitive attribute".into()))
+                .set("primitive_attribute", Value::String(name.to_owned()));
+            match kind {
+                "scalar" => object.set(
+                    "primitive_attribute_type",
+                    Value::String("FLOAT".into()),
+                ),
+                "vector" => object.set(
+                    "primitive_attribute_type",
+                    Value::String("VEC3F".into()),
+                ),
+                // `color` is ɴsɪ's default and MoonRay's; `quad` has no
+                // counterpart, and a fourth component nobody asked for
+                // is not something to invent.
+                "quad" => {
+                    flushed.limitations.push(format!(
+                        "output layer {layer:?} asks for a `quad` layer \
+                         type; MoonRay's primitive attributes are one, two \
+                         or three components, and the layer is written as \
+                         a colour"
+                    ));
+                    object
+                }
+                _ => object,
+            }
+        }
+
+        // A shader output: the radiance of one part of the surface.
+        //
+        // MoonRay spells that as a *light* AOV -- a light-path
+        // expression -- rather than a material AOV, which names a
+        // lobe's properties (its albedo, its roughness) rather than
+        // what it contributed. `C<..'diffuse'>L` is every path that
+        // scattered off a lobe labelled `diffuse`, by any event, and
+        // reached a light.
+        //
+        // **The label is bare, with no material name in front of it.**
+        // MoonRay registers a lobe label as `<material label>.<lobe>`
+        // when the material carries a label and as the lobe alone when
+        // it does not -- measured -- so leaving the material unlabelled
+        // is what lets one output layer name a lobe across every shader
+        // in the scene, which is what a shader AOV means.
+        ("shader", Some(name)) => match lobe_label(name) {
+            Some(label) => object
+                .set("result", Value::String("light aov".into()))
+                .set("lpe", Value::String(format!("C<..'{label}'>L"))),
+            None => {
+                unmapped(
+                    flushed,
+                    &format!(
+                        "shader output {name:?} -- it is not one of the \
+                         lobe labels the `Osl` material can name"
+                    ),
+                );
+                object
+            }
+        },
+
+        _ => {
+            unmapped(
+                flushed,
+                &format!("variable source {source:?} with no variable name"),
+            );
+            object
+        }
+    }
+}
+
+/// One shader-AOV name, as the lobe label the `Osl` material sets.
+///
+/// **This table and `aov_label` in `dso/osl/Osl.cc` are one contract.**
+/// The flush writes a light-path expression naming a label; the
+/// material is what puts that label on the lobe. They are in different
+/// languages and cannot share the table, so they have to be changed
+/// together -- and a disagreement renders the AOV black rather than
+/// failing.
+///
+/// The left column is 3Delight's `outputvariable` vocabulary, read off
+/// the shaders it ships. The right is MoonRay's, from `labels[]` in
+/// `dso/osl/attributes.cc`. A name already in the right column is taken
+/// as itself, since the interface does not mandate 3Delight's spelling.
+const SHADER_AOVS: [(&str, &str); 8] = [
+    ("diffuse", "diffuse"),
+    ("reflection", "specular"),
+    ("refraction", "transmission"),
+    ("subsurface", "subsurface"),
+    ("sheen", "sheen"),
+    ("coating", "coat"),
+    ("incandescence", "emission"),
+    ("hair", "hair"),
+];
+
+fn lobe_label(name: &str) -> Option<&'static str> {
+    SHADER_AOVS
+        .iter()
+        .find(|(aov, _)| *aov == name)
+        .or_else(|| SHADER_AOVS.iter().find(|(_, label)| *label == name))
+        .map(|(_, label)| *label)
+}
+
+/// One ɴsɪ built-in variable, as MoonRay's `state_variable` enum.
+///
+/// ɴsɪ spells a space into the name -- `"P.world"`, `"N.camera"` --
+/// and MoonRay has one entry per quantity in *render* space plus a
+/// world-space position. Only the pairs that mean the same thing are
+/// here: `"N.world"` has no entry, and answering it with `N` would be
+/// a normal in the wrong space, which shades plausibly and wrongly.
+fn state_variable(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "P.world" => "Wp",
+        "P.camera" => "P",
+        "N.camera" => "N",
+        "Ng.camera" => "Ng",
+        "st" => "St",
+        "motionvector" => "motionvec",
+        _ => return None,
+    })
 }
 
 /// The file an ɴsɪ output driver writes to.
@@ -2095,8 +2898,8 @@ fn resolution(scene: &Scene) -> (i32, i32) {
     (1920, 1080)
 }
 
-fn camera_reference(handle: &str) -> Reference {
-    Reference::new(PERSPECTIVE_CAMERA, handle)
+fn camera_reference(scene: &Scene, handle: &str) -> Reference {
+    Reference::new(camera_class(scene, handle), handle)
 }
 
 #[cfg(test)]
@@ -2124,6 +2927,19 @@ mod tests {
 
     fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArgument {
         OwnedArgument::new(name, type_tag, 1, 0, data)
+    }
+
+    /// An argument whose values are fixed-size arrays -- how ɴsɪ spells a
+    /// UV set, `float[2]`. The array length is what tells one value from
+    /// two, and so what tells a per-vertex variable from a face-varying
+    /// one.
+    fn array_arg(
+        name: &str,
+        type_tag: Type,
+        length: usize,
+        data: OwnedData,
+    ) -> OwnedArgument {
+        OwnedArgument::new(name, type_tag, length, 0, data)
     }
 
     /// The triangle, wearing a named shader.
@@ -2157,6 +2973,709 @@ mod tests {
 
     /// A triangle, a camera, a screen and an output -- the smallest
     /// scene that is a scene.
+    /// Two faces sharing an edge, so per-vertex and face-varying are
+    /// different lengths and the expansion has something to do.
+    fn two_quads() -> Scene {
+        let mut scene = Scene::default();
+
+        scene.create("mesh", "mesh").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "mesh",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![4, 4])),
+                    arg(
+                        "P.indices",
+                        Type::I32,
+                        OwnedData::I32(vec![0, 1, 4, 3, 1, 2, 5, 4]),
+                    ),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, // 0
+                            1.0, 0.0, 0.0, // 1
+                            2.0, 0.0, 0.0, // 2
+                            0.0, 1.0, 0.0, // 3
+                            1.0, 1.0, 0.0, // 4
+                            2.0, 1.0, 0.0, // 5
+                        ]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("mesh", None, ".root", "objects").unwrap();
+
+        scene
+    }
+
+    fn uvs(rdla: &str) -> String {
+        rdla.split("[\"uv_list\"] = ")
+            .nth(1)
+            .map(|rest| rest.split('}').next().unwrap_or_default().to_string())
+            .unwrap_or_default()
+    }
+
+    /// **A per-vertex `st` is indexed the way `P` is.**
+    ///
+    /// Six values for eight face-vertices: the shared edge's two
+    /// vertices are written twice, which is exactly what MoonRay's
+    /// per-face-vertex `uv_list` wants and what a rename would get
+    /// wrong.
+    #[test]
+    fn a_per_vertex_st_is_expanded_by_the_vertex_indices() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![array_arg(
+                    "st",
+                    Type::F32,
+                    2,
+                    OwnedData::F32(vec![
+                        0.0, 0.0, 0.5, 0.0, 1.0, 0.0, // the bottom row
+                        0.0, 1.0, 0.5, 1.0, 1.0, 1.0, // the top row
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let rdla = flush(&scene).to_rdla();
+        let uvs = uvs(&rdla);
+
+        // Eight, in `P.indices` order: 0 1 4 3 1 2 5 4.
+        assert_eq!(uvs.matches("Vec2(").count(), 8, "{rdla}");
+        assert!(
+            uvs.contains(
+                "Vec2(0, 0), Vec2(0.5, 0), Vec2(0.5, 1), Vec2(0, 1), \
+                 Vec2(0.5, 0), Vec2(1, 0), Vec2(1, 1), Vec2(0.5, 1)"
+            ),
+            "{uvs}"
+        );
+    }
+
+    /// `st.indices` is ɴsɪ's own indirect lookup, and it wins over any
+    /// inference from the length.
+    #[test]
+    fn an_indexed_st_is_looked_up() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![
+                    array_arg(
+                        "st",
+                        Type::F32,
+                        2,
+                        OwnedData::F32(vec![0.0, 0.0, 1.0, 1.0]),
+                    ),
+                    arg(
+                        "st.indices",
+                        Type::I32,
+                        OwnedData::I32(vec![0, 1, 0, 1, 1, 0, 1, 0]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+
+        let uvs = uvs(&flush(&scene).to_rdla());
+
+        assert!(
+            uvs.contains(
+                "Vec2(0, 0), Vec2(1, 1), Vec2(0, 0), Vec2(1, 1), \
+                 Vec2(1, 1), Vec2(0, 0), Vec2(1, 1), Vec2(0, 0)"
+            ),
+            "{uvs}"
+        );
+    }
+
+    /// **A variable the count cannot decide is refused, not guessed.**
+    ///
+    /// A tetrahedron has four faces and four vertices, so a four-value
+    /// variable on one is per-face or per-vertex depending on nothing
+    /// the count can see -- and the two are different meshes. ɴsɪ's
+    /// answer is the `per_face`/`per_vertex` flag, and `nsi-intermediate`
+    /// refuses an unflagged one rather than picking.
+    ///
+    /// This backend used to pick, and picked uniform.
+    #[test]
+    fn a_variable_the_count_cannot_decide_is_reported() {
+        let mut scene = Scene::default();
+        scene.create("tet", "mesh").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "tet",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![3; 4])),
+                    arg(
+                        "P.indices",
+                        Type::I32,
+                        OwnedData::I32(vec![
+                            0, 1, 2, 0, 2, 3, 0, 3, 1, 1, 3, 2,
+                        ]),
+                    ),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, //
+                            0.0, 1.0, 0.0, 0.0, 0.0, 1.0,
+                        ]),
+                    ),
+                    // Four values, four faces, four vertices, and no
+                    // flag to say which.
+                    arg(
+                        "heat",
+                        Type::F32,
+                        OwnedData::F32(vec![0.1, 0.2, 0.3, 0.4]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("tet", None, ".root", "objects").unwrap();
+
+        let flushed = flush(&scene);
+
+        assert!(
+            !flushed.to_rdla().contains("heat"),
+            "{}",
+            flushed.to_rdla()
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("heat") && line.contains("not carried")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// A length that means nothing is said rather than reshaped into
+    /// something plausible.
+    #[test]
+    fn an_st_of_no_recognisable_length_is_reported() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![array_arg(
+                    "st",
+                    Type::F32,
+                    2,
+                    OwnedData::F32(vec![0.0, 0.0, 1.0, 1.0, 0.5, 0.5]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+
+        assert!(
+            !flushed.to_rdla().contains("uv_list"),
+            "{}",
+            flushed.to_rdla()
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("was not carried")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// `N` travels the same road, into MoonRay's own per-face-vertex
+    /// list.
+    #[test]
+    fn a_per_vertex_normal_becomes_a_normal_list() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![arg(
+                    "N",
+                    Type::Normal,
+                    OwnedData::F32(vec![
+                        0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, //
+                        0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("[\"normal_list\"] = {"), "{rdla}");
+        // Eight, one a face-vertex, and the top row's `(0, 1, 0)` where
+        // `P.indices` names vertices 3, 4 and 5.
+        let normals = rdla
+            .split("[\"normal_list\"] = ")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or_default();
+        assert_eq!(normals.matches("Vec3(").count(), 8, "{rdla}");
+        assert_eq!(normals.matches("Vec3(0, 1, 0)").count(), 4, "{normals}");
+    }
+
+    /// **An attribute nobody declared crosses as `UserData`.**
+    ///
+    /// rdl2 declares a geometry's attributes statically, so this is the
+    /// only route MoonRay has for one it could not know about -- and it
+    /// is what answers an OSL shader's `getattribute()`.
+    #[test]
+    fn an_unknown_mesh_attribute_becomes_user_data() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![arg(
+                    "mytint",
+                    Type::Color,
+                    OwnedData::F32(vec![
+                        1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, //
+                        0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("UserData(\"mesh/mytint\") {"), "{rdla}");
+        assert!(rdla.contains("[\"color_key\"] = \"mytint\""), "{rdla}");
+        // Face-varying, always: `rate` 6. "Auto" would guess from the
+        // count, and on a mesh where the counts coincide it can guess
+        // wrong.
+        assert!(rdla.contains("[\"rate\"] = 6,"), "{rdla}");
+        // Expanded to eight, by `P.indices`, like everything else.
+        let values = rdla
+            .split("[\"color_values_0\"] = ")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or_default();
+        assert_eq!(values.matches("Rgb(").count(), 8, "{rdla}");
+        // And the mesh points at it.
+        assert!(
+            rdla.contains(
+                "[\"primitive_attributes\"] = { UserData(\"mesh/mytint\")}"
+            ),
+            "{rdla}"
+        );
+    }
+
+    /// A mesh attribute this backend reads itself is not *also* a
+    /// primitive variable: `st` is `uv_list`, and a `UserData` beside
+    /// it would be the same values twice under two names.
+    #[test]
+    fn a_structural_attribute_is_not_user_data() {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![array_arg(
+                    "st",
+                    Type::F32,
+                    2,
+                    OwnedData::F32(vec![
+                        0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0.5, 1.0, 1.0,
+                        1.0,
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("uv_list"), "{rdla}");
+        assert!(!rdla.contains("UserData"), "{rdla}");
+    }
+
+    /// An output layer with an ɴsɪ handle, a variable source and a
+    /// name, connected to the scene's screen.
+    fn output_layer(scene: &mut Scene, handle: &str, args: Vec<OwnedArgument>) {
+        scene
+            .create(handle, "outputlayer")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(handle, args)
+            .expect("a recordable edit");
+        scene
+            .connect(handle, None, "screen", "outputlayers")
+            .unwrap();
+    }
+
+    fn output(rdla: &str, handle: &str) -> String {
+        rdla.split(&format!("RenderOutput(\"{handle}\") {{"))
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// **`variablesource "builtin"` names a MoonRay result.**
+    ///
+    /// ɴsɪ's `z` is camera-space depth, which is what MoonRay's `depth`
+    /// result is; `P.world` is a state variable, and MoonRay spells the
+    /// world-space one `Wp`.
+    #[test]
+    fn a_builtin_output_layer_becomes_a_result() {
+        let mut scene = triangle();
+        output_layer(
+            &mut scene,
+            "z",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"builtin".to_vec()]),
+                ),
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"z".to_vec()]),
+                ),
+            ],
+        );
+        output_layer(
+            &mut scene,
+            "position",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"builtin".to_vec()]),
+                ),
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"P.world".to_vec()]),
+                ),
+            ],
+        );
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(
+            output(&rdla, "z").contains("[\"result\"] = \"depth\""),
+            "{rdla}"
+        );
+        let position = output(&rdla, "position");
+        assert!(
+            position.contains("[\"result\"] = \"state variable\""),
+            "{position}"
+        );
+        assert!(
+            position.contains("[\"state_variable\"] = \"Wp\""),
+            "{position}"
+        );
+    }
+
+    /// `variablesource "attribute"` reads a primitive variable, and
+    /// MoonRay has to be told how many components it has -- rdl2 will
+    /// not work it out from the data.
+    #[test]
+    fn an_attribute_output_layer_names_its_primitive_variable() {
+        let mut scene = triangle();
+        output_layer(
+            &mut scene,
+            "tint",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"attribute".to_vec()]),
+                ),
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"mytint".to_vec()]),
+                ),
+                arg(
+                    "layertype",
+                    Type::String,
+                    OwnedData::String(vec![b"scalar".to_vec()]),
+                ),
+            ],
+        );
+
+        let tint = output(&flush(&scene).to_rdla(), "tint");
+
+        assert!(
+            tint.contains("[\"result\"] = \"primitive attribute\""),
+            "{tint}"
+        );
+        assert!(
+            tint.contains("[\"primitive_attribute\"] = \"mytint\""),
+            "{tint}"
+        );
+        assert!(
+            tint.contains("[\"primitive_attribute_type\"] = \"FLOAT\""),
+            "{tint}"
+        );
+    }
+
+    /// **A layer MoonRay has no result for is named, not defaulted.**
+    ///
+    /// Every unmapped case falls through to the beauty, because that is
+    /// `RenderOutput`'s default and there is nothing else to be. An AOV
+    /// that renders the beauty under another name is worse than a
+    /// missing one, so it is said.
+    #[test]
+    fn an_output_layer_with_no_moonray_result_is_reported() {
+        let mut scene = triangle();
+        output_layer(
+            &mut scene,
+            "normal",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"builtin".to_vec()]),
+                ),
+                // World-space normals. MoonRay's `N` is render space,
+                // and answering with it would be the wrong space.
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"N.world".to_vec()]),
+                ),
+            ],
+        );
+
+        let flushed = flush(&scene);
+
+        assert!(
+            !output(&flushed.to_rdla(), "normal").contains("result"),
+            "{}",
+            flushed.to_rdla()
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("N.world")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// A shader AOV becomes a light-path expression naming the lobe.
+    ///
+    /// Not a *material* AOV: those name a lobe's properties -- its
+    /// albedo, its roughness -- rather than what it contributed, and
+    /// what an output layer with `variablesource "shader"` asks for is
+    /// the contribution.
+    #[test]
+    fn a_shader_output_layer_becomes_a_light_path_expression() {
+        let mut scene = triangle();
+        output_layer(
+            &mut scene,
+            "spec",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"shader".to_vec()]),
+                ),
+                // 3Delight's name for it. MoonRay's lobe label is
+                // `specular`, and the two have to be reconciled or the
+                // AOV renders black.
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"reflection".to_vec()]),
+                ),
+            ],
+        );
+
+        let spec = output(&flush(&scene).to_rdla(), "spec");
+
+        assert!(spec.contains("[\"result\"] = \"light aov\""), "{spec}");
+        assert!(spec.contains("[\"lpe\"] = \"C<..'specular'>L\""), "{spec}");
+    }
+
+    /// `Ci` is the beauty, which is `RenderOutput`'s own default -- so
+    /// the commonest layer of all sets nothing.
+    #[test]
+    fn a_ci_output_layer_is_the_beauty() {
+        let mut scene = triangle();
+        output_layer(
+            &mut scene,
+            "beauty",
+            vec![arg(
+                "variablename",
+                Type::String,
+                OwnedData::String(vec![b"Ci".to_vec()]),
+            )],
+        );
+
+        let beauty = output(&flush(&scene).to_rdla(), "beauty");
+
+        assert!(!beauty.contains("result"), "{beauty}");
+        assert!(!beauty.contains("lpe"), "{beauty}");
+    }
+
+    /// **A `volume` node becomes a `VdbGeometry`.**
+    ///
+    /// The interface's volume node is OpenVDB and nothing else -- a
+    /// file and named grids -- and MoonRay's only volume geometry reads
+    /// exactly that, so the two meet with almost no translation. What
+    /// does not cross is named: MoonRay reads a density grid and an
+    /// emission grid, and has no notion of colour, temperature or
+    /// emission intensity.
+    #[test]
+    fn a_volume_becomes_vdb_geometry() {
+        let mut scene = Scene::default();
+        scene.create("smoke", "volume").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "smoke",
+                vec![
+                    arg(
+                        "vdbfilename",
+                        Type::String,
+                        OwnedData::String(vec![b"/tmp/explosion.vdb".to_vec()]),
+                    ),
+                    arg(
+                        "densitygrid",
+                        Type::String,
+                        OwnedData::String(vec![b"density".to_vec()]),
+                    ),
+                    arg(
+                        "temperaturegrid",
+                        Type::String,
+                        OwnedData::String(vec![b"temperature".to_vec()]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("smoke", None, ".root", "objects").unwrap();
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("VdbGeometry(\"smoke\") {"), "{rdla}");
+        assert!(
+            rdla.contains("[\"model\"] = \"/tmp/explosion.vdb\""),
+            "{rdla}"
+        );
+        assert!(rdla.contains("[\"density_grid\"] = \"density\""), "{rdla}");
+
+        // The sixth column, not the third: a material there does
+        // nothing and MoonRay renders the volume as nothing at all.
+        assert!(
+            rdla.contains(
+                "{VdbGeometry(\"smoke\"), \"\", undef(), undef(), undef(), \
+                 VdbVolume(\"/nsi/volume_shader\")"
+            ),
+            "{rdla}"
+        );
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("temperaturegrid")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// **Each camera node becomes its own MoonRay class.**
+    ///
+    /// The class has to travel with the handle: a scene shot through an
+    /// orthographic camera and rendered in perspective is a perfectly
+    /// good image of the wrong thing, and `SceneVariables` points at
+    /// the camera by class *and* name, so getting it wrong there points
+    /// at nothing at all.
+    #[test]
+    fn each_camera_node_becomes_its_own_class() {
+        for (node_type, class) in [
+            ("orthographiccamera", "OrthographicCamera"),
+            ("fisheyecamera", "FisheyeCamera"),
+            ("sphericalcamera", "SphericalCamera"),
+        ] {
+            let mut scene = triangle();
+            // `triangle` brings a perspective camera; this replaces the
+            // one the screen is connected to.
+            scene.delete("cam").expect("a recordable edit");
+            scene.create("cam", node_type).expect("a recordable edit");
+            scene.connect("cam", None, ".root", "objects").unwrap();
+            scene.connect("screen", None, "cam", "screens").unwrap();
+
+            let rdla = flush(&scene).to_rdla();
+
+            assert!(rdla.contains(&format!("{class}(\"cam\") {{")), "{rdla}");
+            // And `SceneVariables` names it by that class.
+            assert!(
+                rdla.contains(&format!("[\"camera\"] = {class}(\"cam\")")),
+                "{rdla}"
+            );
+        }
+    }
+
+    /// A fisheye's `fov` is an angle on both sides, so it crosses as
+    /// itself rather than as a focal length -- and its mapping is the
+    /// same idea under a slightly different spelling.
+    #[test]
+    fn a_fisheye_carries_its_field_of_view_and_mapping() {
+        let mut scene = triangle();
+        scene.delete("cam").expect("a recordable edit");
+        scene
+            .create("cam", "fisheyecamera")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(
+                "cam",
+                vec![
+                    arg("fov", Type::F32, OwnedData::F32(vec![180.0])),
+                    arg(
+                        "mapping",
+                        Type::String,
+                        OwnedData::String(vec![b"equisolidangle".to_vec()]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("cam", None, ".root", "objects").unwrap();
+        scene.connect("screen", None, "cam", "screens").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("[\"fov\"] = 180"), "{rdla}");
+        // MoonRay spells it with a space.
+        assert!(
+            rdla.contains("[\"mapping\"] = \"equisolid angle\""),
+            "{rdla}"
+        );
+        // Not a focal length: that is the perspective camera's answer.
+        assert!(!rdla.contains("focal"), "{rdla}");
+    }
+
+    /// MoonRay has no cylindrical projection, and a camera that quietly
+    /// became a perspective one would render a plausible wrong image.
+    #[test]
+    fn a_cylindrical_camera_is_reported() {
+        let mut scene = triangle();
+        scene.delete("cam").expect("a recordable edit");
+        scene
+            .create("cam", "cylindricalcamera")
+            .expect("a recordable edit");
+        scene.connect("cam", None, ".root", "objects").unwrap();
+
+        let flushed = flush(&scene);
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("cylindricalcamera")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
     fn triangle() -> Scene {
         let mut scene = Scene::default();
 
@@ -2833,6 +4352,109 @@ mod tests {
     /// to recognise: the network becomes an OSL group specification
     /// and MoonRay runs it, so a parameter no table knows about
     /// arrives anyway.
+    /// **A displacement shader becomes an `OslDisplacement`, not an
+    /// `Osl`.**
+    ///
+    /// rdl2 refuses a second object under a name another class already
+    /// holds -- measured, and it is a hard error at scene load, not a
+    /// warning -- so which class a shader node becomes is decided by
+    /// what it is bound to and there is exactly one answer per handle.
+    #[test]
+    fn an_nsi_displacement_shader_becomes_a_displacement() {
+        let mut scene = triangle();
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("surf", "shader").expect("a recordable edit");
+        scene.create("disp", "shader").expect("a recordable edit");
+        for (handle, file) in [
+            ("surf", "/opt/3delight/osl/dlPrincipled.oso"),
+            ("disp", "/opt/3delight/osl/push.oso"),
+        ] {
+            scene
+                .set_attribute(
+                    handle,
+                    vec![arg(
+                        "shaderfilename",
+                        Type::String,
+                        OwnedData::String(vec![file.as_bytes().to_vec()]),
+                    )],
+                )
+                .expect("a recordable edit");
+        }
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("surf", None, "attr", "surfaceshader")
+            .unwrap();
+        scene
+            .connect("disp", None, "attr", "displacementshader")
+            .unwrap();
+
+        let flushed = flush_with(&scene, Purpose::default(), Shading::Osl);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("OslDisplacement(\"disp\") {"), "{rdla}");
+        // And not *also* as a material, which would not load.
+        assert!(!rdla.contains("Osl(\"disp\") {"), "{rdla}");
+        assert!(rdla.contains("shader push disp ;"), "{rdla}");
+        // The fifth column of the layer row: geometry, part, material,
+        // light set -- which this fixture has none of -- displacement.
+        assert!(
+            rdla.contains(
+                "{RdlMeshGeometry(\"tri\"), \"\", Osl(\"surf\"), undef(), \
+                 OslDisplacement(\"disp\")"
+            ),
+            "{rdla}"
+        );
+    }
+
+    /// Without OSL there is nothing to run a displacement with, and no
+    /// stand-in that moves vertices -- so it is said rather than
+    /// silently dropped.
+    #[test]
+    fn a_displacement_without_osl_is_reported() {
+        let mut scene = triangle();
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("disp", "shader").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "disp",
+                vec![arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![b"/opt/osl/push.oso".to_vec()]),
+                )],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("disp", None, "attr", "displacementshader")
+            .unwrap();
+
+        let flushed =
+            flush_with(&scene, Purpose::default(), Shading::Substitute);
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("is not displaced")),
+            "{:?}",
+            flushed.limitations
+        );
+        assert!(
+            !flushed.to_rdla().contains("OslDisplacement"),
+            "{}",
+            flushed.to_rdla()
+        );
+    }
+
     #[test]
     fn an_nsi_shader_becomes_an_osl_material() {
         let mut scene = triangle();

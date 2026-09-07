@@ -4,6 +4,7 @@
 // instantiates it. Whichever comes second loses, with
 // "specialization of 'std::atomic<float>' after instantiation" and a
 // backtrace that points at neither library's own code.
+#include <moonray/rendering/shading/AttributeKey.h>
 #include <moonray/rendering/shading/State.h>
 #include <moonray/rendering/shading/Xform.h>
 #include <moonray/rendering/shading/ispc/Xform_ispc_stubs.h>
@@ -43,6 +44,31 @@ public:
     explicit Services(OIIO::TextureSystem* texture)
         : OSL::RendererServices(texture)
     {
+    }
+
+    /// A `getattribute()` in a shader, answered from the shading
+    /// point's primitive attributes.
+    ///
+    /// The unscoped form only. OSL's scoped `getattribute("scope",
+    /// "name", val)` names a renderer concept -- an object's userdata,
+    /// a global setting -- and ɴsɪ has no vocabulary for one, so
+    /// answering it would be inventing a mapping. Unanswered means the
+    /// shader keeps its own default, which is what `getattribute`
+    /// returning 0 tells it.
+    bool get_attribute(OSL::ShaderGlobals* globals, bool /*derivatives*/,
+                       OSL::ustringhash object, OSL::TypeDesc type,
+                       OSL::ustringhash name, void* value) override
+    {
+        if (!object.empty() || globals == nullptr) {
+            return false;
+        }
+        const auto* point =
+            static_cast<const ShadingPoint*>(globals->renderstate);
+        if (point == nullptr || point->state == nullptr
+            || point->attributes == nullptr) {
+            return false;
+        }
+        return point->attributes->read(*point->state, name, type, value);
     }
 
     /// A named space, as the matrix that takes it to OSL's *common*
@@ -243,8 +269,154 @@ System::register_closures()
             CLOSURE_FLOAT_PARAM(MicrofacetParams, yalpha),
             CLOSURE_FLOAT_PARAM(MicrofacetParams, eta),
             CLOSURE_INT_PARAM(MicrofacetParams, refract),
+            // 3Delight's conductor spelling. Registered as keywords
+            // because that is how its shaders pass them, and because a
+            // shader that does not is unaffected -- OSL zeroes the
+            // block, and zero is "not a conductor".
+            CLOSURE_COLOR_KEYPARAM(MicrofacetParams, realeta, "realeta"),
+            CLOSURE_COLOR_KEYPARAM(MicrofacetParams, complexeta,
+                                   "complexeta"),
             CLOSURE_STRING_KEYPARAM(MicrofacetParams, label, "label"),
             CLOSURE_FINISH_PARAM(MicrofacetParams) } },
+
+        // Four formals. See `SubsurfaceParams`: a fifth cost a
+        // segfault inside OSL's own code generator.
+        { "subsurface", CLOSURE_SUBSURFACE,
+          { CLOSURE_FLOAT_PARAM(SubsurfaceParams, eta),
+            CLOSURE_FLOAT_PARAM(SubsurfaceParams, g),
+            CLOSURE_COLOR_PARAM(SubsurfaceParams, mfp),
+            CLOSURE_COLOR_PARAM(SubsurfaceParams, albedo),
+            CLOSURE_VECTOR_KEYPARAM(SubsurfaceParams, N, "N"),
+            CLOSURE_STRING_KEYPARAM(SubsurfaceParams, label, "label"),
+            CLOSURE_FINISH_PARAM(SubsurfaceParams) } },
+
+        // MaterialX. Registered with the same layouts OSL's own
+        // `testrender` uses, because the struct and the registration
+        // are one contract and getting an offset wrong reads garbage
+        // rather than failing.
+        { "oren_nayar_diffuse_bsdf", CLOSURE_MX_OREN_NAYAR,
+          { CLOSURE_VECTOR_PARAM(MxDiffuseParams, N),
+            CLOSURE_COLOR_PARAM(MxDiffuseParams, albedo),
+            CLOSURE_FLOAT_PARAM(MxDiffuseParams, roughness),
+            CLOSURE_STRING_KEYPARAM(MxDiffuseParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MxDiffuseParams) } },
+
+        { "burley_diffuse_bsdf", CLOSURE_MX_BURLEY,
+          { CLOSURE_VECTOR_PARAM(MxDiffuseParams, N),
+            CLOSURE_COLOR_PARAM(MxDiffuseParams, albedo),
+            CLOSURE_FLOAT_PARAM(MxDiffuseParams, roughness),
+            CLOSURE_STRING_KEYPARAM(MxDiffuseParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MxDiffuseParams) } },
+
+        { "dielectric_bsdf", CLOSURE_MX_DIELECTRIC,
+          { CLOSURE_VECTOR_PARAM(MxDielectricParams, N),
+            CLOSURE_VECTOR_PARAM(MxDielectricParams, U),
+            CLOSURE_COLOR_PARAM(MxDielectricParams, reflection_tint),
+            CLOSURE_COLOR_PARAM(MxDielectricParams, transmission_tint),
+            CLOSURE_FLOAT_PARAM(MxDielectricParams, roughness_x),
+            CLOSURE_FLOAT_PARAM(MxDielectricParams, roughness_y),
+            CLOSURE_FLOAT_PARAM(MxDielectricParams, ior),
+            CLOSURE_STRING_PARAM(MxDielectricParams, distribution),
+            CLOSURE_FLOAT_KEYPARAM(MxDielectricParams, thinfilm_thickness,
+                                   "thinfilm_thickness"),
+            CLOSURE_FLOAT_KEYPARAM(MxDielectricParams, thinfilm_ior,
+                                   "thinfilm_ior"),
+            CLOSURE_STRING_KEYPARAM(MxDielectricParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MxDielectricParams) } },
+
+        { "conductor_bsdf", CLOSURE_MX_CONDUCTOR,
+          { CLOSURE_VECTOR_PARAM(MxConductorParams, N),
+            CLOSURE_VECTOR_PARAM(MxConductorParams, U),
+            CLOSURE_FLOAT_PARAM(MxConductorParams, roughness_x),
+            CLOSURE_FLOAT_PARAM(MxConductorParams, roughness_y),
+            CLOSURE_COLOR_PARAM(MxConductorParams, ior),
+            CLOSURE_COLOR_PARAM(MxConductorParams, extinction),
+            CLOSURE_STRING_PARAM(MxConductorParams, distribution),
+            CLOSURE_FLOAT_KEYPARAM(MxConductorParams, thinfilm_thickness,
+                                   "thinfilm_thickness"),
+            CLOSURE_FLOAT_KEYPARAM(MxConductorParams, thinfilm_ior,
+                                   "thinfilm_ior"),
+            CLOSURE_STRING_KEYPARAM(MxConductorParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MxConductorParams) } },
+
+        { "generalized_schlick_bsdf", CLOSURE_MX_GENERALIZED_SCHLICK,
+          { CLOSURE_VECTOR_PARAM(MxGeneralizedSchlickParams, N),
+            CLOSURE_VECTOR_PARAM(MxGeneralizedSchlickParams, U),
+            CLOSURE_COLOR_PARAM(MxGeneralizedSchlickParams, reflection_tint),
+            CLOSURE_COLOR_PARAM(MxGeneralizedSchlickParams,
+                                transmission_tint),
+            CLOSURE_FLOAT_PARAM(MxGeneralizedSchlickParams, roughness_x),
+            CLOSURE_FLOAT_PARAM(MxGeneralizedSchlickParams, roughness_y),
+            CLOSURE_COLOR_PARAM(MxGeneralizedSchlickParams, f0),
+            CLOSURE_COLOR_PARAM(MxGeneralizedSchlickParams, f90),
+            CLOSURE_FLOAT_PARAM(MxGeneralizedSchlickParams, exponent),
+            CLOSURE_STRING_PARAM(MxGeneralizedSchlickParams, distribution),
+            CLOSURE_FLOAT_KEYPARAM(MxGeneralizedSchlickParams,
+                                   thinfilm_thickness, "thinfilm_thickness"),
+            CLOSURE_FLOAT_KEYPARAM(MxGeneralizedSchlickParams, thinfilm_ior,
+                                   "thinfilm_ior"),
+            CLOSURE_STRING_KEYPARAM(MxGeneralizedSchlickParams, label,
+                                    "label"),
+            CLOSURE_FINISH_PARAM(MxGeneralizedSchlickParams) } },
+
+        { "translucent_bsdf", CLOSURE_MX_TRANSLUCENT,
+          { CLOSURE_VECTOR_PARAM(MxTranslucentParams, N),
+            CLOSURE_COLOR_PARAM(MxTranslucentParams, albedo),
+            CLOSURE_STRING_KEYPARAM(MxTranslucentParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MxTranslucentParams) } },
+
+        { "transparent_bsdf", CLOSURE_MX_TRANSPARENT,
+          { CLOSURE_FINISH_PARAM(EmptyParams) } },
+
+        { "subsurface_bssrdf", CLOSURE_MX_SUBSURFACE,
+          { CLOSURE_VECTOR_PARAM(MxSubsurfaceParams, N),
+            CLOSURE_COLOR_PARAM(MxSubsurfaceParams, albedo),
+            CLOSURE_FLOAT_PARAM(MxSubsurfaceParams, transmission_depth),
+            CLOSURE_COLOR_PARAM(MxSubsurfaceParams, transmission_color),
+            CLOSURE_FLOAT_PARAM(MxSubsurfaceParams, anisotropy),
+            CLOSURE_STRING_KEYPARAM(MxSubsurfaceParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MxSubsurfaceParams) } },
+
+        { "sheen_bsdf", CLOSURE_MX_SHEEN,
+          { CLOSURE_VECTOR_PARAM(MxSheenParams, N),
+            CLOSURE_COLOR_PARAM(MxSheenParams, albedo),
+            CLOSURE_FLOAT_PARAM(MxSheenParams, roughness),
+            CLOSURE_STRING_KEYPARAM(MxSheenParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MxSheenParams) } },
+
+        { "uniform_edf", CLOSURE_MX_UNIFORM_EDF,
+          { CLOSURE_COLOR_PARAM(MxUniformEdfParams, emittance),
+            CLOSURE_STRING_KEYPARAM(MxUniformEdfParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MxUniformEdfParams) } },
+
+        { "layer", CLOSURE_MX_LAYER,
+          { CLOSURE_CLOSURE_PARAM(MxLayerParams, top),
+            CLOSURE_CLOSURE_PARAM(MxLayerParams, base),
+            CLOSURE_FINISH_PARAM(MxLayerParams) } },
+
+        // 3Delight's extensions. Declared in its `3delightosl.h`
+        // rather than in OSL, and unavoidable: every shader 3Delight
+        // ships builds its `Ci` out of `layer_closures` and wraps each
+        // part in an `outputvariable`, so a renderer that does not know
+        // them renders those shaders black.
+        { "layer_closures", CLOSURE_DL_LAYER,
+          { CLOSURE_CLOSURE_PARAM(DlLayerParams, top),
+            CLOSURE_CLOSURE_PARAM(DlLayerParams, bottom),
+            CLOSURE_COLOR_PARAM(DlLayerParams, top_mask),
+            CLOSURE_FINISH_PARAM(DlLayerParams) } },
+
+        { "outputvariable", CLOSURE_DL_OUTPUT_VARIABLE,
+          { CLOSURE_STRING_PARAM(DlOutputVariableParams, name),
+            CLOSURE_CLOSURE_PARAM(DlOutputVariableParams, value),
+            CLOSURE_FINISH_PARAM(DlOutputVariableParams) } },
+
+        { "outputconstant", CLOSURE_DL_OUTPUT_CONSTANT,
+          { CLOSURE_STRING_PARAM(DlOutputConstantParams, name),
+            CLOSURE_FINISH_PARAM(DlOutputConstantParams) } },
+
+        { "occlusion", CLOSURE_DL_OCCLUSION,
+          { CLOSURE_VECTOR_PARAM(DlOcclusionParams, N),
+            CLOSURE_FINISH_PARAM(DlOcclusionParams) } },
     };
 
     for (const Builtin& builtin : builtins) {
@@ -270,6 +442,311 @@ OSL::ShadingSystem&
 shading_system()
 {
     return system().shading;
+}
+
+namespace {
+
+scene_rdl2::math::Color
+to_colour(const OSL::Color3& colour)
+{
+    return scene_rdl2::math::Color(colour.x, colour.y, colour.z);
+}
+
+/// One walk of a closure tree, summing whatever `keep` picks out.
+///
+/// The two questions that need a tree walk without a `BsdfBuilder` --
+/// what does this emit, and what does it let through -- differ only in
+/// which components count, so they share the descent. Weights fold
+/// down it the same way the lobe walk folds them.
+template <typename Keep>
+scene_rdl2::math::Color
+sum(const OSL::ClosureColor* closure, const scene_rdl2::math::Color& weight,
+    const Keep& keep)
+{
+    if (closure == nullptr) {
+        return scene_rdl2::math::sBlack;
+    }
+
+    switch (closure->id) {
+    case OSL::ClosureColor::MUL: {
+        const auto* mul = closure->as_mul();
+        return sum(mul->closure, weight * to_colour(mul->weight), keep);
+    }
+    case OSL::ClosureColor::ADD: {
+        const auto* add = closure->as_add();
+        return sum(add->closureA, weight, keep)
+             + sum(add->closureB, weight, keep);
+    }
+    default: {
+        const auto* component = closure->as_comp();
+        // The closures that carry other closures rather than
+        // scattering themselves. Descending through them is what makes
+        // a 3Delight shader's emission reachable at all: every part of
+        // its `Ci` is wrapped in an `outputvariable` and layered with
+        // `layer_closures`.
+        switch (component->id) {
+        case CLOSURE_MX_LAYER: {
+            const auto* params = component->as<MxLayerParams>();
+            return sum(params->top, weight, keep)
+                 + sum(params->base, weight, keep);
+        }
+        case CLOSURE_DL_LAYER: {
+            const auto* params = component->as<DlLayerParams>();
+            return sum(params->top, weight * to_colour(params->top_mask),
+                       keep)
+                 + sum(params->bottom, weight, keep);
+        }
+        case CLOSURE_DL_OUTPUT_VARIABLE: {
+            const auto* params = component->as<DlOutputVariableParams>();
+            return sum(params->value, weight, keep);
+        }
+        default:
+            return keep(component, weight * to_colour(component->w));
+        }
+    }
+    }
+}
+
+} // namespace
+
+const OSL::ClosureColor*
+execute(const OSL::ShaderGroupRef& group,
+        const moonray::shading::Xform* xform, const Attributes& attributes,
+        const moonray::shading::State& state)
+{
+    OSL::ShadingSystem& shading = shading_system();
+
+    // One context per thread, kept for the life of the thread: getting
+    // one is not free, and shading is the inner loop.
+    thread_local OSL::PerThreadInfo* threadInfo =
+        shading.create_thread_info();
+    thread_local OSL::ShadingContext* context =
+        shading.get_context(threadInfo);
+
+    const scene_rdl2::math::Vec3f& position = state.getP();
+    const scene_rdl2::math::Vec3f& normal = state.getN();
+    const scene_rdl2::math::Vec3f& geometric = state.getNg();
+    const scene_rdl2::math::Vec3f& outgoing = state.getWo();
+    const scene_rdl2::math::Vec2f& st = state.getSt();
+    const scene_rdl2::math::Vec3f& dPds = state.getdPds();
+    const scene_rdl2::math::Vec3f& dPdt = state.getdPdt();
+
+    OSL::ShaderGlobals globals = {};
+    globals.P = OSL::Vec3(position.x, position.y, position.z);
+    globals.N = OSL::Vec3(normal.x, normal.y, normal.z);
+    globals.Ng = OSL::Vec3(geometric.x, geometric.y, geometric.z);
+    // OSL's `I` is the direction the ray *travelled*, which is the
+    // opposite of MoonRay's `wo`, the direction back towards the
+    // viewer.
+    globals.I = OSL::Vec3(-outgoing.x, -outgoing.y, -outgoing.z);
+    globals.u = st.x;
+    globals.v = st.y;
+    globals.dPdu = OSL::Vec3(dPds.x, dPds.y, dPds.z);
+    globals.dPdv = OSL::Vec3(dPdt.x, dPdt.y, dPdt.z);
+    globals.surfacearea = 1.0f;
+    globals.backfacing = state.isEntering() ? 0 : 1;
+    globals.flipHandedness = 0;
+    globals.raytype = 1;
+
+    // What `RendererServices` asks back through. Both handles are
+    // needed: the `Xform` carries the scene's spaces, and the `State`
+    // is what resolves *object* space, which for an instanced
+    // prototype is per shading point rather than per material.
+    const ShadingPoint point { xform, &state, &attributes };
+    globals.renderstate = const_cast<ShadingPoint*>(&point);
+    // OSL reaches object and shader space through these, and both
+    // land on the same resolution as the named spaces.
+    globals.object2common =
+        reinterpret_cast<OSL::TransformationPtr>(&point);
+    globals.shader2common =
+        reinterpret_cast<OSL::TransformationPtr>(&point);
+
+    shading.execute(context, *group, globals);
+    return globals.Ci;
+}
+
+scene_rdl2::math::Color
+emission_of(const OSL::ClosureColor* closure,
+            const scene_rdl2::math::Color& weight)
+{
+    return sum(closure, weight,
+               [](const OSL::ClosureComponent* component,
+                  const scene_rdl2::math::Color& weight) {
+                   switch (component->id) {
+                   case CLOSURE_EMISSION:
+                       // `emission()` has no parameters: the weight it
+                       // was multiplied by *is* the radiance.
+                       return weight;
+                   case CLOSURE_MX_UNIFORM_EDF:
+                       return weight
+                              * to_colour(
+                                  component->as<MxUniformEdfParams>()
+                                      ->emittance);
+                   default:
+                       return scene_rdl2::math::sBlack;
+                   }
+               });
+}
+
+scene_rdl2::math::Color
+transparency(const OSL::ClosureColor* closure,
+             const scene_rdl2::math::Color& weight)
+{
+    return sum(closure, weight,
+               [](const OSL::ClosureComponent* component,
+                  const scene_rdl2::math::Color& weight) {
+                   return component->id == CLOSURE_TRANSPARENT
+                                  || component->id == CLOSURE_MX_TRANSPARENT
+                              ? weight
+                              : scene_rdl2::math::sBlack;
+               });
+}
+
+namespace {
+
+/// One OSL type, as the MoonRay primitive-attribute key for a name.
+///
+/// -1 for a type MoonRay has no primitive attribute for. The list is
+/// MoonRay's, not OSL's: `AttributeKey` is templated on the storage
+/// type, and there are only so many.
+int
+key_of(const std::string& name, OSL::TypeDesc type)
+{
+    using namespace moonray::shading;
+
+    if (type == OSL::TypeDesc::TypeFloat) {
+        return TypedAttributeKey<float>(name);
+    }
+    if (type == OSL::TypeDesc::TypeInt) {
+        return TypedAttributeKey<int>(name);
+    }
+    if (type == OSL::TypeDesc::TypeColor) {
+        return TypedAttributeKey<scene_rdl2::math::Color>(name);
+    }
+    if (type == OSL::TypeDesc::TypePoint || type == OSL::TypeDesc::TypeVector
+        || type == OSL::TypeDesc::TypeNormal) {
+        return TypedAttributeKey<scene_rdl2::math::Vec3f>(name);
+    }
+    // OSL has no two-float type of its own; `float[2]` is how a shader
+    // spells a UV set other than `st`.
+    if (type.basetype == OSL::TypeDesc::FLOAT && type.aggregate == 1
+        && type.arraylen == 2) {
+        return TypedAttributeKey<scene_rdl2::math::Vec2f>(name);
+    }
+    if (type == OSL::TypeDesc::TypeString) {
+        return TypedAttributeKey<std::string>(name);
+    }
+    return -1;
+}
+
+} // namespace
+
+Attributes
+Attributes::of(const OSL::ShaderGroupRef& group)
+{
+    Attributes attributes;
+    if (!group) {
+        return attributes;
+    }
+
+    OSL::ShadingSystem& shading = shading_system();
+
+    int count = 0;
+    OSL::ustring* names = nullptr;
+    OSL::ustring* scopes = nullptr;
+    OSL::TypeDesc* types = nullptr;
+    if (!shading.getattribute(group.get(), "num_attributes_needed",
+                              OSL::TypeDesc::INT, &count)
+        || !shading.getattribute(group.get(), "attributes_needed",
+                                 OSL::TypeDesc::PTR, &names)
+        || !shading.getattribute(group.get(), "attribute_scopes",
+                                 OSL::TypeDesc::PTR, &scopes)
+        || !shading.getattribute(group.get(), "attribute_types",
+                                 OSL::TypeDesc::PTR, &types)
+        || names == nullptr || scopes == nullptr || types == nullptr) {
+        return attributes;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        // Scoped queries name a renderer concept ɴsɪ has no vocabulary
+        // for; see `Services::get_attribute`.
+        if (!scopes[i].empty()) {
+            continue;
+        }
+        const int key = key_of(names[i].string(), types[i]);
+        if (key < 0) {
+            continue;
+        }
+        attributes.mEntries.push_back({ names[i], types[i], key });
+        attributes.mKeys.push_back(key);
+    }
+
+    return attributes;
+}
+
+bool
+Attributes::read(const moonray::shading::State& state, OSL::ustringhash name,
+                 OSL::TypeDesc type, void* value) const
+{
+    using namespace moonray::shading;
+
+    for (const Entry& entry : mEntries) {
+        if (OSL::ustringhash(entry.name) != name || entry.type != type) {
+            continue;
+        }
+        const AttributeKey key(entry.key);
+        if (!state.isProvided(key)) {
+            return false;
+        }
+
+        if (type == OSL::TypeDesc::TypeFloat) {
+            *static_cast<float*>(value) =
+                state.getAttribute(TypedAttributeKey<float>(key));
+            return true;
+        }
+        if (type == OSL::TypeDesc::TypeInt) {
+            *static_cast<int*>(value) =
+                state.getAttribute(TypedAttributeKey<int>(key));
+            return true;
+        }
+        if (type == OSL::TypeDesc::TypeColor) {
+            const scene_rdl2::math::Color& colour = state.getAttribute(
+                TypedAttributeKey<scene_rdl2::math::Color>(key));
+            auto* out = static_cast<float*>(value);
+            out[0] = colour.r;
+            out[1] = colour.g;
+            out[2] = colour.b;
+            return true;
+        }
+        if (type == OSL::TypeDesc::TypePoint
+            || type == OSL::TypeDesc::TypeVector
+            || type == OSL::TypeDesc::TypeNormal) {
+            const scene_rdl2::math::Vec3f& vector = state.getAttribute(
+                TypedAttributeKey<scene_rdl2::math::Vec3f>(key));
+            auto* out = static_cast<float*>(value);
+            out[0] = vector.x;
+            out[1] = vector.y;
+            out[2] = vector.z;
+            return true;
+        }
+        if (type.basetype == OSL::TypeDesc::FLOAT && type.aggregate == 1
+            && type.arraylen == 2) {
+            const scene_rdl2::math::Vec2f& uv = state.getAttribute(
+                TypedAttributeKey<scene_rdl2::math::Vec2f>(key));
+            auto* out = static_cast<float*>(value);
+            out[0] = uv.x;
+            out[1] = uv.y;
+            return true;
+        }
+        if (type == OSL::TypeDesc::TypeString) {
+            *static_cast<OSL::ustring*>(value) = OSL::ustring(
+                state.getAttribute(TypedAttributeKey<std::string>(key)));
+            return true;
+        }
+        return false;
+    }
+
+    return false;
 }
 
 void

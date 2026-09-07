@@ -223,9 +223,42 @@ int nmr_set_double(NmrObject* o, const char* name, double value, int timestep)
 int nmr_set_string(NmrObject* o, const char* name, const char* value,
                    int timestep)
 {
-    if (value == nullptr) {
+    if (value == nullptr || name == nullptr) {
         return NMR_BAD_ARGUMENT;
     }
+
+    // **An enumerable `Int` set by name.** rdl2 spells `result` and
+    // friends as integers with names attached, and the `.rdla` reader
+    // accepts the name -- so an emitter that writes `"depth"` produces
+    // a file that loads, and an in-memory apply that only knew about
+    // strings would reject the same scene. This is the one place the
+    // two can be made to agree.
+    // `getAttribute` throws for a name the class does not have, which
+    // is the ordinary case here -- most attributes are not enumerable
+    // and the caller has not asked whether this one is. So the lookup
+    // is a question, not an assertion, and a failed one falls through
+    // to the string below rather than becoming the answer.
+    const rdl2::Attribute* enumerable = nullptr;
+    if (o != nullptr) {
+        try {
+            const rdl2::Attribute* attribute =
+                object_of(o)->getSceneClass().getAttribute(std::string(name));
+            if (attribute != nullptr && attribute->getType() == rdl2::TYPE_INT
+                && attribute->isEnumerable()) {
+                enumerable = attribute;
+            }
+        } catch (...) {
+        }
+    }
+
+    if (enumerable != nullptr) {
+        return guarded(o, [&] {
+            const rdl2::AttributeKey<rdl2::Int> key(*enumerable);
+            object_of(o)->set(
+                key, enumerable->getEnumValue(std::string(value)));
+        });
+    }
+
     return set_scalar<rdl2::String>(o, name, rdl2::String(value), timestep);
 }
 
@@ -482,7 +515,8 @@ int nmr_set_add(NmrObject* set, NmrObject* member)
 }
 
 int nmr_layer_assign(NmrObject* layer, NmrObject* geometry, const char* part,
-                     NmrObject* material, NmrObject* light_set)
+                     NmrObject* material, NmrObject* light_set,
+                     NmrObject* displacement, NmrObject* volume_shader)
 {
     if (geometry == nullptr) {
         return NMR_BAD_ARGUMENT;
@@ -492,6 +526,9 @@ int nmr_layer_assign(NmrObject* layer, NmrObject* geometry, const char* part,
         if (target == nullptr) {
             throw scene_rdl2::except::TypeError("not a Layer");
         }
+        // The six-argument overload, because the four-argument one has
+        // no displacement or volume column and silently renders the
+        // undisplaced, unshaded thing.
         target->assign(
             object_of(geometry)->asA<rdl2::Geometry>(),
             rdl2::String(part == nullptr ? "" : part),
@@ -499,7 +536,13 @@ int nmr_layer_assign(NmrObject* layer, NmrObject* geometry, const char* part,
                                 : object_of(material)->asA<rdl2::Material>(),
             light_set == nullptr
                 ? nullptr
-                : object_of(light_set)->asA<rdl2::LightSet>());
+                : object_of(light_set)->asA<rdl2::LightSet>(),
+            displacement == nullptr
+                ? nullptr
+                : object_of(displacement)->asA<rdl2::Displacement>(),
+            volume_shader == nullptr
+                ? nullptr
+                : object_of(volume_shader)->asA<rdl2::VolumeShader>());
     });
 }
 

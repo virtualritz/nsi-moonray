@@ -33,7 +33,14 @@
 
 use nsi_intermediate::{EdgeKind, OwnedData, Scene};
 use nsi_trait::Type;
+use oslquery_petite::OslQuery;
 use std::collections::HashSet;
+
+/// Where `.oso` files are looked for when a shader names no directory.
+///
+/// The same variable OSL's own `ShadingSystem` reads, so a scene that
+/// works with `oslc` and `oslinfo` works here.
+const SHADER_PATH: &str = "OSL_SHADER_PATH";
 
 /// A shader network, ready for `ShaderGroupBegin`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -92,6 +99,42 @@ pub fn group(scene: &Scene, root: &str) -> Group {
                 ));
                 continue;
             };
+            // **This one is fatal.** A parameter OSL does not
+            // recognise is a warning; a connection from something that
+            // is not an output is
+            //
+            //     ERROR: ConnectShaders: "nope" is not a parameter or
+            //            global of layer "a"
+            //     ERROR: ShaderGroupBegin: error parsing group description
+            //
+            // and the group does not exist -- so the surface shades
+            // nothing at all. Dropping the connection loses one input;
+            // keeping it loses the shader.
+            if let Some(source) = open(scene, edge.from())
+                && !source
+                    .param_by_name(from_port)
+                    .is_some_and(|parameter| parameter.is_output())
+            {
+                group.dropped.push(format!(
+                    "{}.{from_port}: not an output of that shader, so the \
+                     connection to {}.{to_port} was dropped",
+                    edge.from(),
+                    edge.to()
+                ));
+                continue;
+            }
+            if let Some(destination) = open(scene, edge.to())
+                && destination.param_by_name(to_port).is_none()
+            {
+                group.dropped.push(format!(
+                    "{}.{to_port}: no such parameter, so the connection \
+                     from {}.{from_port} was dropped",
+                    edge.to(),
+                    edge.from()
+                ));
+                continue;
+            }
+
             group.spec.push_str(&format!(
                 "connect {}.{from_port} {}.{to_port} ; ",
                 layer_name(edge.from()),
@@ -133,14 +176,59 @@ fn declare(
         ));
         return;
     };
+    // What the shader actually declares, if the `.oso` can be found.
+    //
+    // **Three mistakes, three different silences.** Measured against
+    // OSL 1.13 rather than assumed:
+    //
+    // | Spec says | OSL does |
+    // | --- | --- |
+    // | a parameter the shader lacks | warns on its error handler, shades on |
+    // | a value for an *output* | **accepts it, ignores it, says nothing** |
+    // | a connection from a non-output | **refuses the whole group** |
+    //
+    // The middle one is the reason this check earns its keep: nothing
+    // anywhere reports it, and the shader renders its default. The
+    // first is a warning that names the parameter but not the ɴsɪ node
+    // that asked for it, on a handler this backend does not own. The
+    // last is checked where the connections are emitted.
+    //
+    // A shader that cannot be found is not an error here. It may be on
+    // the renderer's search path and not on ours -- the flush is a
+    // pure transformation and may run on a different machine -- so
+    // what cannot be checked is emitted unchecked.
+    let declared = open(scene, handle);
 
     for (name, argument) in node.attributes() {
         if name == "shaderfilename" {
             continue;
         }
+
+        if let Some(query) = &declared {
+            match query.param_by_name(name) {
+                None => {
+                    group.dropped.push(format!(
+                        "{handle}.{name}: {shader} declares no such \
+                         parameter"
+                    ));
+                    continue;
+                }
+                Some(parameter) if parameter.is_output() => {
+                    group.dropped.push(format!(
+                        "{handle}.{name}: {shader} declares it an output, \
+                         which cannot be set"
+                    ));
+                    continue;
+                }
+                Some(_) => {}
+            }
+        }
+
         match parameter(name, argument.type_tag, &argument.data) {
             Some(line) => group.spec.push_str(&line),
-            None => group.dropped.push(format!("{handle}.{name}")),
+            None => group.dropped.push(format!(
+                "{handle}.{name}: no OSL spelling for its ɴsɪ type"
+            )),
         }
     }
 
@@ -255,6 +343,32 @@ fn shader_name(scene: &Scene, handle: &str) -> Option<String> {
     let stem = after_slash.strip_suffix(".oso").unwrap_or(after_slash);
 
     (!stem.is_empty()).then(|| stem.to_owned())
+}
+
+/// The declarations of the shader an ɴsɪ node names, if they can be
+/// found.
+///
+/// `shaderfilename` may be a path or a bare name; `oslquery-petite`
+/// resolves both, appending `.oso` and walking a search path exactly
+/// as OSL does. `$OSL_SHADER_PATH` is the same variable OSL's own
+/// `ShadingSystem` reads, so a scene that works with `oslc` and
+/// `oslinfo` works here.
+///
+/// `None` is not a failure: the shader may be on the renderer's search
+/// path and not on this machine's, since the flush is a pure
+/// transformation and may run somewhere else entirely. What cannot be
+/// checked is emitted unchecked.
+fn open(scene: &Scene, handle: &str) -> Option<OslQuery> {
+    let node = scene.node(handle)?;
+    let OwnedData::String(names) = &node.effective("shaderfilename")?.data
+    else {
+        return None;
+    };
+
+    let name = String::from_utf8_lossy(names.first()?).into_owned();
+    let search = std::env::var(SHADER_PATH).unwrap_or_default();
+
+    OslQuery::open_with_searchpath(&name, &search).ok()
 }
 
 /// Whether a shader node names a shader OSL could run.
@@ -480,6 +594,96 @@ mod tests {
             "{}",
             group.spec
         );
+    }
+
+    /// A parameter the shader does not declare is dropped and named.
+    ///
+    /// Neither of these is loud in OSL, which is the point. A
+    /// parameter the shader lacks draws a warning on OSL's error
+    /// handler -- naming the parameter, not the ɴsɪ node that asked
+    /// for it, on a handler this backend does not own. A value set on
+    /// an **output** draws nothing at all: OSL accepts it, ignores it,
+    /// and the shader renders its default.
+    ///
+    /// Measured against OSL 1.13, not assumed. The third case, a
+    /// connection from a non-output, *is* fatal and is checked where
+    /// connections are emitted.
+    ///
+    /// Uses the probe's own compiled shader, so it needs
+    /// `tools/osl-probe/build.sh` to have run.
+    #[test]
+    fn a_parameter_the_shader_does_not_have_is_dropped() {
+        let compiled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/osl-probe/build/probe.oso");
+        if !compiled.exists() {
+            eprintln!(
+                "skipped: no {} -- tools/osl-probe/build.sh",
+                compiled.display()
+            );
+            return;
+        }
+
+        let mut scene = Scene::default();
+        shader(&mut scene, "s", &compiled.to_string_lossy());
+        scene
+            .set_attribute(
+                "s",
+                vec![
+                    // `probe` declares this one.
+                    argument(
+                        "Cs",
+                        Type::Color,
+                        OwnedData::F32(vec![0.1, 0.8, 0.2]),
+                    ),
+                    // And not this one.
+                    argument(
+                        "rooughness",
+                        Type::F32,
+                        OwnedData::F32(vec![0.25]),
+                    ),
+                    // Nor this: `Cout` is an output, which cannot be
+                    // set, and OSL refuses the whole group over it.
+                    argument(
+                        "Cout",
+                        Type::Color,
+                        OwnedData::F32(vec![1.0, 0.0, 0.0]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+
+        let group = group(&scene, "s");
+
+        // The good one crossed.
+        assert!(
+            group.spec.contains("param color Cs 0.1 0.8 0.2 ;"),
+            "{}",
+            group.spec
+        );
+        // The typo did not, and is named with the shader that refused
+        // it.
+        assert!(!group.spec.contains("rooughness"), "{}", group.spec);
+        assert!(
+            group.dropped.iter().any(|line| line.contains("rooughness")
+                && line.contains("no such parameter")),
+            "{:?}",
+            group.dropped
+        );
+        // And so is the output.
+        assert!(!group.spec.contains("param color Cout"), "{}", group.spec);
+        assert!(
+            group
+                .dropped
+                .iter()
+                .any(|line| line.contains("Cout")
+                    && line.contains("an output")),
+            "{:?}",
+            group.dropped
+        );
+
+        // The shader itself still crossed, which is the point: ɴsɪ
+        // always returns an image.
+        assert_eq!(group.layers, ["s"]);
     }
 
     /// **The oracle.** What this emits is what OSL parses.

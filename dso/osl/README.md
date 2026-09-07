@@ -1,4 +1,4 @@
-# `Osl` — an OSL surface as a MoonRay material
+# `Osl` and `OslDisplacement` — OSL root shaders for MoonRay
 
 ɴsɪ *is* OSL. A `shader` node names a compiled `.oso` and carries that
 shader's parameters, and section 4.5 of the specification says a light
@@ -15,8 +15,9 @@ dso/osl/build.sh [moonray-install] [osl-install]
 
 Compiled directly rather than through MoonRay's `moonray_dso_simple`,
 which lives in MoonRay's build tree and whose CMake config pulls in a
-CppUnit that nothing here needs. Produces `Osl.so` and
-`Osl.so.proxy`; put the directory on MoonRay's DSO path.
+CppUnit that nothing here needs. Produces `Osl.so`,
+`OslDisplacement.so` and a `.so.proxy` beside each; put the directory
+on MoonRay's DSO path.
 
 Needs OSL built. On Ubuntu that means `llvm-18-dev` and
 `libclang-18-dev` — the runtime libraries alone are not enough — and a
@@ -74,7 +75,22 @@ which is what makes the two compatible at all.
 | `microfacet(…, refract 0)` | `MicrofacetIsotropicBRDF`, same grey/coloured split |
 | `microfacet(…, refract 1)` | `MicrofacetIsotropicBTDF` |
 | `emission` | `BsdfBuilder::addEmission` |
-| `transparent`, `background` | counted and reported — see below |
+| `transparent` | presence — see below |
+| `background` | counted and reported — see below |
+
+MaterialX's parallel vocabulary lands on the same lobes:
+`oren_nayar_diffuse_bsdf` and `burley_diffuse_bsdf` on `OrenNayarBRDF`,
+`dielectric_bsdf` on `MicrofacetIsotropicBSDF` — one lobe carrying both
+reflection and transmission, balanced by Fresnel rather than added —
+`conductor_bsdf` and `generalized_schlick_bsdf` on
+`MicrofacetIsotropicBRDF`, `translucent_bsdf` on `LambertianBTDF`,
+`subsurface_bssrdf` and the classic `subsurface` on
+`RandomWalkSubsurface`, `sheen_bsdf` on `VelvetBRDF`, `uniform_edf`
+on emission, and `layer(top, base)` by walking both. Where the shapes
+differ the difference is stated at the case rather than hidden: a
+MaterialX tint is a colour where MoonRay wants a scalar, so it collapses
+to its Rec. 709 luminance, and Schlick's `exponent` has no counterpart
+and is not carried.
 
 The grey/coloured split is not a shortcut. MoonRay's `add*` methods
 take a *scalar* weight, so a coloured weight has nowhere to go on a
@@ -83,13 +99,124 @@ render a grey metal. A coloured specular is a conductor, and MoonRay's
 artist-friendly constructor takes reflectivity and edge tint — which
 is how `UsdPreviewSurface` spells metal too.
 
-`transparent` is straight-through transmission, which MoonRay
-expresses as *presence* — evaluated by its own function before
-shading, so a closure has nowhere to land. `background` is an
-environment, and reaches MoonRay as an `EnvLight` from the ɴsɪ
-`environment` node rather than through a material.
+`background` is an environment, and reaches MoonRay as an `EnvLight`
+from the ɴsɪ `environment` node rather than through a material.
 
-## Emission is not a light
+## Presence
+
+`transparent()` is straight-through transmission, which MoonRay
+expresses as **presence** — one scalar, on its own function, evaluated
+before shading. There is nowhere in a `BsdfBuilder` for it to land, so
+the material installs `mPresenceFunc` and runs the network a *second*
+time, walking only for `transparent`. Presence is `1 - luminance` of
+what passed through; a coloured transparency has nowhere to go, since
+presence is one number.
+
+A second run is not free, so it is installed only for a group that can
+produce one. OSL knows which: `closures_needed` is what its optimizer
+found the group may emit, and `unknown_closures_needed` is its own
+admission that it could not tell — in which case the material pays,
+rather than rendering opaque a surface the shader asked to see through.
+
+Measured, at `amount` 0, 0.5 and 0.9 of `transparent()`:
+
+```
+alpha 0.592 → 0.296 → 0.059
+```
+
+## 3Delight's extensions
+
+ɴsɪ is 3Delight's interface, so the shaders 3Delight ships are the
+obvious thing to render — and they use closures OSL does not declare,
+from its own `3delightosl.h`. Registered here because without them
+`Ci` never gets built:
+
+| 3Delight closure | What it is |
+| --- | --- |
+| `layer_closures(top, bottom, top_mask)` | Layering, with the energy conservation left to the renderer — which is exactly what `BsdfBuilder` does with lobes added in order |
+| `outputvariable(name, value)` | An AOV wrapper; the closure inside is what shades |
+| `outputconstant(name)` | A named constant for an AOV; shades nothing |
+| `occlusion(N)` | A render-time query, not a scattering function — counted as unmapped |
+
+And two keyword arguments on `microfacet`: **`realeta` and
+`complexeta`**, the real and imaginary parts of a conductor's index of
+refraction. 3Delight's documentation says the pair "replaces the eta
+parameter", and MoonRay's conductor constructor takes exactly it.
+Without them a 3Delight metal reaches the walk as a plain coloured
+specular and renders **white** — measured: `1.005, 1.005, 1.005` for a
+gold that should be `0.955, 0.754, 0.352`.
+
+`gamma`, `thinfilmthickness`, `thinfilmeta` and `mediumeta` are not
+carried. OSL warns for each, by name, and shades on.
+
+## Displacement
+
+`OslDisplacement` is the same class with a different *usage*.
+`ShaderGroupBegin` is told `"displacement"` rather than `"surface"`,
+which is what lets a shader assign to `P`; the group specification, the
+search path and the transforms are identical, and `flush.rs` builds
+them with the same code.
+
+OSL has no displacement closure, so what MoonRay is handed is the
+difference between the `P` the shader was given and the `P` it left
+behind. `N` is not carried back: MoonRay recomputes shading normals
+from the displaced surface, and a normal the geometry does not have is
+worse than none.
+
+There is no substitute for this the way `UsdPreviewSurface` substitutes
+for a surface — a displacement moves vertices, and a stand-in that does
+not move them renders a different shape — so without OSL the binding is
+reported and dropped.
+
+## Emission is not a light, and `OslMap` is what makes it one
+
+`emission()` becomes `addEmission`, and that is **hit-only**: MoonRay's
+integrator does `radiance += pathThroughput * bsdf->getSelfEmission()`
+and nothing else — no next-event estimation, no shadow rays. An
+emissive shader therefore *looks* bright and lights nothing around it.
+
+What lights a scene in MoonRay is a `MeshLight`, which
+importance-samples a mesh's surface. Its radiance is one `color` times
+one `intensity` for the whole mesh — unless it is given a
+`map_shader`, which `MeshLight::sampleMapShader` calls per point with a
+full shading `State` built from a real intersection on the light's own
+mesh: position, normal, `uv`, and the primitive attributes the map
+asked for.
+
+`OslMap` is that map. It runs the same network the surface runs and
+walks the closure tree for **emission alone**, so an OSL light whose
+emission is a 3D noise in colour *and* intensity is a light that varies
+over its own surface and is sampled properly. `emission_of` is shared
+with the `Osl` material rather than reimplemented — a light and the
+surface it is must not disagree about how bright the surface is — and
+it descends through `layer_closures`, `layer` and `outputvariable`,
+without which a 3Delight shader's emission is unreachable at all.
+
+Three things a scene has to do, each measured rather than assumed:
+
+- **Duplicate the geometry.** `createMeshLightLayer` refuses a geometry
+  that is already in the render layer, citing circular shadow-link
+  dependencies and conflicting face-set tessellation. An object that is
+  both a shaded surface and a light needs two copies: one in the layer
+  wearing the `Osl` material, one outside it driving the light.
+- **Put the light's copy in a `GeometrySet`.** Geometry in no set is
+  never tessellated, and the light then reports "MeshLight contains no
+  faces" — which reads like a broken light rather than a missing set.
+- **Have a `DwaBaseMaterial`.** See `dso/meshlight/`: MoonRay hard-codes
+  a class it does not ship, so without a stand-in *no* scene containing
+  a mesh light renders at all.
+
+The `GeometrySet` is not optional in a second, sharper way. A mesh
+light whose geometry is in no set renders *correctly* on its own — and
+segfaults in render prep the moment it is given a `map_shader`, inside
+`Mesh::getST`, on an `Attributes` the geometry never got. MoonRay's own
+`CheckerboardMap` crashes identically, so it is not this map; adding
+the geometry to a set fixes it. Reported as
+`upstream/moonray-meshlight-map-shader-segfault.md`.
+
+`specs/003-osl/research.md` O2 and O3.
+
+## The hit-only path, which is still right for the surface itself
 
 `emission()` becomes `addEmission`, and that is **hit-only**: MoonRay's
 integrator does `radiance += pathThroughput * bsdf->getSelfEmission()`
@@ -97,6 +224,46 @@ and nothing else — no next-event estimation, no shadow rays. An ɴsɪ
 emitter meant to *light* the scene becomes a `MeshLight` in the flush
 instead, forced visible in camera so it is seen as well as sampled.
 `specs/003-osl/research.md` O2 and O3.
+
+## Primitive variables
+
+`getattribute("name", value)` in a shader reads a MoonRay primitive
+attribute — which is how an ɴsɪ mesh attribute nobody declared in
+advance arrives, as a `UserData` in the mesh's
+`primitive_attributes`.
+
+**Which ones to ask MoonRay for is not guesswork.** MoonRay attaches a
+primitive attribute to an intersection only if some shader asked for
+it, and OSL's optimizer already reports the name, scope and type of
+every `getattribute()` the group makes — `attributes_needed`,
+`attribute_scopes`, `attribute_types`. So `update()` asks OSL, resolves
+each to a MoonRay `AttributeKey` once, and puts them in
+`mOptionalAttributes`. Optional rather than required: a mesh without
+the attribute renders with the shader's own default, which is what
+`getattribute` returning 0 means.
+
+Only the unscoped form. OSL's scoped `getattribute("scope", "name",
+value)` names a renderer concept — an object's userdata, a global
+setting — and ɴsɪ has no vocabulary for one, so answering it would be
+inventing a mapping.
+
+`st` and `N` do not come this way: they have dedicated rdl2 attributes,
+`uv_list` and `normal_list`, and reach OSL as `u`, `v` and `N`.
+
+## `+` is a sum, layering is layering
+
+OSL's `Ci = a + b` says the two closures **add**. MoonRay's
+`BsdfBuilder` layers by the order lobes arrive, and its
+`BSDFBUILDER_PHYSICAL` flag makes the first attenuate the second — so
+adding every lobe that way lost whichever term came second.
+
+Measured, on `color(g) * diffuse(...) + color(r) * microfacet(...)`:
+the specular AOV was black, and swapping the two terms in the *shader*
+swapped which lobe vanished. An `add` node therefore walks its children
+`BSDFBUILDER_ADDITIVE`, and attenuation is turned on only by the
+closures that mean layering — MaterialX's `layer(top, base)` and
+3Delight's `layer_closures(top, bottom, mask)`. The flags compose, so a
+layer inside a layer still layers.
 
 ## Labels
 
@@ -106,6 +273,20 @@ a static array declared on the scene class. OSL's side is a string —
 the language. `attributes.cc` declares the vocabulary; a label outside
 it leaves the lobe unnamed rather than renaming it, because an LPE
 naming a label that never registered renders black.
+
+3Delight's shaders label nothing directly: they wrap each part of the
+surface in `outputvariable("reflection", …)`, which is the same intent
+one level up, so the wrapper sets the label for the closures inside it
+— `reflection` becoming `specular`, `incandescence` becoming
+`emission`, and so on.
+
+**The material carries no rdl2 `label` of its own, deliberately.**
+MoonRay registers a lobe label as `<material label>.<lobe>` when the
+material has one and as the bare lobe name when it does not — measured
+— and the bare form is what lets one output layer name a lobe across
+every shader in the scene. So an output layer asking for `reflection`
+becomes the light-path expression `C<..'specular'>L`, and it holds for
+the whole scene.
 
 ## What it said
 

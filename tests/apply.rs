@@ -359,3 +359,52 @@ fn a_mesh_scene_applies_through_the_authoring_twins() {
         "the vertices should have crossed intact\n{written}"
     );
 }
+
+/// **An enumerable `Int` set by its name.**
+///
+/// rdl2 spells `RenderOutput.result` and its like as integers with
+/// names attached, and the `.rdla` reader accepts the name -- so a
+/// document that says `"depth"` writes a file MoonRay loads. The
+/// in-memory transport has to accept the same document, or the two
+/// halves of this backend disagree about what a scene is.
+///
+/// A name the enum does not have is a *reported* mapping problem, not
+/// an abort: rdl2 throws for it, and an exception crossing back into
+/// Rust is not recoverable.
+#[test]
+fn an_enumerable_attribute_is_set_by_name() {
+    let context = context();
+
+    let mut document = Document::default();
+    document.push(
+        Described::new("RenderOutput", "/depth")
+            .set("result", Value::String("depth".to_string())),
+    );
+    document.push(
+        Described::new("RenderOutput", "/nonsense")
+            .set("result", Value::String("not a result".to_string())),
+    );
+
+    let report = apply(&document, &context);
+
+    let out = std::env::temp_dir().join("nsi-moonray-apply-enum.rdla");
+    context
+        .write_ascii(&out)
+        .expect("the live scene writes out");
+    let written = std::fs::read_to_string(&out).expect("it was written");
+
+    let depth = written
+        .split("RenderOutput(\"/depth\") {")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .unwrap_or_default();
+    assert!(
+        depth.contains("[\"result\"] = \"depth\""),
+        "the enum should have been set by name: {written}"
+    );
+
+    assert!(
+        report.iter().any(|line| line.contains("/nonsense")),
+        "a name the enum does not have must be reported: {report:?}"
+    );
+}

@@ -17,6 +17,19 @@ fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArgument {
     OwnedArgument::new(name, type_tag, 1, 0, data)
 }
 
+/// An argument whose values are fixed-size arrays -- how ɴsɪ spells a
+/// UV set, `float[2]`. The array length is what tells one value from
+/// two, and so what tells a per-vertex variable from a face-varying
+/// one.
+fn array_arg(
+    name: &str,
+    type_tag: Type,
+    length: usize,
+    data: OwnedData,
+) -> OwnedArgument {
+    OwnedArgument::new(name, type_tag, length, 0, data)
+}
+
 fn dso_path() -> Option<String> {
     std::env::var("NSI_MOONRAY_DSO").ok()
 }
@@ -1747,4 +1760,1119 @@ fn a_delta_snapshot_agrees_with_a_full_one() {
     );
 
     let _ = session.render().stop();
+}
+
+/// **A MaterialX closure becomes a MoonRay lobe.**
+///
+/// The MaterialX closures are a second, parallel vocabulary in OSL:
+/// `oren_nayar_diffuse_bsdf` carries its own albedo rather than being
+/// multiplied by one, and its parameters sit at offsets this crate
+/// declares in `register_closures`. A wrong offset does not fail --
+/// `as<MxDiffuseParams>()` reads whatever is there -- so the albedo is
+/// asserted per channel, exactly as the classic-closure test does, and
+/// for the same reason.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn a_materialx_closure_renders() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-materialx");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("mx.osl");
+    // No `* tint` and no `diffuse()`: the closure is the whole shader,
+    // so what reaches the frame can only have come through
+    // `MxDiffuseParams`.
+    std::fs::write(
+        &source,
+        "surface mx(color tint = color(1, 1, 1))\n\
+         {\n    Ci = oren_nayar_diffuse_bsdf(N, tint, 0.0);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("mx.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    nsi.create("attr", "attributes").unwrap();
+    nsi.create("mx", "shader").unwrap();
+    nsi.set_attribute(
+        "mx",
+        vec![
+            arg(
+                "shaderfilename",
+                Type::String,
+                OwnedData::String(vec![
+                    directory
+                        .join("mx.oso")
+                        .to_string_lossy()
+                        .into_owned()
+                        .into_bytes(),
+                ]),
+            ),
+            arg("tint", Type::Color, OwnedData::F32(vec![0.05, 0.7, 0.6])),
+        ],
+    )
+    .unwrap();
+    nsi.connect("attr", None, "quad", "geometryattributes")
+        .unwrap();
+    nsi.connect("mx", None, "attr", "surfaceshader").unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+    let centre = ((height / 2) * width + width / 2) * 4;
+    let (red, green, blue) =
+        (pixels[centre], pixels[centre + 1], pixels[centre + 2]);
+
+    assert!(
+        green > 0.0,
+        "the MaterialX closure should have shaded something -- black \
+         means it was never registered, so OSL dropped it: {red} \
+         {green} {blue}"
+    );
+    // The same triple the classic-closure test uses, and the same
+    // three questions of it: an albedo read from the wrong offset
+    // fails at least one.
+    assert!(
+        green > red * 5.0,
+        "green should dominate red: {red} {green} {blue}"
+    );
+    assert!(
+        blue > red * 5.0,
+        "blue should dominate red: {red} {green} {blue}"
+    );
+    assert!(
+        green > blue,
+        "green should exceed blue, as `tint` says: {red} {green} {blue}"
+    );
+}
+
+/// **An OSL displacement moves the surface.**
+///
+/// A displacement is the one shader binding with no substitute: it
+/// changes the *shape*, so a stand-in that shades plausibly and leaves
+/// the vertices alone is not an approximation of it. What is asserted
+/// is therefore the silhouette -- the covered area of the frame -- and
+/// not the colour.
+///
+/// The quad is pushed half a unit along its normal, towards the camera,
+/// which makes it cover more of the frame. Measured against
+/// MoonRay's own `NormalDisplacement` at the same height first, so the
+/// number below is what the renderer does rather than what this test
+/// hopes for.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn an_osl_displacement_displaces() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-displace");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("push.osl");
+    std::fs::write(
+        &source,
+        "displacement push(float amount = 0.5)\n\
+         {\n    P = P + amount * normalize(N);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("push.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    // The same scene twice: once as it is, once with the displacement
+    // bound. Anything else that changed the coverage would change both.
+    let (width, height) = (64usize, 48usize);
+    let covered = |displaced: bool| {
+        let mut nsi = scene(width as i32, height as i32);
+        nsi.create("attr", "attributes").unwrap();
+
+        if displaced {
+            nsi.create("push", "shader").unwrap();
+            nsi.set_attribute(
+                "push",
+                vec![arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![
+                        directory
+                            .join("push.oso")
+                            .to_string_lossy()
+                            .into_owned()
+                            .into_bytes(),
+                    ]),
+                )],
+            )
+            .unwrap();
+            nsi.connect("push", None, "attr", "displacementshader")
+                .unwrap();
+        }
+
+        nsi.connect("attr", None, "quad", "geometryattributes")
+            .unwrap();
+
+        let mut session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+        // Alpha, which is coverage and nothing else.
+        pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 0.5)
+            .count()
+    };
+
+    let plain = covered(false);
+    let pushed = covered(true);
+
+    assert!(plain > 0, "the undisplaced quad is not in frame at all");
+    assert!(
+        pushed > plain + plain / 10,
+        "pushing the quad half a unit towards the camera should have \
+         made it visibly larger: {plain} pixels became {pushed}. Equal \
+         means the displacement never reached MoonRay -- an unbound \
+         `OslDisplacement` is silent, because the layer's displacement \
+         column is optional."
+    );
+}
+
+/// **`transparent()` becomes presence.**
+///
+/// OSL's straight-through transmission has no MoonRay lobe: MoonRay
+/// expresses it as *presence*, a scalar on its own function evaluated
+/// before shading. So the material runs the network a second time for
+/// it -- and only for a group OSL's optimizer says may emit the
+/// closure, which is what keeps every other shader from paying.
+///
+/// Alpha is what is asserted, because presence is coverage: the quad's
+/// colour also drops, but that would drop just as well if the shader
+/// simply shaded darker.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn transparent_becomes_presence() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-presence");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("see.osl");
+    std::fs::write(
+        &source,
+        "surface see(float amount = 0)\n\
+         {\n    Ci = amount * transparent() + (1 - amount) * diffuse(N);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("see.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    let alpha = |amount: f32| {
+        let mut nsi = scene(width as i32, height as i32);
+        nsi.create("attr", "attributes").unwrap();
+        nsi.create("see", "shader").unwrap();
+        nsi.set_attribute(
+            "see",
+            vec![
+                arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![
+                        directory
+                            .join("see.oso")
+                            .to_string_lossy()
+                            .into_owned()
+                            .into_bytes(),
+                    ]),
+                ),
+                arg("amount", Type::F32, OwnedData::F32(vec![amount])),
+            ],
+        )
+        .unwrap();
+        nsi.connect("attr", None, "quad", "geometryattributes")
+            .unwrap();
+        nsi.connect("see", None, "attr", "surfaceshader").unwrap();
+
+        let mut session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+        pixels.chunks_exact(4).map(|pixel| pixel[3]).sum::<f32>()
+    };
+
+    let opaque = alpha(0.0);
+    let half = alpha(0.5);
+
+    assert!(opaque > 0.0, "the opaque quad is not in frame at all");
+    // Half the coverage, within what a stochastic presence and the
+    // quad's antialiased edge leave: the two are 2:1, not equal.
+    assert!(
+        half < opaque * 0.6 && half > opaque * 0.4,
+        "half a unit of `transparent()` should have halved the \
+         coverage: {opaque} became {half}. Unchanged means the closure \
+         never reached presence -- the material renders the same \
+         picture either way, only more of it."
+    );
+}
+
+/// **`st` reaches an OSL shader as `u` and `v`.**
+///
+/// The whole chain, and each link is one that fails quietly: ɴsɪ's `st`
+/// expanded to MoonRay's per-face-vertex `uv_list`, carried into the
+/// mesh's primitive attributes, read back by the intersection as `St`,
+/// and handed to OSL as `u` and `v`.
+///
+/// **The values are scaled, not merely present.** Without any `uv_list`
+/// MoonRay parametrises the face itself, which for a quad is also
+/// 0..1 -- so a test asserting that `u` varies passes with `st`
+/// carried nowhere at all. Measured first: half the UVs, half the
+/// gradient.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn an_nsi_st_reaches_osl() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-st");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("uvshow.osl");
+    std::fs::write(
+        &source,
+        "surface uvshow()\n\
+         {\n    Ci = color(u, v, 0) * diffuse(N);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("uvshow.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    // The brightest red anywhere, which is the largest `u` the shader
+    // saw -- scaled by the light, but by the same factor either way.
+    let brightest = |scale: f32| {
+        let mut nsi = scene(width as i32, height as i32);
+        nsi.set_attribute(
+            "quad",
+            vec![array_arg(
+                "st",
+                Type::F32,
+                2,
+                OwnedData::F32(vec![
+                    0.0, 0.0, scale, 0.0, scale, scale, 0.0, scale,
+                ]),
+            )],
+        )
+        .unwrap();
+
+        nsi.create("attr", "attributes").unwrap();
+        nsi.create("uvshow", "shader").unwrap();
+        nsi.set_attribute(
+            "uvshow",
+            vec![arg(
+                "shaderfilename",
+                Type::String,
+                OwnedData::String(vec![
+                    directory
+                        .join("uvshow.oso")
+                        .to_string_lossy()
+                        .into_owned()
+                        .into_bytes(),
+                ]),
+            )],
+        )
+        .unwrap();
+        nsi.connect("attr", None, "quad", "geometryattributes")
+            .unwrap();
+        nsi.connect("uvshow", None, "attr", "surfaceshader")
+            .unwrap();
+
+        let mut session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+        pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[0])
+            .fold(0.0f32, f32::max)
+    };
+
+    let full = brightest(1.0);
+    let half = brightest(0.5);
+
+    assert!(full > 0.1, "`u` never varied: {full}");
+    // Half the UVs, half the gradient. Equal means `st` was dropped and
+    // MoonRay's own parametrisation -- also 0..1 on a quad -- is what
+    // the shader read.
+    assert!(
+        half < full * 0.6 && half > full * 0.4,
+        "halving `st` should have halved what the shader read as `u`: \
+         {full} became {half}"
+    );
+}
+
+/// **An ɴsɪ primitive variable reaches an OSL `getattribute()`.**
+///
+/// The whole chain again, and a longer one: an attribute on the ɴsɪ
+/// `mesh` that this backend has never heard of, expanded to
+/// face-varying, written as a MoonRay `UserData` in the mesh's
+/// `primitive_attributes`, requested from MoonRay because *OSL* said
+/// the group reads it, attached to the intersection, and read back
+/// through `RendererServices::get_attribute`.
+///
+/// The shader's own default is blue and the attribute is red, so what
+/// the frame shows says which of the two the shader got. A link
+/// missing anywhere in the chain renders the default, silently.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn an_nsi_primitive_variable_reaches_osl() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-primvar");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("attrshow.osl");
+    std::fs::write(
+        &source,
+        "surface attrshow()\n\
+         {\n    color tint = color(0, 0, 1);\n\
+         \x20   getattribute(\"mytint\", tint);\n\
+         \x20   Ci = tint * diffuse(N);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("attrshow.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    // Per vertex, so the expansion has to index it the way `P` is
+    // indexed rather than copy it across.
+    nsi.set_attribute(
+        "quad",
+        vec![arg(
+            "mytint",
+            Type::Color,
+            OwnedData::F32(vec![
+                0.9, 0.1, 0.05, 0.9, 0.1, 0.05, 0.9, 0.1, 0.05, 0.9, 0.1, 0.05,
+            ]),
+        )],
+    )
+    .unwrap();
+
+    nsi.create("attr", "attributes").unwrap();
+    nsi.create("attrshow", "shader").unwrap();
+    nsi.set_attribute(
+        "attrshow",
+        vec![arg(
+            "shaderfilename",
+            Type::String,
+            OwnedData::String(vec![
+                directory
+                    .join("attrshow.oso")
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_bytes(),
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.connect("attr", None, "quad", "geometryattributes")
+        .unwrap();
+    nsi.connect("attrshow", None, "attr", "surfaceshader")
+        .unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+    let centre = ((height / 2) * width + width / 2) * 4;
+    let (red, green, blue) =
+        (pixels[centre], pixels[centre + 1], pixels[centre + 2]);
+
+    assert!(
+        red > blue * 5.0,
+        "the shader should have read `mytint` off the geometry -- red, \
+         not the blue it defaults to: {red} {green} {blue}"
+    );
+    assert!(
+        red > green * 5.0,
+        "and red should dominate green, as `mytint` says: {red} {green} \
+         {blue}"
+    );
+}
+
+/// **A depth AOV reaches the written file, as its own channel.**
+///
+/// The flush's job is `result = "depth"` on a second `RenderOutput`;
+/// MoonRay's is the rest. Checked by reading the channel back and
+/// asserting its *values* -- the quad sits five units in front of the
+/// camera, so a depth channel that is there but empty, or that is a
+/// copy of the beauty, fails.
+#[test]
+fn a_depth_output_layer_is_written() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-inprocess");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let image = directory.join("depth.exr");
+    let _ = std::fs::remove_file(&image);
+
+    let (width, height) = (64i32, 48i32);
+    let mut nsi = scene(width, height);
+    nsi.set_attribute(
+        "driver",
+        vec![OwnedArgument::new(
+            "imagefilename",
+            Type::String,
+            1,
+            0,
+            OwnedData::String(vec![
+                image.to_string_lossy().as_bytes().to_vec(),
+            ]),
+        )],
+    )
+    .unwrap();
+
+    nsi.create("depth", "outputlayer").unwrap();
+    nsi.set_attribute(
+        "depth",
+        vec![
+            arg(
+                "variablesource",
+                Type::String,
+                OwnedData::String(vec![b"builtin".to_vec()]),
+            ),
+            arg(
+                "variablename",
+                Type::String,
+                OwnedData::String(vec![b"z".to_vec()]),
+            ),
+            arg(
+                "layername",
+                Type::String,
+                OwnedData::String(vec![b"Z".to_vec()]),
+            ),
+        ],
+    )
+    .unwrap();
+    nsi.connect("depth", None, "screen", "outputlayers")
+        .unwrap();
+    nsi.connect("driver", None, "depth", "outputdrivers")
+        .unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    drop(session);
+
+    assert!(image.exists(), "no image at {}", image.display());
+
+    use exr::prelude::{ReadChannels, ReadLayers};
+    let read = exr::prelude::read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .all_channels()
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(&image)
+        .expect("the written image reads back");
+
+    let layer = &read.layer_data;
+    let depth = layer
+        .channel_data
+        .list
+        .iter()
+        .find(|channel| channel.name.to_string() == "Z")
+        .unwrap_or_else(|| {
+            let names: Vec<String> = layer
+                .channel_data
+                .list
+                .iter()
+                .map(|channel| channel.name.to_string())
+                .collect();
+            panic!("no Z channel; the file has {names:?}")
+        });
+
+    // The quad is at z = -5 in a camera at the origin looking down -z,
+    // so every pixel it covers is about five units away and the rest is
+    // the background. `4.0` and `6.0` bracket the first without
+    // admitting the second.
+    let hits = (0..layer.size.width() * layer.size.height())
+        .map(|i| depth.sample_data.value_by_flat_index(i).to_f32())
+        .filter(|value| (4.0..6.0).contains(value))
+        .count();
+
+    assert!(
+        hits > 400,
+        "the depth channel should read about five over the quad, which \
+         covers most of the frame; {hits} pixels of {} did",
+        layer.size.width() * layer.size.height()
+    );
+}
+
+/// Where 3Delight's compiled shaders live, if this machine has them.
+///
+/// `$NSI_MOONRAY_3DELIGHT_OSL` points at 3Delight's `osl` directory --
+/// `.../3delight/Linux-x86_64/osl`. Unlike `$NSI_MOONRAY_DSO` this is
+/// another vendor's product rather than something everyone building
+/// this crate has, so the test that needs it says why it did nothing
+/// rather than failing.
+#[cfg(osl)]
+fn three_delight_shaders() -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(
+        std::env::var("NSI_MOONRAY_3DELIGHT_OSL").ok()?,
+    );
+    path.join("dlPrincipled.oso").exists().then_some(path)
+}
+
+/// **A shader 3Delight ships, rendered by MoonRay.**
+///
+/// The strongest test of the OSL path there is, and the reason is that
+/// there is no source: `dlPrincipled.oso` is a compiled artefact of
+/// another renderer's shader library, built by a different version of
+/// `oslc`, using closures OSL does not declare. Nothing here was
+/// written with MoonRay in mind and nothing about it can be adjusted to
+/// make it pass.
+///
+/// Three parameters, three different paths through the closure walk,
+/// each asserted against arithmetic rather than against "something
+/// happened":
+///
+/// - `i_color` alone is diffuse, and comes back as the colour scaled by
+///   the light.
+/// - `metallic` with a low roughness is `microfacet`, and comes back as
+///   a white highlight from the white environment.
+/// - `incandescence` is `emission`, and *adds* to the diffuse -- so the
+///   expected value is the sum of the two, not either.
+///
+/// It found two real bugs. The `subsurface` registration declared five
+/// formal parameters where OSL declares four, which shifted every
+/// keyword argument by one and segfaulted inside OSL's code generator;
+/// and `layer_closures`, `outputvariable` and `outputconstant` -- which
+/// every 3Delight shader builds its `Ci` out of -- were not registered
+/// at all.
+#[cfg(osl)]
+#[test]
+fn a_3delight_shader_renders() {
+    use nsi_moonray::session::Session;
+
+    let Some(shaders) = three_delight_shaders() else {
+        eprintln!(
+            "skipped: set $NSI_MOONRAY_3DELIGHT_OSL to 3Delight's `osl` \
+             directory to run this"
+        );
+        return;
+    };
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (64usize, 48usize);
+    let brightest = |parameters: Vec<OwnedArgument>| {
+        let mut nsi = scene(width as i32, height as i32);
+        nsi.create("attr", "attributes").unwrap();
+        nsi.create("principled", "shader").unwrap();
+
+        let mut arguments = vec![arg(
+            "shaderfilename",
+            Type::String,
+            OwnedData::String(vec![
+                shaders
+                    .join("dlPrincipled.oso")
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_bytes(),
+            ]),
+        )];
+        arguments.extend(parameters);
+        nsi.set_attribute("principled", arguments).unwrap();
+
+        nsi.connect("attr", None, "quad", "geometryattributes")
+            .unwrap();
+        nsi.connect("principled", None, "attr", "surfaceshader")
+            .unwrap();
+
+        let mut session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+        let channel = |offset: usize| {
+            pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[offset])
+                .fold(0.0f32, f32::max)
+        };
+        [channel(0), channel(1), channel(2)]
+    };
+
+    let colour =
+        |values: Vec<f32>| arg("i_color", Type::Color, OwnedData::F32(values));
+
+    // Diffuse. `i_color` is 0.1, 0.8, 0.2 -- green dominant, red
+    // lowest, and nothing like the grey a default surface would give.
+    let diffuse = brightest(vec![colour(vec![0.1, 0.8, 0.2])]);
+    assert!(
+        diffuse[1] > diffuse[0] * 5.0 && diffuse[1] > diffuse[2] * 3.0,
+        "`i_color` should have shaded the surface: {diffuse:?}"
+    );
+
+    // Metal, and a *gold* one -- red dominant, where the diffuse was
+    // green dominant, so a walk that ignored the parameters could not
+    // satisfy both.
+    //
+    // What this guards is the conductor path. 3Delight passes a
+    // conductor's complex index of refraction as the `realeta` and
+    // `complexeta` keywords on `microfacet` rather than by tinting the
+    // closure weight, so a renderer that drops them renders every metal
+    // *white*: this came back 1.005 in all three channels before those
+    // keywords were registered, which is a mirror, not gold.
+    let metal = brightest(vec![
+        colour(vec![0.95, 0.75, 0.35]),
+        arg("metallic", Type::F32, OwnedData::F32(vec![1.0])),
+        arg("roughness", Type::F32, OwnedData::F32(vec![0.15])),
+    ]);
+    assert!(
+        metal[0] > metal[1] && metal[1] > metal[2] * 1.8,
+        "a gold conductor should keep its tint -- red over green over \
+         blue. Three equal channels mean `realeta` and `complexeta` were \
+         dropped and the metal is a mirror: {metal:?}"
+    );
+
+    // Emission, which *adds* to the diffuse rather than replacing it.
+    // 0.9 * 3 on top of the diffuse red, and 0.1 * 3 on top of the
+    // diffuse blue -- so the expected values are arithmetic, not a
+    // direction.
+    let emissive = brightest(vec![
+        colour(vec![0.1, 0.8, 0.2]),
+        arg(
+            "incandescence",
+            Type::Color,
+            OwnedData::F32(vec![0.9, 0.2, 0.1]),
+        ),
+        arg(
+            "incandescence_intensity",
+            Type::F32,
+            OwnedData::F32(vec![3.0]),
+        ),
+    ]);
+    let added = [0.9 * 3.0, 0.2 * 3.0, 0.1 * 3.0];
+    for channel in 0..3 {
+        let expected = added[channel] + diffuse[channel];
+        assert!(
+            (emissive[channel] - expected).abs() < 0.05,
+            "`incandescence` should add to what the surface already \
+             shades: channel {channel} of {emissive:?} should be about \
+             {expected}, which is {} on top of the diffuse {}",
+            added[channel],
+            diffuse[channel]
+        );
+    }
+}
+
+/// **A lobe label reaches a named AOV, end to end.**
+///
+/// The longest chain in this backend, and every link is one that fails
+/// silently:
+///
+/// `diffuse(N, "label", "diffuse")` in an OSL shader → the `"label"`
+/// keyword parameter, which the *renderer* registers rather than OSL →
+/// `label_index` against the vocabulary `attributes.cc` declares as the
+/// scene class's `labels` → MoonRay reading that array back at render
+/// prep and matching it against the AOV schema → an output layer whose
+/// light-path expression names the label → a channel in the file.
+///
+/// The shader emits two labelled lobes and the AOVs ask for one each,
+/// so a chain that labelled nothing gives two black channels and one
+/// that labelled everything the same gives two identical ones. The
+/// assertion is that the diffuse channel is green and the specular one
+/// is not.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn a_lobe_label_reaches_a_named_aov() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-label");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let image = directory.join("labels.exr");
+    let _ = std::fs::remove_file(&image);
+
+    let source = directory.join("labelled.osl");
+    std::fs::write(
+        &source,
+        "surface labelled()\n\
+         {\n\
+         \x20   Ci = color(0.05, 0.8, 0.1) * diffuse(N, \"label\", \"diffuse\")\n\
+         \x20      + color(0.8, 0.05, 0.05)\n\
+         \x20        * microfacet(\"ggx\", N, vector(0), 0.2, 0.2, 1.5, 0,\n\
+         \x20                     \"label\", \"specular\");\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("labelled.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64i32, 48i32);
+    let mut nsi = scene(width, height);
+    nsi.set_attribute(
+        "driver",
+        vec![OwnedArgument::new(
+            "imagefilename",
+            Type::String,
+            1,
+            0,
+            OwnedData::String(vec![
+                image.to_string_lossy().as_bytes().to_vec(),
+            ]),
+        )],
+    )
+    .unwrap();
+
+    nsi.create("attr", "attributes").unwrap();
+    nsi.create("labelled", "shader").unwrap();
+    nsi.set_attribute(
+        "labelled",
+        vec![arg(
+            "shaderfilename",
+            Type::String,
+            OwnedData::String(vec![
+                directory
+                    .join("labelled.oso")
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_bytes(),
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.connect("attr", None, "quad", "geometryattributes")
+        .unwrap();
+    nsi.connect("labelled", None, "attr", "surfaceshader")
+        .unwrap();
+
+    // One layer a lobe. `reflection` is 3Delight's name for the
+    // specular one, so this also exercises the vocabulary reconciliation
+    // rather than only the pass-through name.
+    for (handle, variable) in [("diff", "diffuse"), ("spec", "reflection")] {
+        nsi.create(handle, "outputlayer").unwrap();
+        nsi.set_attribute(
+            handle,
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"shader".to_vec()]),
+                ),
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![variable.as_bytes().to_vec()]),
+                ),
+                arg(
+                    "layername",
+                    Type::String,
+                    OwnedData::String(vec![handle.as_bytes().to_vec()]),
+                ),
+            ],
+        )
+        .unwrap();
+        nsi.connect(handle, None, "screen", "outputlayers").unwrap();
+        nsi.connect("driver", None, handle, "outputdrivers")
+            .unwrap();
+    }
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    drop(session);
+
+    assert!(image.exists(), "no image at {}", image.display());
+
+    use exr::prelude::{ReadChannels, ReadLayers};
+    let read = exr::prelude::read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .all_channels()
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(&image)
+        .expect("the written image reads back");
+
+    let layer = &read.layer_data;
+    let names: Vec<String> = layer
+        .channel_data
+        .list
+        .iter()
+        .map(|channel| channel.name.to_string())
+        .collect();
+
+    let brightest = |channel: &str| {
+        let found = layer
+            .channel_data
+            .list
+            .iter()
+            .find(|c| c.name.to_string() == channel)
+            .unwrap_or_else(|| panic!("no {channel} channel; found {names:?}"));
+        (0..layer.size.width() * layer.size.height())
+            .map(|i| found.sample_data.value_by_flat_index(i).to_f32())
+            .fold(0.0f32, f32::max)
+    };
+
+    // Green in the diffuse layer, red in the specular one -- which is
+    // how the shader coloured them, and the only way to tell "the
+    // labels were carried" from "both layers got the beauty".
+    let (diffuse_green, diffuse_red) =
+        (brightest("diff.G"), brightest("diff.R"));
+    let (specular_red, specular_green) =
+        (brightest("spec.R"), brightest("spec.G"));
+
+    assert!(
+        diffuse_green > 0.05,
+        "the diffuse layer is black, so the label never reached the AOV: \
+         channels are {names:?}"
+    );
+    assert!(
+        diffuse_green > diffuse_red * 5.0,
+        "the diffuse layer should be the green lobe alone: {diffuse_red} \
+         red against {diffuse_green} green"
+    );
+    assert!(
+        specular_red > specular_green * 3.0,
+        "the specular layer should be the red lobe alone: {specular_red} \
+         red against {specular_green} green"
+    );
+}
+
+/// Where an OpenVDB file to render lives, if this machine has one.
+///
+/// `$NSI_MOONRAY_VDB` points at a `.vdb` with a `density` grid. Like
+/// 3Delight's shaders, it is an asset rather than something everyone
+/// building this crate has, so the test that needs it says why it did
+/// nothing rather than failing.
+fn vdb_file() -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(std::env::var("NSI_MOONRAY_VDB").ok()?);
+    path.exists().then_some(path)
+}
+
+/// **A `volume` node renders.**
+///
+/// The interface's volume node is OpenVDB and nothing else, and
+/// MoonRay's only volume geometry reads exactly that, so this is one of
+/// the closer mappings here — and it has one trap. A volume is shaded
+/// through the `Layer`'s *volume shader* column, not its material
+/// column, and a row with the wrong one renders **nothing**: no
+/// warning, no geometry, just the background.
+///
+/// So what is asserted is coverage. The camera is placed to look at the
+/// grid's own bounds, which the test reads off nothing — it takes them
+/// on faith from `$NSI_MOONRAY_VDB` being the asset it names — so it
+/// asks only that a good fraction of the frame stopped being background.
+#[test]
+fn a_volume_renders() {
+    use nsi_moonray::session::Session;
+
+    let Some(vdb) = vdb_file() else {
+        eprintln!(
+            "skipped: set $NSI_MOONRAY_VDB to an OpenVDB file with a \
+             `density` grid to run this"
+        );
+        return;
+    };
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (96usize, 72usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    // The quad the fixture builds would sit in front of the volume, so
+    // it goes.
+    nsi.disconnect("quad", None, ".root", "objects").unwrap();
+
+    nsi.create("smoke", "volume").unwrap();
+    nsi.set_attribute(
+        "smoke",
+        vec![
+            arg(
+                "vdbfilename",
+                Type::String,
+                OwnedData::String(vec![
+                    vdb.to_string_lossy().into_owned().into_bytes(),
+                ]),
+            ),
+            arg(
+                "densitygrid",
+                Type::String,
+                OwnedData::String(vec![b"density".to_vec()]),
+            ),
+        ],
+    )
+    .unwrap();
+    nsi.connect("smoke", None, ".root", "objects").unwrap();
+
+    // The grid is hundreds of units across in its own space, so the
+    // camera goes back far enough to see it whole.
+    nsi.set_attribute(
+        "cam",
+        vec![arg("fov", Type::F32, OwnedData::F32(vec![60.0]))],
+    )
+    .unwrap();
+    nsi.create("xform", "transform").unwrap();
+    nsi.set_attribute(
+        "xform",
+        vec![arg(
+            "transformationmatrix",
+            Type::MatrixF64,
+            OwnedData::F64(vec![
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                0.0, 0.0, 330.0, 1.0,
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.disconnect("cam", None, ".root", "objects").unwrap();
+    nsi.connect("xform", None, ".root", "objects").unwrap();
+    nsi.connect("cam", None, "xform", "objects").unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+    let covered = pixels
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] > 0.01)
+        .count();
+
+    assert!(
+        covered > pixels.len() / 4 / 20,
+        "the volume covered {covered} pixels of {}. Nothing at all means \
+         the layer row was given a material instead of a volume shader, \
+         which MoonRay renders as no geometry rather than as an error",
+        pixels.len() / 4
+    );
 }

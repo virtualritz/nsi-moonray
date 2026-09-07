@@ -432,14 +432,244 @@ The general lesson is the one this repository keeps relearning: a test
 that cannot fail is worse than no test, and the only way to know is to
 break the thing it tests and watch.
 
+### O10: Three ways a group spec is wrong, and three different silences
+
+`oslquery-petite` -- a pure-Rust `.oso` parser, no C++ -- lets the
+emitted spec be checked against what the shader really declares,
+before OSL sees it. Whether that is worth a dependency depends on what
+OSL does with a bad spec, so it was measured with `tools/osl-probe`
+rather than assumed. It does three different things:
+
+| Spec says | OSL 1.13 does |
+| --- | --- |
+| a parameter the shader lacks | `WARNING: attempting to set nonexistent parameter: rooughness`, and shades on |
+| a value for an **output** | accepts it, ignores it, **says nothing at all** |
+| a connection from a non-output | `ERROR: ConnectShaders ...` then `ERROR: ShaderGroupBegin: error parsing group description` -- **the group does not exist** |
+
+The first draft of this check claimed the first case was fatal. It is
+not; the *third* is. Getting that backwards would have put a wrong
+justification in the code, which is worse than no comment.
+
+Each case argues for the check differently:
+
+- The **warning** names the parameter and not the ɴsɪ node that asked
+  for it, and it goes to OSL's error handler -- which this backend
+  does not own and a host may have redirected. Checked here it becomes
+  a limitation naming the handle.
+- The **output** case is the one that earns the dependency. Nothing
+  reports it anywhere: the value is accepted, discarded, and the
+  shader renders its default. A scene author sees a parameter that
+  does nothing.
+- The **connection** case is fatal and takes the whole surface with
+  it. Dropping one connection loses an input; keeping it loses the
+  shader.
+
+`Cargo.toml` carries the dependency non-optionally, because
+`Shading::Osl` is a choice rather than a `cfg` -- a scene flushed on a
+machine with no OSL may be rendered on one that has it, and the check
+costs no C++ toolchain either way.
+
+### O11: Displacement is a usage, not a second shading system
+
+ɴsɪ's `displacementshader` binding and MoonRay's `Displacement` root
+shader meet with less machinery than expected. OSL has **no
+displacement closure**: a displacement shader assigns to `P`, and the
+usage it was compiled into a group with -- `"displacement"` rather than
+`"surface"` -- is what permits that. So `OslDisplacement` is `Osl` with
+one string changed, and what MoonRay is handed back is `P` after minus
+`P` before.
+
+Two things were measured before writing any of it:
+
+- MoonRay displaces a plain `RdlMeshGeometry` at `mesh_resolution` 1.
+  Displacement was expected to need tessellation; it does not for a
+  uniform push, and the resolution only controls how finely a *varying*
+  displacement is sampled. Coverage went 0.592 → 0.800 with
+  `NormalDisplacement` at height 0.5, and `OslDisplacement` running
+  `P = P + 0.5 * normalize(N)` gives 0.800074 -- the same number.
+- **rdl2 names are unique across classes.** `Osl("/x")` beside
+  `OslDisplacement("/x")` is a hard error at scene load, not a
+  shadowing. So a shader node becomes exactly one object and its
+  binding decides the class.
+
+And one thing was found only by running it: the shim's
+`nmr_layer_assign` called `Layer::assign`'s four-argument overload,
+which has no displacement column. Every in-process render would have
+dropped the binding and rendered the undisplaced shape, silently.
+
+### O12: OSL knows what it needs, and MoonRay needs to be told
+
+Two of MoonRay's interfaces are pay-per-shader, and OSL's optimizer
+answers both without a guess.
+
+**Presence.** `transparent()` has no MoonRay lobe -- MoonRay expresses
+straight-through transmission as *presence*, one scalar on
+`mPresenceFunc`, evaluated before shading. Answering it means running
+the whole network a second time, which no shader should pay for
+without a `transparent()` in it. `closures_needed` is what the
+optimizer found the group may emit, and `unknown_closures_needed` is
+its own admission that it could not tell -- in which case the material
+pays rather than rendering opaque a surface a shader asked to see
+through. Measured on `amount * transparent() + (1 - amount) *
+diffuse(N)`: alpha 0.592, 0.296, 0.059 at 0, 0.5, 0.9.
+
+**Primitive attributes.** MoonRay attaches one to an intersection only
+if a shader asked for it, through `Shader::mOptionalAttributes`. OSL
+reports `attributes_needed`, `attribute_scopes` and `attribute_types`
+for every `getattribute()` in the group, so `update()` asks, resolves
+each name to a MoonRay `AttributeKey` once -- the lookup takes a lock
+and `getattribute()` is the inner loop -- and requests exactly those.
+
+Both attributes are only populated after optimization, so `update()`
+calls `optimize_group` rather than waiting for the first shading point.
+
+### O13: `uv_list` is honoured, and a test for it has to scale
+
+An ɴsɪ mesh's `st` becomes MoonRay's `uv_list`, per face-vertex, and
+reaches an OSL shader as `u` and `v`. Halving the UVs halves what the
+shader reads.
+
+**Without any `uv_list` MoonRay parametrises the face itself**, which
+for a quad is also 0..1. So a test asserting that `u` varies across the
+quad passes with `st` carried nowhere at all -- which is what the first
+draft of that test did. It scales instead.
+
+### O14: A shipped 3Delight shader is the test that finds things
+
+ɴsɪ is 3Delight's interface, so `dlPrincipled.oso` -- a compiled
+artefact of another renderer's shader library, built by a different
+`oslc`, with no source here -- is the strongest test of this path
+there is. Nothing about it can be adjusted to make it pass.
+
+It found three bugs in a row, each hidden behind the last:
+
+1. **A segfault inside OSL's own code generator**, before a pixel. The
+   `subsurface` registration declared five formal parameters where
+   `stdosl.h` declares four -- there is no `N` among them; 3Delight
+   passes the normal as the keyword `"N"`. `llvm_gen_keyword_fill`
+   computes where the keywords start from `nformal`, so the extra
+   formal shifted every one by a slot, and OSL called `strcmp` on a
+   *value* symbol it had taken for a key.
+
+2. **Black**, because every shader 3Delight ships builds its `Ci` out
+   of closures from its own `3delightosl.h`: `layer_closures`,
+   `outputvariable`, `outputconstant`, `occlusion`. A renderer that
+   does not register them gets an unsupported-closure error per call
+   and a `Ci` with nothing in it.
+
+3. **A white metal.** 3Delight passes a conductor's complex index of
+   refraction as the `realeta` and `complexeta` keywords on
+   `microfacet` rather than by tinting the closure weight -- its
+   documentation says the pair "replaces the eta parameter". Dropped,
+   a gold rendered `1.005, 1.005, 1.005`; carried, and routed to
+   MoonRay's conductor constructor, `0.955, 0.754, 0.352`. The
+   integrator's occasional NaN went with it: the artist-friendly
+   constructor was being handed a weight that was never a reflectivity.
+
+`gamma`, `thinfilmthickness`, `thinfilmeta` and `mediumeta` are not
+carried. OSL warns for each by name and shades on.
+
+### O15: OSL's `+` is a sum; MoonRay's default is a layering
+
+`Ci = a + b` says the two closures add. `BsdfBuilder` layers by the
+order lobes arrive, and `BSDFBUILDER_PHYSICAL` -- which its own header
+recommends for "a typical energy-conserving material" -- makes the
+first attenuate the second.
+
+So every shader written as `diffuse() + microfacet()` lost whichever
+term came second, silently, and *which* one depended on the order the
+shader author happened to write. Measured on a two-lobe shader with an
+AOV per lobe: one channel was black, and swapping the two terms in the
+shader swapped which.
+
+An `add` node walks its children `BSDFBUILDER_ADDITIVE` now, and the
+attenuation flags are turned on only by the closures that mean
+layering: MaterialX's `layer(top, base)` and 3Delight's
+`layer_closures(top, bottom, mask)`. They compose, so a layer inside a
+layer still layers. The two shader orderings now agree to within noise.
+
+### O16: A lobe label reaches an AOV, and the material must stay unlabelled
+
+The AOV question is closed, and the chain is measured end to end: an
+OSL `"label"` keyword -> `label_index` against the vocabulary
+`attributes.cc` declares as the scene class's `labels` -> MoonRay
+reading that array at render prep -> a light-path expression naming it
+-> a channel in the file. Checked by making `aov_label` return zero and
+watching the channel go black.
+
+Three things had to line up, each measured:
+
+- **The right kind of AOV.** MoonRay's *material* AOVs name a lobe's
+  properties -- `'diffuse'.albedo` is the albedo, not the
+  contribution. What an output layer with `variablesource "shader"`
+  asks for is the radiance, which is a *light* AOV: `C<..'diffuse'>L`.
+- **The material must carry no rdl2 `label`.** `RenderContext.cc`
+  registers a lobe label as `<material label>.<lobe>` when the material
+  has one and as the bare lobe name when it does not. Bare is what lets
+  one output layer name a lobe across every shader in the scene, which
+  is what a shader AOV means.
+- **`<..'x'>` wildcards both the event and the scattering type**, so
+  one expression covers a lobe however it was hit.
+
+3Delight's shaders label nothing directly -- they wrap each part of the
+surface in `outputvariable("reflection", ...)` -- so the wrapper sets
+the label for the closures inside it, and `reflection` becomes
+`specular`, `incandescence` becomes `emission`. That table lives twice,
+in `dso/osl/Osl.cc` and `src/flush.rs`, in two languages; they are one
+contract and a disagreement renders the AOV black rather than failing.
+
+### O17: `lockgeom` stays on, which is 3Delight's own position
+
+3Delight dropped `lockgeom` outright. Its argument: symbolic linking of
+geometry data to shader parameters by name is ill-defined -- what
+happens when two parameters in a network share a name? -- and an
+explicit connection to a node that calls `getattribute()` says the same
+thing unambiguously. Any parameter with no incoming connection is
+folded.
+
+That is exactly the shape here, arrived at separately: `lockgeom 1` on
+the shading system, so OSL may bake parameters that the group spec
+supplies, and `RendererServices::get_attribute` answering
+`getattribute()` from MoonRay's primitive attributes. The drawback
+3Delight names -- no default when the primitive variable is absent --
+does not apply, because `get_attribute` returning false leaves the
+shader's own default in place.
+
 ## Open questions
 
-- **Displacement.** ɴsɪ has `displacementshader`; MoonRay has a
-  `Displacement` root shader with the same shape as `Material`. The
-  same DSO trick should apply, with `displacement()` closures.
-- **Volumes.** OSL volume closures against MoonRay's `VolumeShader`.
-  Later.
-- **AOVs and LPEs.** MoonRay's lobe labels are how light-path
-  expressions work, and OSL closures carry their own AOV names. These
-  are two naming systems for the same thing and they have to be
-  reconciled or one of them silently wins.
+- **An OSL volume shader.** The geometry crosses now -- the interface's
+  `volume` node is OpenVDB and nothing else, and `VdbGeometry` reads
+  exactly that -- but it is rendered with MoonRay's stock `VdbVolume`
+  rather than the OSL network bound through `volumeshader`. OSL's
+  `anisotropic_vdf` and `medium_vdf` against MoonRay's `VolumeShader`,
+  whose interface is four separate virtuals -- extinction, albedo,
+  emission, anisotropy -- against OSL's one execution, is the piece
+  that is missing.
+
+  Two things measured on the way: a volume is shaded through the
+  `Layer`'s **sixth** column and a row with a material in the third
+  renders *nothing*, with no warning; and MoonRay's `emission_grid`
+  must name an **RGB** grid -- a scalar one is refused at render prep
+  and takes the whole volume with it, which matters because the
+  interface's `emissiongrid` says nothing about the type.
+- **`vdbparticles`.** MoonRay has no point-cloud geometry that reads an
+  OpenVDB `PointDataGrid`.
+- **An orthographic camera renders through `moonray` and not through
+  the in-process path.** The flush emits the right class and the right
+  attributes -- asserted in `flush::tests`, and the emitted `.rdla`
+  hands to `moonray` and renders, in both execution modes. The same
+  document applied to a live `SceneContext` and rendered
+  progressively comes back empty, with no error from `apply` and no
+  complaint from render prep. Batch against progressive is the
+  difference that has not been ruled out.
+- **AOV forwarding.** 3Delight has a per-object attribute that puts a
+  diffuse surface seen in a mirror into the *diffuse* AOV rather than
+  the reflection one. MoonRay's LPEs have no equivalent, and inventing
+  one would mean rewriting the expression per object.
+- **3Delight's hair closure.** `hair(dPdv, eta, absorption,
+  sub-components)` with `hair_component("R" | "TT" | "TRT" | "TRRT",
+  ...)` inside it -- a Marschner model broken into lobes. MoonRay has
+  hair BSDFs of its own; whether the two decompose the same way is the
+  question.
+- **Scoped `getattribute`.** Answered for the unscoped form only. OSL's
+  scoped form names a renderer concept ɴsɪ has no vocabulary for.

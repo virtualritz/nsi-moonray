@@ -502,6 +502,8 @@ impl Update<'_> {
         part: &str,
         material: Option<Object<'_>>,
         light_set: Option<Object<'_>>,
+        displacement: Option<Object<'_>>,
+        volume_shader: Option<Object<'_>>,
     ) -> Result<(), Error> {
         let part = CString::new(part).map_err(|_| Error::BadArgument)?;
         // SAFETY: every object belongs to the same live context, and
@@ -513,6 +515,8 @@ impl Update<'_> {
                 part.as_ptr(),
                 material.map_or(std::ptr::null_mut(), |o| o.raw),
                 light_set.map_or(std::ptr::null_mut(), |o| o.raw),
+                displacement.map_or(std::ptr::null_mut(), |o| o.raw),
+                volume_shader.map_or(std::ptr::null_mut(), |o| o.raw),
             )
         })
     }

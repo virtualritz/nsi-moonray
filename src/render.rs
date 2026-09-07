@@ -74,6 +74,28 @@ impl Render {
             command.arg("-threads").arg(threads.to_string());
         }
 
+        // **The `Osl` material ships with this crate, not with
+        // MoonRay**, so its directory has to be on the DSO path or a
+        // scene naming the class loads nothing at all -- and an
+        // `.rdla` written by `mnry cat` names it. `Render::new` does
+        // the same for the linked path; this is the spawned one.
+        #[cfg(osl)]
+        {
+            let ours = env!("NSI_MOONRAY_OSL_DSO");
+            let path = match &self.dso_path {
+                Some(theirs) => {
+                    format!("{}:{ours}", theirs.to_string_lossy())
+                }
+                None => ours.to_owned(),
+            };
+            command.arg("-dso_path").arg(path);
+
+            // And scalar, for the same reason `Render::new` forces it:
+            // a material with no vectorized shade function renders
+            // black in the default execution mode, silently.
+            command.arg("-exec_mode").arg("scalar");
+        }
+        #[cfg(not(osl))]
         if let Some(dso_path) = &self.dso_path {
             command.arg("-dso_path").arg(dso_path);
         }
@@ -175,12 +197,70 @@ impl std::error::Error for Error {}
 mod tests {
     use super::*;
 
-    fn arguments(render: &Render) -> Vec<String> {
+    fn all_arguments(render: &Render) -> Vec<String> {
         render
             .command(Path::new("/opt/moonray/bin/moonray"))
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// The arguments a build without OSL would produce.
+    ///
+    /// With `cfg(osl)` the command gains `-dso_path` and
+    /// `-exec_mode scalar`, which every one of these tests would
+    /// otherwise have to repeat -- and then say nothing about, since
+    /// they are about the scene, the image and the thread count.
+    /// `the_osl_material_reaches_the_spawned_renderer` is where those
+    /// two are asserted.
+    fn arguments(render: &Render) -> Vec<String> {
+        let all = all_arguments(render);
+        if !cfg!(osl) {
+            return all;
+        }
+
+        // Drop the two flag pairs an OSL build adds. `-dso_path` only
+        // when the caller did not ask for one itself, since then it is
+        // theirs and belongs in the comparison.
+        let mut kept = Vec::new();
+        let mut skip = false;
+        for argument in all {
+            if skip {
+                skip = false;
+                continue;
+            }
+            if argument == "-exec_mode"
+                || (argument == "-dso_path" && render.dso_path.is_none())
+            {
+                skip = true;
+                continue;
+            }
+            kept.push(argument);
+        }
+        kept
+    }
+
+    /// **The `Osl` material ships with this crate, not with MoonRay.**
+    /// An `.rdla` naming the class loads nothing without its
+    /// directory on the DSO path, and renders black without scalar
+    /// execution -- so the spawned renderer is told both, rather than
+    /// the caller having to know.
+    #[cfg(osl)]
+    #[test]
+    fn the_osl_material_reaches_the_spawned_renderer() {
+        let arguments = all_arguments(&Render::new("/tmp/scene.rdla"));
+
+        let dso = arguments
+            .iter()
+            .position(|argument| argument == "-dso_path")
+            .expect("the DSO path is passed");
+        assert!(arguments[dso + 1].contains("rdl2dso"), "{arguments:?}");
+
+        let mode = arguments
+            .iter()
+            .position(|argument| argument == "-exec_mode")
+            .expect("the execution mode is set");
+        assert_eq!(arguments[mode + 1], "scalar", "{arguments:?}");
     }
 
     #[test]
