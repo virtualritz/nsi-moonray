@@ -269,15 +269,24 @@ System::register_closures()
             CLOSURE_FLOAT_PARAM(MicrofacetParams, yalpha),
             CLOSURE_FLOAT_PARAM(MicrofacetParams, eta),
             CLOSURE_INT_PARAM(MicrofacetParams, refract),
+            // 3Delight's conductor spelling. Registered as keywords
+            // because that is how its shaders pass them, and because a
+            // shader that does not is unaffected -- OSL zeroes the
+            // block, and zero is "not a conductor".
+            CLOSURE_COLOR_KEYPARAM(MicrofacetParams, realeta, "realeta"),
+            CLOSURE_COLOR_KEYPARAM(MicrofacetParams, complexeta,
+                                   "complexeta"),
             CLOSURE_STRING_KEYPARAM(MicrofacetParams, label, "label"),
             CLOSURE_FINISH_PARAM(MicrofacetParams) } },
 
+        // Four formals. See `SubsurfaceParams`: a fifth cost a
+        // segfault inside OSL's own code generator.
         { "subsurface", CLOSURE_SUBSURFACE,
-          { CLOSURE_VECTOR_PARAM(SubsurfaceParams, N),
-            CLOSURE_FLOAT_PARAM(SubsurfaceParams, eta),
+          { CLOSURE_FLOAT_PARAM(SubsurfaceParams, eta),
             CLOSURE_FLOAT_PARAM(SubsurfaceParams, g),
             CLOSURE_COLOR_PARAM(SubsurfaceParams, mfp),
             CLOSURE_COLOR_PARAM(SubsurfaceParams, albedo),
+            CLOSURE_VECTOR_KEYPARAM(SubsurfaceParams, N, "N"),
             CLOSURE_STRING_KEYPARAM(SubsurfaceParams, label, "label"),
             CLOSURE_FINISH_PARAM(SubsurfaceParams) } },
 
@@ -384,6 +393,30 @@ System::register_closures()
           { CLOSURE_CLOSURE_PARAM(MxLayerParams, top),
             CLOSURE_CLOSURE_PARAM(MxLayerParams, base),
             CLOSURE_FINISH_PARAM(MxLayerParams) } },
+
+        // 3Delight's extensions. Declared in its `3delightosl.h`
+        // rather than in OSL, and unavoidable: every shader 3Delight
+        // ships builds its `Ci` out of `layer_closures` and wraps each
+        // part in an `outputvariable`, so a renderer that does not know
+        // them renders those shaders black.
+        { "layer_closures", CLOSURE_DL_LAYER,
+          { CLOSURE_CLOSURE_PARAM(DlLayerParams, top),
+            CLOSURE_CLOSURE_PARAM(DlLayerParams, bottom),
+            CLOSURE_COLOR_PARAM(DlLayerParams, top_mask),
+            CLOSURE_FINISH_PARAM(DlLayerParams) } },
+
+        { "outputvariable", CLOSURE_DL_OUTPUT_VARIABLE,
+          { CLOSURE_STRING_PARAM(DlOutputVariableParams, name),
+            CLOSURE_CLOSURE_PARAM(DlOutputVariableParams, value),
+            CLOSURE_FINISH_PARAM(DlOutputVariableParams) } },
+
+        { "outputconstant", CLOSURE_DL_OUTPUT_CONSTANT,
+          { CLOSURE_STRING_PARAM(DlOutputConstantParams, name),
+            CLOSURE_FINISH_PARAM(DlOutputConstantParams) } },
+
+        { "occlusion", CLOSURE_DL_OCCLUSION,
+          { CLOSURE_VECTOR_PARAM(DlOcclusionParams, N),
+            CLOSURE_FINISH_PARAM(DlOcclusionParams) } },
     };
 
     for (const Builtin& builtin : builtins) {

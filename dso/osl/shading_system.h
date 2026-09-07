@@ -113,6 +113,11 @@ enum ClosureId {
     CLOSURE_MX_SHEEN,
     CLOSURE_MX_UNIFORM_EDF,
     CLOSURE_MX_LAYER,
+    // 3Delight's extensions, which every shader it ships uses.
+    CLOSURE_DL_LAYER,
+    CLOSURE_DL_OUTPUT_VARIABLE,
+    CLOSURE_DL_OUTPUT_CONSTANT,
+    CLOSURE_DL_OCCLUSION,
     CLOSURE_COUNT,
 };
 
@@ -148,6 +153,19 @@ struct RefractionParams {
     OSL::ustring label;
 };
 
+/// `microfacet(string distribution, normal N, vector U, float xalpha,
+/// float yalpha, float eta, int refract)`, plus 3Delight's keywords.
+///
+/// The seven formals are OSL's; `stdosl.h`'s five-argument overload is
+/// a wrapper that calls this one, so only this shape reaches a
+/// renderer.
+///
+/// **`realeta` and `complexeta` are how 3Delight spells a conductor.**
+/// Its documentation: "the pair (realeta, complexeta) replaces the eta
+/// parameter", real and imaginary parts of the base layer's index of
+/// refraction -- which is exactly what MoonRay's conductor constructor
+/// takes. Without them a 3Delight metal reaches the walk as a plain
+/// coloured specular and renders as the wrong metal.
 struct MicrofacetParams {
     OSL::ustring dist;
     OSL::Vec3 N;
@@ -156,16 +174,60 @@ struct MicrofacetParams {
     float yalpha;
     float eta;
     int refract;
+    OSL::Color3 realeta;
+    OSL::Color3 complexeta;
     OSL::ustring label;
 };
 
+/// `subsurface(float eta, float g, color mfp, color albedo)`.
+///
+/// **Four formals, not five.** There is no `N` among them -- OSL's own
+/// `stdosl.h` says so, and 3Delight passes the normal as the keyword
+/// `"N"`. A fifth formal here shifted every keyword argument by one, so
+/// OSL read a *value* where it expected a key and called `strcmp` on
+/// whatever that symbol held. It segfaulted inside `optimize_group`,
+/// before a single pixel, on the first real-world shader that used the
+/// closure.
 struct SubsurfaceParams {
-    OSL::Vec3 N;
     float eta;
     float g;
     OSL::Color3 mfp;
     OSL::Color3 albedo;
+    /// The keyword `"N"`, zero when the shader did not pass one -- OSL
+    /// zeroes the parameter block for a closure with no prepare
+    /// function, so zero is "unset" and the shading normal stands in.
+    OSL::Vec3 N;
     OSL::ustring label;
+};
+
+/// 3Delight's `layer_closures(closure top, closure bottom, color
+/// top_mask)`.
+///
+/// Not part of OSL: `3delightosl.h` declares it, and every shader
+/// 3Delight ships builds its result with it. Two closures rather than
+/// parameters, like MaterialX's `layer`.
+struct DlLayerParams {
+    OSL::ClosureColor* top;
+    OSL::ClosureColor* bottom;
+    OSL::Color3 top_mask;
+};
+
+/// 3Delight's `outputvariable(string name, closure color value)`.
+///
+/// An AOV wrapper: the closure inside is what shades, and the name is
+/// what an ɴsɪ output layer with `variablesource "shader"` asks for.
+struct DlOutputVariableParams {
+    OSL::ustring name;
+    OSL::ClosureColor* value;
+};
+
+/// 3Delight's `outputconstant(string name)` and `occlusion(normal N)`.
+struct DlOutputConstantParams {
+    OSL::ustring name;
+};
+
+struct DlOcclusionParams {
+    OSL::Vec3 N;
 };
 
 /// MaterialX's diffuse closures: `oren_nayar_diffuse_bsdf` and

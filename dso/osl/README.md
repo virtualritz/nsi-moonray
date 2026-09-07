@@ -124,6 +124,31 @@ Measured, at `amount` 0, 0.5 and 0.9 of `transparent()`:
 alpha 0.592 → 0.296 → 0.059
 ```
 
+## 3Delight's extensions
+
+ɴsɪ is 3Delight's interface, so the shaders 3Delight ships are the
+obvious thing to render — and they use closures OSL does not declare,
+from its own `3delightosl.h`. Registered here because without them
+`Ci` never gets built:
+
+| 3Delight closure | What it is |
+| --- | --- |
+| `layer_closures(top, bottom, top_mask)` | Layering, with the energy conservation left to the renderer — which is exactly what `BsdfBuilder` does with lobes added in order |
+| `outputvariable(name, value)` | An AOV wrapper; the closure inside is what shades |
+| `outputconstant(name)` | A named constant for an AOV; shades nothing |
+| `occlusion(N)` | A render-time query, not a scattering function — counted as unmapped |
+
+And two keyword arguments on `microfacet`: **`realeta` and
+`complexeta`**, the real and imaginary parts of a conductor's index of
+refraction. 3Delight's documentation says the pair "replaces the eta
+parameter", and MoonRay's conductor constructor takes exactly it.
+Without them a 3Delight metal reaches the walk as a plain coloured
+specular and renders **white** — measured: `1.005, 1.005, 1.005` for a
+gold that should be `0.955, 0.754, 0.352`.
+
+`gamma`, `thinfilmthickness`, `thinfilmeta` and `mediumeta` are not
+carried. OSL warns for each, by name, and shades on.
+
 ## Displacement
 
 `OslDisplacement` is the same class with a different *usage*.

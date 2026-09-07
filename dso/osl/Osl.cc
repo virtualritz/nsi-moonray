@@ -93,6 +93,10 @@ distribution(const OSL::ustring& name)
 /// What one walk of a closure tree accumulates.
 struct Walk {
     BsdfBuilder& bsdf;
+    /// The shading normal, for a closure that carries no normal of its
+    /// own. `subsurface` is one: OSL declares no `N` formal for it, and
+    /// a shader that passes none means "the surface's".
+    scene_rdl2::math::Vec3f normal;
     scene_rdl2::math::Color emission = scene_rdl2::math::sBlack;
     /// Closure ids seen that have no MoonRay lobe. Reported once per
     /// material rather than per shading point, which would be one line
@@ -116,6 +120,22 @@ add_microfacet(Walk& walk, const MicrofacetParams& params,
             ispc::MICROFACET_GEOMETRIC_SMITH, weight, 0.0f);
         walk.bsdf.addMicrofacetIsotropicBTDF(
             btdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL, label);
+        return;
+    }
+
+    // A complex index of refraction, which is what a conductor *is*:
+    // 3Delight passes it rather than tinting the weight, and MoonRay's
+    // conductor constructor takes exactly this pair. Checked before
+    // the grey/coloured split because a metal with a white base colour
+    // would otherwise take the dielectric path.
+    const scene_rdl2::math::Color complex = to_color(params.complexeta);
+    if (!isBlack(complex)) {
+        const MicrofacetIsotropicBRDF brdf(
+            to_color(params.realeta), complex, normal, roughness,
+            distribution(params.dist), ispc::MICROFACET_GEOMETRIC_SMITH);
+        walk.bsdf.addMicrofacetIsotropicBRDF(
+            brdf, scene_rdl2::math::luminance(weight),
+            ispc::BSDFBUILDER_PHYSICAL, label);
         return;
     }
 
@@ -265,8 +285,14 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
 
     case CLOSURE_SUBSURFACE: {
         const auto* params = component->as<SubsurfaceParams>();
-        add_subsurface(walk, to_vec3(params->N), total,
-                       to_color(params->mfp),
+        // `N` is a keyword here, not a formal, and OSL zeroes the
+        // parameter block when the shader does not pass one.
+        const OSL::Vec3 given = params->N;
+        const scene_rdl2::math::Vec3f normal =
+            (given.x == 0.0f && given.y == 0.0f && given.z == 0.0f)
+                ? walk.normal
+                : to_vec3(given);
+        add_subsurface(walk, normal, total, to_color(params->mfp),
                        label_index(params->label));
         return;
     }
@@ -391,6 +417,40 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
         walk_closure(walk, params->base, weight);
         return;
     }
+
+    case CLOSURE_DL_LAYER: {
+        // 3Delight layers two closures and leaves the energy
+        // conservation to the renderer, which is exactly what
+        // `BsdfBuilder` does with lobes added in order. So the mask
+        // scales the top and the bottom goes in behind it, unscaled --
+        // MoonRay reduces it itself.
+        const auto* params = component->as<DlLayerParams>();
+        walk_closure(walk, params->top, total * to_color(params->top_mask));
+        walk_closure(walk, params->bottom, total);
+        return;
+    }
+
+    case CLOSURE_DL_OUTPUT_VARIABLE: {
+        // An AOV wrapper: the closure inside is what shades. The name
+        // is what an ɴsɪ output layer with `variablesource "shader"`
+        // asks for, and it is *also* the closest thing 3Delight's
+        // shaders have to a lobe label -- so it becomes one where the
+        // vocabulary has a match, and is otherwise just passed through.
+        const auto* params = component->as<DlOutputVariableParams>();
+        walk_closure(walk, params->value, total);
+        return;
+    }
+
+    case CLOSURE_DL_OUTPUT_CONSTANT:
+        // A named constant for an AOV. It shades nothing, so there is
+        // nothing to lose by ignoring it here.
+        return;
+
+    case CLOSURE_DL_OCCLUSION:
+        // An ambient-occlusion probe, which MoonRay has no lobe for --
+        // it is a render-time query, not a scattering function.
+        ++walk.unmapped;
+        return;
 
     case CLOSURE_MX_TRANSPARENT:
     case CLOSURE_TRANSPARENT:
@@ -644,7 +704,7 @@ Osl::shade(const scene_rdl2::rdl2::Material* self,
         return;
     }
 
-    Walk walk { bsdfBuilder };
+    Walk walk { bsdfBuilder, state.getN() };
     walk_closure(walk,
                  execute(me->mGroup, me->mXform.get(), me->mAttributes,
                          state),

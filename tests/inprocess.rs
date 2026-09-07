@@ -2395,3 +2395,165 @@ fn a_depth_output_layer_is_written() {
         layer.size.width() * layer.size.height()
     );
 }
+
+/// Where 3Delight's compiled shaders live, if this machine has them.
+///
+/// `$NSI_MOONRAY_3DELIGHT_OSL` points at 3Delight's `osl` directory --
+/// `.../3delight/Linux-x86_64/osl`. Unlike `$NSI_MOONRAY_DSO` this is
+/// another vendor's product rather than something everyone building
+/// this crate has, so the test that needs it says why it did nothing
+/// rather than failing.
+#[cfg(osl)]
+fn three_delight_shaders() -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(
+        std::env::var("NSI_MOONRAY_3DELIGHT_OSL").ok()?,
+    );
+    path.join("dlPrincipled.oso").exists().then_some(path)
+}
+
+/// **A shader 3Delight ships, rendered by MoonRay.**
+///
+/// The strongest test of the OSL path there is, and the reason is that
+/// there is no source: `dlPrincipled.oso` is a compiled artefact of
+/// another renderer's shader library, built by a different version of
+/// `oslc`, using closures OSL does not declare. Nothing here was
+/// written with MoonRay in mind and nothing about it can be adjusted to
+/// make it pass.
+///
+/// Three parameters, three different paths through the closure walk,
+/// each asserted against arithmetic rather than against "something
+/// happened":
+///
+/// - `i_color` alone is diffuse, and comes back as the colour scaled by
+///   the light.
+/// - `metallic` with a low roughness is `microfacet`, and comes back as
+///   a white highlight from the white environment.
+/// - `incandescence` is `emission`, and *adds* to the diffuse -- so the
+///   expected value is the sum of the two, not either.
+///
+/// It found two real bugs. The `subsurface` registration declared five
+/// formal parameters where OSL declares four, which shifted every
+/// keyword argument by one and segfaulted inside OSL's code generator;
+/// and `layer_closures`, `outputvariable` and `outputconstant` -- which
+/// every 3Delight shader builds its `Ci` out of -- were not registered
+/// at all.
+#[cfg(osl)]
+#[test]
+fn a_3delight_shader_renders() {
+    use nsi_moonray::session::Session;
+
+    let Some(shaders) = three_delight_shaders() else {
+        eprintln!(
+            "skipped: set $NSI_MOONRAY_3DELIGHT_OSL to 3Delight's `osl` \
+             directory to run this"
+        );
+        return;
+    };
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (64usize, 48usize);
+    let brightest = |parameters: Vec<OwnedArgument>| {
+        let mut nsi = scene(width as i32, height as i32);
+        nsi.create("attr", "attributes").unwrap();
+        nsi.create("principled", "shader").unwrap();
+
+        let mut arguments = vec![arg(
+            "shaderfilename",
+            Type::String,
+            OwnedData::String(vec![
+                shaders
+                    .join("dlPrincipled.oso")
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_bytes(),
+            ]),
+        )];
+        arguments.extend(parameters);
+        nsi.set_attribute("principled", arguments).unwrap();
+
+        nsi.connect("attr", None, "quad", "geometryattributes")
+            .unwrap();
+        nsi.connect("principled", None, "attr", "surfaceshader")
+            .unwrap();
+
+        let mut session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+        let channel = |offset: usize| {
+            pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[offset])
+                .fold(0.0f32, f32::max)
+        };
+        [channel(0), channel(1), channel(2)]
+    };
+
+    let colour =
+        |values: Vec<f32>| arg("i_color", Type::Color, OwnedData::F32(values));
+
+    // Diffuse. `i_color` is 0.1, 0.8, 0.2 -- green dominant, red
+    // lowest, and nothing like the grey a default surface would give.
+    let diffuse = brightest(vec![colour(vec![0.1, 0.8, 0.2])]);
+    assert!(
+        diffuse[1] > diffuse[0] * 5.0 && diffuse[1] > diffuse[2] * 3.0,
+        "`i_color` should have shaded the surface: {diffuse:?}"
+    );
+
+    // Metal, and a *gold* one -- red dominant, where the diffuse was
+    // green dominant, so a walk that ignored the parameters could not
+    // satisfy both.
+    //
+    // What this guards is the conductor path. 3Delight passes a
+    // conductor's complex index of refraction as the `realeta` and
+    // `complexeta` keywords on `microfacet` rather than by tinting the
+    // closure weight, so a renderer that drops them renders every metal
+    // *white*: this came back 1.005 in all three channels before those
+    // keywords were registered, which is a mirror, not gold.
+    let metal = brightest(vec![
+        colour(vec![0.95, 0.75, 0.35]),
+        arg("metallic", Type::F32, OwnedData::F32(vec![1.0])),
+        arg("roughness", Type::F32, OwnedData::F32(vec![0.15])),
+    ]);
+    assert!(
+        metal[0] > metal[1] && metal[1] > metal[2] * 1.8,
+        "a gold conductor should keep its tint -- red over green over \
+         blue. Three equal channels mean `realeta` and `complexeta` were \
+         dropped and the metal is a mirror: {metal:?}"
+    );
+
+    // Emission, which *adds* to the diffuse rather than replacing it.
+    // 0.9 * 3 on top of the diffuse red, and 0.1 * 3 on top of the
+    // diffuse blue -- so the expected values are arithmetic, not a
+    // direction.
+    let emissive = brightest(vec![
+        colour(vec![0.1, 0.8, 0.2]),
+        arg(
+            "incandescence",
+            Type::Color,
+            OwnedData::F32(vec![0.9, 0.2, 0.1]),
+        ),
+        arg(
+            "incandescence_intensity",
+            Type::F32,
+            OwnedData::F32(vec![3.0]),
+        ),
+    ]);
+    let added = [0.9 * 3.0, 0.2 * 3.0, 0.1 * 3.0];
+    for channel in 0..3 {
+        let expected = added[channel] + diffuse[channel];
+        assert!(
+            (emissive[channel] - expected).abs() < 0.05,
+            "`incandescence` should add to what the surface already \
+             shades: channel {channel} of {emissive:?} should be about \
+             {expected}, which is {} on top of the diffuse {}",
+            added[channel],
+            diffuse[channel]
+        );
+    }
+}
