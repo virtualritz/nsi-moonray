@@ -186,7 +186,14 @@ typedef struct NmrRender NmrRender;
 
 // A render context. `threads` of 0 means every core, `mode` one of the
 // `NMR_MODE_*` above.
-NmrRender* nmr_render_new(const char* dso_path, unsigned threads, int mode);
+//
+// `scalar` forces MoonRay's scalar execution mode. Not a performance
+// knob: the default is `AUTO`, which picks vectorized, and a `Material`
+// with no vectorized shade function renders **black** rather than
+// failing. An OSL material is exactly that, since OSL shades one point
+// at a time.
+NmrRender* nmr_render_new(const char* dso_path, unsigned threads, int mode,
+                          int scalar);
 void nmr_render_free(NmrRender* render);
 
 // The last thing MoonRay complained about, or null.

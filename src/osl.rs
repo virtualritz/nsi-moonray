@@ -38,7 +38,11 @@ use std::collections::HashSet;
 /// A shader network, ready for `ShaderGroupBegin`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Group {
-    /// The specification text.
+    /// The specification text, on **one line**.
+    ///
+    /// It travels as an rdl2 `String` attribute, which is one Lua
+    /// string, and a raw newline inside one is a syntax error. OSL
+    /// treats all whitespace alike, so a space costs nothing.
     pub spec: String,
     /// The ɴsɪ handles that became layers, in the order they are
     /// declared -- which is dependency order, because OSL binds a
@@ -89,7 +93,7 @@ pub fn group(scene: &Scene, root: &str) -> Group {
                 continue;
             };
             group.spec.push_str(&format!(
-                "connect {}.{from_port} {}.{to_port} ;\n",
+                "connect {}.{from_port} {}.{to_port} ; ",
                 layer_name(edge.from()),
                 layer_name(edge.to())
             ));
@@ -199,7 +203,7 @@ fn parameter(name: &str, type_tag: Type, data: &OwnedData) -> Option<String> {
         return None;
     }
 
-    Some(format!("param {osl_type} {name} {} ;\n", values.join(" ")))
+    Some(format!("param {osl_type} {name} {} ; ", values.join(" ")))
 }
 
 /// A float, printed so OSL's parser reads back what ɴsɪ recorded.
@@ -251,6 +255,21 @@ fn shader_name(scene: &Scene, handle: &str) -> Option<String> {
     let stem = after_slash.strip_suffix(".oso").unwrap_or(after_slash);
 
     (!stem.is_empty()).then(|| stem.to_owned())
+}
+
+/// Whether a shader node names a shader OSL could run.
+///
+/// The one thing that decides whether the network is usable at all: a
+/// `shader` node with no `shaderfilename` has nothing for OSL to load,
+/// and an `Osl` material built from it would shade black. Cheap enough
+/// to ask twice -- once when the material is emitted and once when the
+/// `Layer` row that points at it is built -- which is what keeps the
+/// two from disagreeing about the class.
+pub fn is_runnable(scene: &Scene, handle: &str) -> bool {
+    scene
+        .node(handle)
+        .is_some_and(|node| node.node_type() == "shader")
+        && shader_name(scene, handle).is_some()
 }
 
 /// The directory an ɴsɪ shader's `.oso` lives in, if it named one.

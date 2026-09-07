@@ -123,7 +123,8 @@ rndr::RenderMode mode_of(int mode)
 
 } // namespace
 
-NmrRender* nmr_render_new(const char* dso_path, unsigned threads, int mode)
+NmrRender* nmr_render_new(const char* dso_path, unsigned threads, int mode,
+                          int scalar)
 {
     bool expected = false;
     if (!renderer_live.compare_exchange_strong(expected, true)) {
@@ -146,6 +147,23 @@ NmrRender* nmr_render_new(const char* dso_path, unsigned threads, int mode)
         // Set before `initGlobalDriver`: it reads the mode to decide
         // whether to size the thread-local pools for realtime.
         render->options.setRenderMode(mode_of(mode));
+
+        // **Scalar, when the caller asks.**
+        //
+        // MoonRay's default execution mode is `AUTO`, which picks
+        // vectorized -- and a `Material` with no vectorized shade
+        // function renders **black** rather than failing:
+        // `Material::shadev` null-checks the pointer and does nothing,
+        // and `canRunVectorized` never asks. OSL shades one point at a
+        // time and has no vectorized function to offer, so a scene
+        // carrying an `Osl` material has to run scalar or come out
+        // black with no diagnostic.
+        //
+        // Measured in `tools/scalar-material`; reported upstream as
+        // `upstream/moonray-scalar-material-renders-black.md`.
+        if (scalar) {
+            render->options.setDesiredExecutionMode("scalar");
+        }
 
         ensure_global_driver(render->options);
 

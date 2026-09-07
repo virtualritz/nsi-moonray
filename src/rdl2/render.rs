@@ -113,12 +113,43 @@ impl Render {
         threads: Option<u32>,
         mode: Mode,
     ) -> Option<Self> {
-        let path = dso_path.and_then(|path| CString::new(path).ok());
+        // **The `Osl` material lives with this crate, not with
+        // MoonRay**, so its directory has to be on the DSO path or a
+        // scene naming the class loads nothing. `build.rs` built it
+        // into `$OUT_DIR/rdl2dso` and recorded where; appending it
+        // here is what keeps a caller from having to know.
+        let path = dso_path.map(|path| {
+            #[cfg(osl)]
+            {
+                let ours = env!("NSI_MOONRAY_OSL_DSO");
+                if path.is_empty() {
+                    ours.to_owned()
+                } else {
+                    format!("{path}:{ours}")
+                }
+            }
+            #[cfg(not(osl))]
+            path.to_owned()
+        });
+        let path = path.and_then(|path| CString::new(path).ok());
         let pointer = path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
+
+        // **Scalar when this crate carries OSL.** MoonRay's default
+        // execution mode is `AUTO`, which picks vectorized, and a
+        // `Material` with no vectorized shade function renders black
+        // rather than failing -- which an OSL material is, since OSL
+        // shades one point at a time. Measured in
+        // `tools/scalar-material`; `003` `research.md` O1.
+        let scalar = i32::from(cfg!(osl));
 
         // SAFETY: a valid NUL-terminated string or null.
         let raw = unsafe {
-            ffi::nmr_render_new(pointer, threads.unwrap_or(0), mode.code())
+            ffi::nmr_render_new(
+                pointer,
+                threads.unwrap_or(0),
+                mode.code(),
+                scalar,
+            )
         };
         (!raw.is_null()).then_some(Self { raw })
     }

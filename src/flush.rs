@@ -92,6 +92,13 @@ const LIGHT_SET: &str = "/nsi/lights";
 /// shaded scene from rendering as MoonRay's untextured default.
 const MATERIAL: &str = "UsdPreviewSurface";
 
+/// The material an ɴsɪ shader becomes when OSL is running.
+///
+/// Built by this repository -- `dso/osl/` -- rather than shipped with
+/// MoonRay, so it has to be on MoonRay's DSO path for a scene naming
+/// it to load at all.
+const OSL_MATERIAL: &str = "Osl";
+
 /// Every way MoonRay can see a piece of geometry.
 ///
 /// Read from `scene_rdl2/lib/scene/rdl2/Geometry.cc` rather than
@@ -173,12 +180,48 @@ pub enum Purpose {
     Batch,
 }
 
+/// How an ɴsɪ shader crosses.
+///
+/// ɴsɪ *is* OSL, so the honest answer is [`Shading::Osl`] and the
+/// other one is a stand-in. Which is the default depends on whether
+/// this crate was built with an OSL to build the `Osl` material DSO
+/// against -- `$OSL_ROOT`, the way `$MOONRAY_ROOT` is for the renderer
+/// -- because a scene naming a class the renderer cannot load renders
+/// nothing at all.
+///
+/// It is a *choice* rather than a `cfg` at the point of use, because
+/// the flush is a pure transformation: a scene dumped by `mnry cat` on
+/// a machine with no OSL and rendered on a farm that has one should
+/// say `Osl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shading {
+    /// The ɴsɪ shader network becomes an `Osl` material carrying an OSL
+    /// group specification, and MoonRay runs it. `src/osl.rs`.
+    #[cfg_attr(osl, default)]
+    Osl,
+    /// Every shader becomes a `UsdPreviewSurface` carrying the
+    /// parameters that shader is known to have. What this crate did
+    /// before OSL, and what a build without one still does.
+    #[cfg_attr(not(osl), default)]
+    Substitute,
+}
+
 pub fn flush(scene: &Scene) -> Flushed {
     flush_for(scene, Purpose::default())
 }
 
 /// Flush a recorded scene for a particular [`Purpose`].
 pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
+    flush_with(scene, purpose, Shading::default())
+}
+
+/// Flush a recorded scene, saying both what it is for and how its
+/// shaders should cross.
+pub fn flush_with(
+    scene: &Scene,
+    purpose: Purpose,
+    shading: Shading,
+) -> Flushed {
     let mut flushed = Flushed::default();
 
     // `SceneVariables` is written first, as rdl2's own writer does, but
@@ -299,7 +342,7 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
                 bindings.push((
                     MESH,
                     handle,
-                    material(scene, handle, &mut flushed),
+                    material(scene, handle, shading, &mut flushed),
                 ));
             }
 
@@ -351,7 +394,7 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
                     bindings.push((
                         INSTANCER,
                         handle,
-                        material(scene, handle, &mut flushed),
+                        material(scene, handle, shading, &mut flushed),
                     ));
                     instancers.push(handle);
                 }
@@ -364,9 +407,14 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
 
             "shader" => {
                 // An emitter is carried by the light it makes, not by
-                // a stand-in surface nothing references.
-                if light_class(scene, handle).is_none() {
-                    objects.push(shader(scene, handle, &mut flushed));
+                // a stand-in surface nothing references. With OSL
+                // running the question is answered by *executing* the
+                // shader rather than by recognising its name, so the
+                // check only applies to the substitute.
+                if shading == Shading::Osl
+                    || light_class(scene, handle).is_none()
+                {
+                    objects.push(shader(scene, handle, shading, &mut flushed));
                 }
             }
 
@@ -1396,13 +1444,24 @@ fn creases(mut object: Object, node: &Node) -> Object {
 fn material(
     scene: &Scene,
     handle: &str,
+    shading: Shading,
     flushed: &mut Flushed,
 ) -> Option<Reference> {
+    // A `Layer` row names an object by class *and* name, so the class
+    // has to be the one the shader actually became. Assuming
+    // `UsdPreviewSurface` here while the shader emitted an `Osl`
+    // yields a row that reads perfectly and points at nothing --
+    // which MoonRay renders as no material at all, and skips.
+    let class = |shader: &str| match shading {
+        Shading::Osl if crate::osl::is_runnable(scene, shader) => OSL_MATERIAL,
+        _ => MATERIAL,
+    };
+
     match scene.geometry_binding(handle) {
         Ok(binding) => binding?
             .surface_shader
             .as_deref()
-            .map(|shader| Reference::new(MATERIAL, shader)),
+            .map(|shader| Reference::new(class(shader), shader)),
         Err(error) => {
             flushed.limitations.push(format!(
                 "{handle:?} has no single material binding ({error}); it \
@@ -1530,7 +1589,20 @@ fn parameters(node: &Node) -> &'static [(&'static str, &'static str)] {
 /// MoonRay runs no OSL (`research.md` F6), so the shader itself cannot
 /// cross. What crosses is a `UsdPreviewSurface` carrying the parameters
 /// `PARAMETERS` knows how to name for this shader.
-fn shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
+fn shader(
+    scene: &Scene,
+    handle: &str,
+    shading: Shading,
+    flushed: &mut Flushed,
+) -> Object {
+    // A shader with nothing for OSL to load would shade black, and ɴsɪ
+    // always returns an image -- so it falls back to the substitute
+    // for that one shader rather than losing the surface. Reported
+    // either way.
+    if shading == Shading::Osl && crate::osl::is_runnable(scene, handle) {
+        return osl_shader(scene, handle, flushed);
+    }
+
     let mut object = Object::new(MATERIAL, handle);
     let Some(node) = scene.node(handle) else {
         return object;
@@ -1567,6 +1639,13 @@ fn shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     // `shaderfilename` names the shader rather than parametrising it,
     // and reporting it as a lost parameter would be noise in every
     // message.
+    if shading == Shading::Osl {
+        flushed.limitations.push(format!(
+            "shader {handle:?} names no \"shaderfilename\", so there is \
+             nothing for OSL to run; a {MATERIAL} stands in for it"
+        ));
+    }
+
     let dropped: Vec<&str> = node
         .attributes()
         .map(|(name, _)| name)
@@ -1835,6 +1914,39 @@ fn scalar_of(node: &Node, name: &str) -> Option<f32> {
         OwnedData::I32(values) => values.first().map(|value| *value as f32),
         _ => None,
     }
+}
+
+/// One ɴsɪ shader network, as MoonRay's `Osl` material.
+///
+/// Nothing here decides what the shader *means*: the network crosses
+/// as an OSL group specification and MoonRay runs it. Which is the
+/// point -- with OSL running, "does this shader emit?" is answered by
+/// executing it rather than by recognising a name, and `PARAMETERS`
+/// and `LIGHTS` become fallbacks rather than the mapping.
+fn osl_shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
+    let group = crate::osl::group(scene, handle);
+
+    for line in &group.dropped {
+        flushed
+            .limitations
+            .push(format!("shader {handle:?}: {line} was not carried"));
+    }
+
+    let mut object = Object::new(OSL_MATERIAL, handle)
+        .set("group_name", Value::String(handle.to_owned()))
+        .set("group_spec", Value::String(group.spec));
+
+    // OSL resolves a shader by name against a search path, so a scene
+    // that spelled its shaders absolutely has to have the directory
+    // lifted out of the name -- which `osl::search_path` does, from
+    // the root shader. A network whose layers live in different
+    // directories needs more than one, and the material takes one; the
+    // rest come from `$OSL_SHADER_PATH`.
+    if let Some(path) = crate::osl::search_path(scene, handle) {
+        object = object.set("search_path", Value::String(path));
+    }
+
+    object
 }
 
 /// One `EnvLight`.
@@ -2347,7 +2459,11 @@ mod tests {
             .connect("shader", None, "attr", "surfaceshader")
             .unwrap();
 
-        let flushed = flush(&scene);
+        // Explicitly the substitute: this test is about what
+        // `PARAMETERS` carries, and the default flips with
+        // `$OSL_ROOT` at build time.
+        let flushed =
+            flush_with(&scene, Purpose::default(), Shading::Substitute);
         let rdla = flushed.to_rdla();
 
         // The material is the stand-in surface, and the row points at
@@ -2411,7 +2527,11 @@ mod tests {
             .connect("shader", None, "attr", "surfaceshader")
             .unwrap();
 
-        let flushed = flush(&scene);
+        // Explicitly the substitute: this test is about what
+        // `PARAMETERS` carries, and the default flips with
+        // `$OSL_ROOT` at build time.
+        let flushed =
+            flush_with(&scene, Purpose::default(), Shading::Substitute);
         let rdla = flushed.to_rdla();
 
         assert!(
@@ -2469,7 +2589,11 @@ mod tests {
             .connect("shader", None, "attr", "surfaceshader")
             .unwrap();
 
-        let flushed = flush(&scene);
+        // Explicitly the substitute: this test is about what
+        // `PARAMETERS` carries, and the default flips with
+        // `$OSL_ROOT` at build time.
+        let flushed =
+            flush_with(&scene, Purpose::default(), Shading::Substitute);
         let rdla = flushed.to_rdla();
 
         assert!(rdla.contains("[\"diffuseColor\"] = Rgb(1, 0, 0)"), "{rdla}");
@@ -2700,6 +2824,77 @@ mod tests {
                 "LightSet(\"/nsi/lights\") {\n    EnvLight(\"env\"),"
             ),
             "{detached}"
+        );
+    }
+
+    /// With OSL, an ɴsɪ shader crosses as itself.
+    ///
+    /// Not a substitute carrying the parameters this backend happens
+    /// to recognise: the network becomes an OSL group specification
+    /// and MoonRay runs it, so a parameter no table knows about
+    /// arrives anyway.
+    #[test]
+    fn an_nsi_shader_becomes_an_osl_material() {
+        let mut scene = triangle();
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("shader", "shader").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "shader",
+                vec![
+                    arg(
+                        "shaderfilename",
+                        Type::String,
+                        OwnedData::String(vec![
+                            b"/opt/3delight/osl/dlPrincipled.oso".to_vec(),
+                        ]),
+                    ),
+                    arg(
+                        "i_color",
+                        Type::Color,
+                        OwnedData::F32(vec![0.1, 0.8, 0.2]),
+                    ),
+                    // A parameter `PARAMETERS` has never heard of, which
+                    // the substitute would report as lost.
+                    arg("sss_anisotropy", Type::F32, OwnedData::F32(vec![0.4])),
+                ],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("shader", None, "attr", "surfaceshader")
+            .unwrap();
+
+        let flushed = flush_with(&scene, Purpose::default(), Shading::Osl);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("Osl(\"shader\") {"), "{rdla}");
+        assert!(rdla.contains("shader dlPrincipled shader ;"), "{rdla}");
+        assert!(rdla.contains("param color i_color 0.1 0.8 0.2 ;"), "{rdla}");
+        // The one the table does not know, carried all the same.
+        assert!(rdla.contains("param float sss_anisotropy 0.4 ;"), "{rdla}");
+        // The directory came off the shader's name, because OSL
+        // resolves by name against a search path.
+        assert!(
+            rdla.contains("[\"search_path\"] = \"/opt/3delight/osl\""),
+            "{rdla}"
+        );
+        // And the layer is what the row points at.
+        assert!(
+            rdla.contains("{RdlMeshGeometry(\"tri\"), \"\", Osl(\"shader\")"),
+            "{rdla}"
+        );
+        assert!(
+            !flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("stands in for it")),
+            "nothing stands in when OSL runs: {:?}",
+            flushed.limitations
         );
     }
 

@@ -832,6 +832,116 @@ fn a_light_shader_lights_the_scene() {
     );
 }
 
+/// **`TN.2`.** An ɴsɪ shader renders, as itself.
+///
+/// The whole chain, and nothing in it is a substitute: an ɴsɪ `shader`
+/// node naming a compiled `.oso`, flushed to an OSL group
+/// specification, carried in one rdl2 `String` attribute, parsed by
+/// OSL, executed at every shading point, walked into `BsdfBuilder`
+/// calls, and lit.
+///
+/// The shader's colour is asserted per channel, because that is the
+/// only thing that can tell "OSL ran" from "something plausible
+/// happened": a `UsdPreviewSurface` at its defaults renders a
+/// perfectly good grey quad.
+///
+/// Needs the crate built with `$OSL_ROOT`, which is what puts the
+/// `Osl` material on MoonRay's DSO path.
+#[cfg(osl)]
+#[test]
+fn an_nsi_osl_shader_renders() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    // A shader compiled here rather than shipped: what is being tested
+    // is that an arbitrary OSL shader crosses, so it has to be one
+    // this crate has never seen.
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-render");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("teal.osl");
+    std::fs::write(
+        &source,
+        "surface teal(color tint = color(1, 1, 1))\n\
+         {\n    Ci = tint * diffuse(N);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("teal.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    nsi.create("attr", "attributes").unwrap();
+    nsi.create("teal", "shader").unwrap();
+    nsi.set_attribute(
+        "teal",
+        vec![
+            arg(
+                "shaderfilename",
+                Type::String,
+                OwnedData::String(vec![
+                    directory
+                        .join("teal.oso")
+                        .to_string_lossy()
+                        .into_owned()
+                        .into_bytes(),
+                ]),
+            ),
+            // A parameter no table in this crate has ever heard of.
+            arg("tint", Type::Color, OwnedData::F32(vec![0.05, 0.7, 0.6])),
+        ],
+    )
+    .unwrap();
+    nsi.connect("attr", None, "quad", "geometryattributes")
+        .unwrap();
+    nsi.connect("teal", None, "attr", "surfaceshader").unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+    // The centre of the quad, per channel.
+    let centre = ((height / 2) * width + width / 2) * 4;
+    let (red, green, blue) =
+        (pixels[centre], pixels[centre + 1], pixels[centre + 2]);
+
+    assert!(
+        green > 0.0,
+        "the shader should have shaded something: {red} {green} {blue}"
+    );
+    // `tint` is 0.05, 0.7, 0.6 — green well above blue, and red far
+    // below both. A default surface would be grey and fail all three.
+    assert!(
+        green > red * 5.0,
+        "green should dominate red: {red} {green} {blue}"
+    );
+    assert!(
+        blue > red * 5.0,
+        "blue should dominate red: {red} {green} {blue}"
+    );
+    assert!(
+        green > blue,
+        "green should exceed blue, as `tint` says: {red} {green} {blue}"
+    );
+}
+
 /// **`T6.6`.** An instanced scene renders — two copies of one
 /// prototype, in two places.
 ///
