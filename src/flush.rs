@@ -484,7 +484,12 @@ pub fn flush_with(
 
     for output in scene.render_outputs() {
         for layer in &output.layers {
-            objects.push(render_output(scene, &layer.handle, &layer.drivers));
+            objects.push(render_output(
+                scene,
+                &layer.handle,
+                &layer.drivers,
+                &mut flushed,
+            ));
         }
 
         // `SceneVariables`' own output file defaults to `scene.exr` in
@@ -2478,18 +2483,56 @@ fn focal(fov_degrees: f32, resolution: (i32, i32)) -> f32 {
 }
 
 /// One `RenderOutput` per ɴsɪ output layer.
-fn render_output(scene: &Scene, layer: &str, drivers: &[String]) -> Object {
+fn render_output(
+    scene: &Scene,
+    layer: &str,
+    drivers: &[String],
+    flushed: &mut Flushed,
+) -> Object {
     let mut object = Object::new("RenderOutput", layer);
 
-    if let Some(node) = scene.node(layer)
-        && let Some(OwnedData::String(names)) =
-            node.effective("variablename").map(|arg| &arg.data)
-        && let Some(name) = names.first()
-    {
-        object = object.set(
-            "channel_name",
-            Value::String(String::from_utf8_lossy(name).into_owned()),
-        );
+    let node = scene.node(layer);
+    let text = |name: &str| {
+        node.and_then(|node| node.effective(name))
+            .and_then(|argument| match &argument.data {
+                OwnedData::String(values) => values
+                    .first()
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                _ => None,
+            })
+    };
+
+    let variable = text("variablename");
+    // `layername` "will be name of the layer as written by the output
+    // driver", which is `channel_name`. Without one the variable's own
+    // name is what a driver would call it.
+    if let Some(name) = text("layername").or_else(|| variable.clone()) {
+        object = object.set("channel_name", Value::String(name));
+    }
+
+    // ɴsɪ defaults `variablesource` to `shader`, and `Ci` there is the
+    // beauty -- which is `RenderOutput`'s own default, so the common
+    // layer sets nothing.
+    let source = text("variablesource").unwrap_or_else(|| "shader".into());
+    // ɴsɪ's own default is `color`, and it is what MoonRay has to be
+    // told for a primitive attribute -- rdl2 declares the channel count
+    // statically and will not work it out from the data.
+    let kind = text("layertype").unwrap_or_else(|| "color".into());
+    object =
+        result(object, &source, variable.as_deref(), &kind, layer, flushed);
+
+    // `scalarformat` is ɴsɪ's quantization; MoonRay's `channel_format`
+    // has two of the eight. The integer formats have no counterpart at
+    // all -- rdl2 writes float or half EXR -- so they are reported
+    // rather than silently rounded to one.
+    match text("scalarformat").as_deref() {
+        None | Some("half") => {}
+        Some("float") => {
+            object = object.set("channel_format", Value::String("float".into()))
+        }
+        Some(other) => flushed.limitations.push(format!(
+            "output layer {layer:?} asks for {other:?} scalars, which              MoonRay's `RenderOutput` cannot encode; half float is written"
+        )),
     }
 
     // A layer may fan out to several drivers. rdl2 writes one file per
@@ -2503,6 +2546,117 @@ fn render_output(scene: &Scene, layer: &str, drivers: &[String]) -> Object {
     }
 
     object
+}
+
+/// What an output layer asks for, as MoonRay's `result` and whatever
+/// that result needs beside it.
+///
+/// ɴsɪ says where a variable comes from with `variablesource` and names
+/// it with `variablename`; MoonRay has an enum and a second attribute
+/// per case. The two do not cover each other, and what does not cross
+/// is named rather than defaulted to the beauty -- an AOV that renders
+/// the beauty under another name is worse than a missing one.
+fn result(
+    object: Object,
+    source: &str,
+    variable: Option<&str>,
+    kind: &str,
+    layer: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    let unmapped = |flushed: &mut Flushed, why: &str| {
+        flushed.limitations.push(format!(
+            "output layer {layer:?} asks for {why}, which MoonRay's              `RenderOutput` has no result for; the layer renders the beauty"
+        ));
+    };
+
+    match (source, variable) {
+        // The beauty, however it was spelled.
+        ("shader", None | Some("Ci")) => object,
+
+        ("builtin", Some(name)) => match name {
+            "alpha" => object.set("result", Value::String("alpha".into())),
+            // ɴsɪ's `z` is camera-space depth, which is exactly what
+            // MoonRay's `depth` result is.
+            "z" => object.set("result", Value::String("depth".into())),
+            _ => match state_variable(name) {
+                Some(variable) => object
+                    .set("result", Value::String("state variable".into()))
+                    .set("state_variable", Value::String(variable.into())),
+                None => {
+                    unmapped(flushed, &format!("built-in {name:?}"));
+                    object
+                }
+            },
+        },
+
+        // A primitive variable, straight off the geometry.
+        ("attribute", Some(name)) => {
+            let object = object
+                .set("result", Value::String("primitive attribute".into()))
+                .set("primitive_attribute", Value::String(name.to_owned()));
+            match kind {
+                "scalar" => object.set(
+                    "primitive_attribute_type",
+                    Value::String("FLOAT".into()),
+                ),
+                "vector" => object.set(
+                    "primitive_attribute_type",
+                    Value::String("VEC3F".into()),
+                ),
+                // `color` is ɴsɪ's default and MoonRay's; `quad` has no
+                // counterpart, and a fourth component nobody asked for
+                // is not something to invent.
+                "quad" => {
+                    flushed.limitations.push(format!(
+                        "output layer {layer:?} asks for a `quad` layer \
+                         type; MoonRay's primitive attributes are one, two \
+                         or three components, and the layer is written as \
+                         a colour"
+                    ));
+                    object
+                }
+                _ => object,
+            }
+        }
+
+        ("shader", Some(name)) => {
+            unmapped(
+                flushed,
+                &format!(
+                    "shader output {name:?} -- MoonRay's material AOVs name                      lobe properties, not OSL output closures, so this is                      not a rename"
+                ),
+            );
+            object
+        }
+
+        _ => {
+            unmapped(
+                flushed,
+                &format!("variable source {source:?} with no variable name"),
+            );
+            object
+        }
+    }
+}
+
+/// One ɴsɪ built-in variable, as MoonRay's `state_variable` enum.
+///
+/// ɴsɪ spells a space into the name -- `"P.world"`, `"N.camera"` --
+/// and MoonRay has one entry per quantity in *render* space plus a
+/// world-space position. Only the pairs that mean the same thing are
+/// here: `"N.world"` has no entry, and answering it with `N` would be
+/// a normal in the wrong space, which shades plausibly and wrongly.
+fn state_variable(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "P.world" => "Wp",
+        "P.camera" => "P",
+        "N.camera" => "N",
+        "Ng.camera" => "Ng",
+        "st" => "St",
+        "motionvector" => "motionvec",
+        _ => return None,
+    })
 }
 
 /// The file an ɴsɪ output driver writes to.
@@ -2845,6 +2999,175 @@ mod tests {
 
         assert!(rdla.contains("uv_list"), "{rdla}");
         assert!(!rdla.contains("UserData"), "{rdla}");
+    }
+
+    /// An output layer with an ɴsɪ handle, a variable source and a
+    /// name, connected to the scene's screen.
+    fn output_layer(scene: &mut Scene, handle: &str, args: Vec<OwnedArgument>) {
+        scene
+            .create(handle, "outputlayer")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(handle, args)
+            .expect("a recordable edit");
+        scene
+            .connect(handle, None, "screen", "outputlayers")
+            .unwrap();
+    }
+
+    fn output(rdla: &str, handle: &str) -> String {
+        rdla.split(&format!("RenderOutput(\"{handle}\") {{"))
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// **`variablesource "builtin"` names a MoonRay result.**
+    ///
+    /// ɴsɪ's `z` is camera-space depth, which is what MoonRay's `depth`
+    /// result is; `P.world` is a state variable, and MoonRay spells the
+    /// world-space one `Wp`.
+    #[test]
+    fn a_builtin_output_layer_becomes_a_result() {
+        let mut scene = triangle();
+        output_layer(
+            &mut scene,
+            "z",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"builtin".to_vec()]),
+                ),
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"z".to_vec()]),
+                ),
+            ],
+        );
+        output_layer(
+            &mut scene,
+            "position",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"builtin".to_vec()]),
+                ),
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"P.world".to_vec()]),
+                ),
+            ],
+        );
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(
+            output(&rdla, "z").contains("[\"result\"] = \"depth\""),
+            "{rdla}"
+        );
+        let position = output(&rdla, "position");
+        assert!(
+            position.contains("[\"result\"] = \"state variable\""),
+            "{position}"
+        );
+        assert!(
+            position.contains("[\"state_variable\"] = \"Wp\""),
+            "{position}"
+        );
+    }
+
+    /// `variablesource "attribute"` reads a primitive variable, and
+    /// MoonRay has to be told how many components it has -- rdl2 will
+    /// not work it out from the data.
+    #[test]
+    fn an_attribute_output_layer_names_its_primitive_variable() {
+        let mut scene = triangle();
+        output_layer(
+            &mut scene,
+            "tint",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"attribute".to_vec()]),
+                ),
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"mytint".to_vec()]),
+                ),
+                arg(
+                    "layertype",
+                    Type::String,
+                    OwnedData::String(vec![b"scalar".to_vec()]),
+                ),
+            ],
+        );
+
+        let tint = output(&flush(&scene).to_rdla(), "tint");
+
+        assert!(
+            tint.contains("[\"result\"] = \"primitive attribute\""),
+            "{tint}"
+        );
+        assert!(
+            tint.contains("[\"primitive_attribute\"] = \"mytint\""),
+            "{tint}"
+        );
+        assert!(
+            tint.contains("[\"primitive_attribute_type\"] = \"FLOAT\""),
+            "{tint}"
+        );
+    }
+
+    /// **A layer MoonRay has no result for is named, not defaulted.**
+    ///
+    /// Every unmapped case falls through to the beauty, because that is
+    /// `RenderOutput`'s default and there is nothing else to be. An AOV
+    /// that renders the beauty under another name is worse than a
+    /// missing one, so it is said.
+    #[test]
+    fn an_output_layer_with_no_moonray_result_is_reported() {
+        let mut scene = triangle();
+        output_layer(
+            &mut scene,
+            "normal",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"builtin".to_vec()]),
+                ),
+                // World-space normals. MoonRay's `N` is render space,
+                // and answering with it would be the wrong space.
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"N.world".to_vec()]),
+                ),
+            ],
+        );
+
+        let flushed = flush(&scene);
+
+        assert!(
+            !output(&flushed.to_rdla(), "normal").contains("result"),
+            "{}",
+            flushed.to_rdla()
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("N.world")),
+            "{:?}",
+            flushed.limitations
+        );
     }
 
     fn triangle() -> Scene {

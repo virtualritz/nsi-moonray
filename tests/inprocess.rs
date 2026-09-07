@@ -2280,3 +2280,118 @@ fn an_nsi_primitive_variable_reaches_osl() {
          {blue}"
     );
 }
+
+/// **A depth AOV reaches the written file, as its own channel.**
+///
+/// The flush's job is `result = "depth"` on a second `RenderOutput`;
+/// MoonRay's is the rest. Checked by reading the channel back and
+/// asserting its *values* -- the quad sits five units in front of the
+/// camera, so a depth channel that is there but empty, or that is a
+/// copy of the beauty, fails.
+#[test]
+fn a_depth_output_layer_is_written() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-inprocess");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let image = directory.join("depth.exr");
+    let _ = std::fs::remove_file(&image);
+
+    let (width, height) = (64i32, 48i32);
+    let mut nsi = scene(width, height);
+    nsi.set_attribute(
+        "driver",
+        vec![OwnedArgument::new(
+            "imagefilename",
+            Type::String,
+            1,
+            0,
+            OwnedData::String(vec![
+                image.to_string_lossy().as_bytes().to_vec(),
+            ]),
+        )],
+    )
+    .unwrap();
+
+    nsi.create("depth", "outputlayer").unwrap();
+    nsi.set_attribute(
+        "depth",
+        vec![
+            arg(
+                "variablesource",
+                Type::String,
+                OwnedData::String(vec![b"builtin".to_vec()]),
+            ),
+            arg(
+                "variablename",
+                Type::String,
+                OwnedData::String(vec![b"z".to_vec()]),
+            ),
+            arg(
+                "layername",
+                Type::String,
+                OwnedData::String(vec![b"Z".to_vec()]),
+            ),
+        ],
+    )
+    .unwrap();
+    nsi.connect("depth", None, "screen", "outputlayers")
+        .unwrap();
+    nsi.connect("driver", None, "depth", "outputdrivers")
+        .unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    drop(session);
+
+    assert!(image.exists(), "no image at {}", image.display());
+
+    use exr::prelude::{ReadChannels, ReadLayers};
+    let read = exr::prelude::read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .all_channels()
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(&image)
+        .expect("the written image reads back");
+
+    let layer = &read.layer_data;
+    let depth = layer
+        .channel_data
+        .list
+        .iter()
+        .find(|channel| channel.name.to_string() == "Z")
+        .unwrap_or_else(|| {
+            let names: Vec<String> = layer
+                .channel_data
+                .list
+                .iter()
+                .map(|channel| channel.name.to_string())
+                .collect();
+            panic!("no Z channel; the file has {names:?}")
+        });
+
+    // The quad is at z = -5 in a camera at the origin looking down -z,
+    // so every pixel it covers is about five units away and the rest is
+    // the background. `4.0` and `6.0` bracket the first without
+    // admitting the second.
+    let hits = (0..layer.size.width() * layer.size.height())
+        .map(|i| depth.sample_data.value_by_flat_index(i).to_f32())
+        .filter(|value| (4.0..6.0).contains(value))
+        .count();
+
+    assert!(
+        hits > 400,
+        "the depth channel should read about five over the quad, which \
+         covers most of the frame; {hits} pixels of {} did",
+        layer.size.width() * layer.size.height()
+    );
+}
