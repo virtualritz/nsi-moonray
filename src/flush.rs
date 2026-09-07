@@ -220,6 +220,53 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
     for (handle, node) in scene.nodes() {
         match node.node_type.as_str() {
             "mesh" | "subdivisionmesh" => {
+                // ɴsɪ has no light nodes: a mesh wearing an emitter
+                // *is* the light (`LIGHTS`). Checked before anything
+                // else, because a light is not also a shape.
+                if let Some(shader) = surface_shader(scene, handle)
+                    && let Some(class) = light_class(scene, &shader)
+                {
+                    let mut emitter = light(
+                        scene,
+                        handle,
+                        &shader,
+                        class,
+                        shutter,
+                        &mut flushed,
+                    );
+                    let dark = detached(scene, handle);
+                    if dark {
+                        emitter = switched_off(emitter);
+                    }
+                    lights.push(Reference::new(class, light_handle(handle)));
+
+                    if class == MESH_LIGHT && !dark {
+                        // A `MeshLight` reads its shape from a
+                        // `Geometry` that must **not** be in the main
+                        // `Layer`: `RenderContext::createMeshLightLayer`
+                        // builds a layer of its own for it and warns
+                        // and skips the light otherwise. So the mesh is
+                        // emitted, and left out of both the layer and
+                        // the geometry set.
+                        objects.push(mesh(
+                            scene,
+                            handle,
+                            prototypes.get(handle).map(String::as_str),
+                            shutter,
+                            &mut flushed,
+                        ));
+                        flushed.limitations.push(format!(
+                            "{handle:?} is a {MESH_LIGHT}'s geometry and so \
+                             is not in the render layer, which MoonRay \
+                             refuses; in ɴsɪ an emissive mesh is also \
+                             visible to camera rays and here it is not"
+                        ));
+                    }
+
+                    objects.push(emitter);
+                    continue;
+                }
+
                 let shape = mesh(
                     scene,
                     handle,
@@ -264,7 +311,18 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
             }
 
             "environment" => {
-                objects.push(environment(scene, handle, shutter, &mut flushed));
+                let light = environment(scene, handle, shutter, &mut flushed);
+                // A light disconnected from `.root` lights nothing.
+                // Left in its set and switched off, for the same reason
+                // a detached shape is left in the layer and hidden.
+                if detached(scene, handle) {
+                    if purpose == Purpose::Batch {
+                        continue;
+                    }
+                    objects.push(switched_off(light));
+                } else {
+                    objects.push(light);
+                }
                 lights.push(Reference::new(ENVIRONMENT_LIGHT, handle));
             }
 
@@ -301,7 +359,11 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
             "outputdriver" | "outputlayer" => {}
 
             "shader" => {
-                objects.push(shader(scene, handle, &mut flushed));
+                // An emitter is carried by the light it makes, not by
+                // a stand-in surface nothing references.
+                if light_class(scene, handle).is_none() {
+                    objects.push(shader(scene, handle, &mut flushed));
+                }
             }
 
             other => flushed.limitations.push(format!(
@@ -360,7 +422,8 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
         // the one line that says it is not.
         flushed.limitations.push(
             "no ɴsɪ node became a MoonRay light, so the scene renders \
-             black; only `environment` maps to one so far"
+             black; an `environment` node becomes one, as does geometry \
+             wearing an emitter this backend recognises by name"
                 .to_string(),
         );
         None
@@ -1034,6 +1097,17 @@ fn hidden(object: Object) -> Object {
     })
 }
 
+/// A light that is not in the scene, switched off rather than left out.
+///
+/// `Light.cc` declares `on` on the base class, so this is one attribute
+/// on an object that stays in its `LightSet` -- the same reasoning as
+/// `hidden`: dropping it instead would make an interactive disconnect a
+/// change of *set membership*, which forces a whole-scene re-apply
+/// (`002` `research.md` F3).
+fn switched_off(object: Object) -> Object {
+    object.set("on", Value::Bool(false))
+}
+
 /// Whether a node reaches `.root`, and so is in the scene at all.
 ///
 /// A prototype under an `instances` node is *in* the scene without
@@ -1435,29 +1509,9 @@ const PARAMETERS: [(&str, &[(&str, &str)]); 7] = [
 /// exactly -- which is right as often as the two happen to agree, and
 /// wrong in no case that carrying nothing would have got right.
 fn parameters(node: &Node) -> &'static [(&'static str, &'static str)] {
-    let named = match node.effective("shaderfilename").map(|arg| &arg.data) {
-        Some(OwnedData::String(names)) => names
-            .first()
-            .map(|name| String::from_utf8_lossy(name).into_owned()),
-        _ => None,
-    };
-
-    let stem = named.as_deref().map(|name| {
-        let after_slash = name
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or_default()
-            .to_owned();
-
-        after_slash
-            .strip_suffix(".oso")
-            .unwrap_or(&after_slash)
-            .to_owned()
-    });
-
     let fallback = PARAMETERS[PARAMETERS.len() - 1].1;
 
-    let Some(stem) = stem else {
+    let Some(stem) = shader_stem(node) else {
         return fallback;
     };
 
@@ -1531,6 +1585,232 @@ fn shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
     }
 
     object
+}
+
+/// The ɴsɪ shaders that turn geometry into a light, and what each
+/// becomes in MoonRay.
+///
+/// ɴsɪ has **no light nodes**. Section 4.5 of the specification: "There
+/// are no special light source nodes in ɴsɪ ... Any scene geometry can
+/// become a light source if its surface shader produces an
+/// `emission()` closure." An area light is a mesh wearing an emitter; a
+/// spot light is "an epsilon sized geometry (a small disk, a particle,
+/// etc.)" whose shader shapes the emission into a cone.
+///
+/// So recognising a light means knowing what a shader *does*, and
+/// MoonRay runs no OSL (`research.md` F6). There is no attribute to
+/// read. What is readable is the shader's name, and the emitters in
+/// practical use are a short list: 3Delight ships six, and the
+/// specification's own listings 4.2 and 4.3 are two more of the same
+/// shape. Like `PARAMETERS`, this table was read off the shipped
+/// `.oso` files with `tools/probe/parameters.sh` rather than guessed.
+///
+/// A shader not on this list leaves its geometry as geometry, wearing
+/// a substitute surface. That is the safe direction to be wrong in: a
+/// mesh that should have been a light renders dark and visible, which
+/// looks like what it is, whereas a mesh silently promoted to a light
+/// disappears from the frame.
+const LIGHTS: [(&str, &str); 6] = [
+    // 3Delight's own, all sharing `i_color`, `intensity`, `exposure`.
+    ("areaLight", MESH_LIGHT),
+    ("pointLight", SPHERE_LIGHT),
+    ("spotLight", SPOT_LIGHT),
+    ("distantLight", DISTANT_LIGHT),
+    ("directionalLight", DISTANT_LIGHT),
+    // The specification's own listing 4.2, which every hand-written
+    // ɴsɪ scene uses. Its parameters are `power` and `Cs`.
+    ("emitter", MESH_LIGHT),
+];
+
+/// MoonRay's light DSOs, for the ɴsɪ emitters above.
+const MESH_LIGHT: &str = "MeshLight";
+const SPHERE_LIGHT: &str = "SphereLight";
+const SPOT_LIGHT: &str = "SpotLight";
+const DISTANT_LIGHT: &str = "DistantLight";
+
+/// What MoonRay light, if any, an ɴsɪ shader makes of its geometry.
+fn light_class(scene: &Scene, shader: &str) -> Option<&'static str> {
+    let stem = shader_stem(scene.node(shader)?)?;
+
+    LIGHTS
+        .iter()
+        .find(|(name, _)| *name == stem)
+        .map(|(_, class)| *class)
+}
+
+/// The shader an ɴsɪ node's geometry wears, if it wears one.
+fn surface_shader(scene: &Scene, handle: &str) -> Option<String> {
+    scene
+        .geometry_binding(handle)
+        .ok()
+        .flatten()
+        .and_then(|binding| binding.surface_shader)
+}
+
+/// One ɴsɪ light: geometry whose shader emits.
+///
+/// The name is derived rather than the geometry's own, because a
+/// `MeshLight` and the mesh it points at are two objects and rdl2 names
+/// them apart.
+fn light_handle(handle: &str) -> String {
+    format!("{handle}/light")
+}
+
+/// One ɴsɪ emitter as a MoonRay light.
+///
+/// `Light.cc` declares `color`, `intensity` and `exposure` on the base
+/// class, and every one of 3Delight's light shaders declares
+/// `i_color`, `intensity` and `exposure`. That correspondence is
+/// one-to-one and is the reason this mapping is a table rather than an
+/// interpretation.
+fn light(
+    scene: &Scene,
+    handle: &str,
+    shader: &str,
+    class: &'static str,
+    shutter: Option<[f64; 2]>,
+    flushed: &mut Flushed,
+) -> Object {
+    let mut object = Object::new(class, light_handle(handle));
+
+    // The light stands where the geometry stands.
+    object = with_transform(object, scene, handle, shutter, flushed);
+
+    let Some(node) = scene.node(shader) else {
+        return object;
+    };
+
+    let mut carried = vec!["shaderfilename"];
+
+    // `emitter` (listing 4.2) spells the same two things differently.
+    let (colour, strength) = match shader_stem(node).as_deref() {
+        Some("emitter") => ("Cs", "power"),
+        _ => ("i_color", "intensity"),
+    };
+
+    if let Some(rgb) = colour_of(node, colour) {
+        object = object.set("color", Value::Rgb(rgb));
+        carried.push(colour);
+    }
+    for (from, to) in [(strength, "intensity"), ("exposure", "exposure")] {
+        if let Some(value) = scalar_of(node, from) {
+            object = object.set(to, Value::Float(value));
+            carried.push(from);
+        }
+    }
+
+    match class {
+        MESH_LIGHT => {
+            // The light *is* the mesh, so it points back at it.
+            object = object
+                .set("geometry", Value::Object(Reference::new(MESH, handle)));
+        }
+        SPOT_LIGHT => {
+            let (outer, inner) = cone(node);
+            object = object
+                .set("outer_cone_angle", Value::Float(outer))
+                .set("inner_cone_angle", Value::Float(inner));
+            carried.extend(["coneAngle", "penumbraAngle"]);
+        }
+        _ => {}
+    }
+
+    let dropped: Vec<&str> = node
+        .attrs
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !carried.contains(name))
+        .collect();
+
+    if dropped.is_empty() {
+        flushed.limitations.push(format!(
+            "{handle:?} wears the ɴsɪ emitter {shader:?} and became a \
+             {class}; its emission is MoonRay's rather than the OSL \
+             closure's, so the two renderers agree on where the light is \
+             and not on its photometry"
+        ));
+    } else {
+        flushed.limitations.push(format!(
+            "{handle:?} wears the ɴsɪ emitter {shader:?} and became a \
+             {class}; its emission is MoonRay's rather than the OSL \
+             closure's, and these parameters are not carried: {}",
+            dropped.join(", ")
+        ));
+    }
+
+    object
+}
+
+/// A spot light's two cone angles, in degrees, from ɴsɪ's `coneAngle`
+/// and `penumbraAngle`.
+///
+/// Both of MoonRay's are documented in `SpotLight/attributes.cc` as
+/// "a full angle, measured from one side to the other". ɴsɪ's
+/// `coneAngle` is full as well -- the specification's listing 4.3
+/// halves it before comparing cosines -- and `penumbraAngle` is added
+/// to that *half* angle, so it counts double here:
+///
+/// ```text
+/// coslimit = cos(coneAngle / 2)                 the hard edge
+/// cospen   = cos(coneAngle / 2 + penumbraAngle) the soft one
+/// smoothstep(min, max, ...)                     either way round
+/// ```
+///
+/// A negative penumbra puts the soft edge inside the cone, which is
+/// why the two are split by sign rather than by name.
+fn cone(node: &Node) -> (f32, f32) {
+    let angle = scalar_of(node, "coneAngle").unwrap_or(40.0);
+    let penumbra = scalar_of(node, "penumbraAngle").unwrap_or(0.0);
+
+    let outer = (angle + 2.0 * penumbra.max(0.0)).clamp(0.0, 180.0);
+    let inner = (angle + 2.0 * penumbra.min(0.0)).clamp(0.0, outer);
+
+    (outer, inner)
+}
+
+/// A shader's identity: the stem of `shaderfilename`.
+///
+/// `dlPrincipled`, `/opt/3delight/osl/dlPrincipled` and
+/// `dlPrincipled.oso` are the same shader.
+fn shader_stem(node: &Node) -> Option<String> {
+    let Some(OwnedData::String(names)) =
+        node.effective("shaderfilename").map(|arg| &arg.data)
+    else {
+        return None;
+    };
+
+    let name = String::from_utf8_lossy(names.first()?).into_owned();
+    let after_slash = name.rsplit(['/', '\\']).next().unwrap_or_default();
+
+    Some(
+        after_slash
+            .strip_suffix(".oso")
+            .unwrap_or(after_slash)
+            .to_owned(),
+    )
+}
+
+/// One colour parameter, whatever width it was recorded at.
+fn colour_of(node: &Node, name: &str) -> Option<[f32; 3]> {
+    match &node.effective(name)?.data {
+        OwnedData::F32(values) if values.len() >= 3 => {
+            Some([values[0], values[1], values[2]])
+        }
+        OwnedData::F64(values) if values.len() >= 3 => {
+            Some([values[0] as f32, values[1] as f32, values[2] as f32])
+        }
+        _ => None,
+    }
+}
+
+/// One scalar parameter, whatever precision it was recorded at.
+fn scalar_of(node: &Node, name: &str) -> Option<f32> {
+    match &node.effective(name)?.data {
+        OwnedData::F32(values) => values.first().copied(),
+        OwnedData::F64(values) => values.first().map(|value| *value as f32),
+        OwnedData::I32(values) => values.first().map(|value| *value as f32),
+        _ => None,
+    }
 }
 
 /// One `EnvLight`.
@@ -1708,6 +1988,35 @@ mod tests {
 
     fn arg(name: &str, type_tag: Type, data: OwnedData) -> OwnedArg {
         OwnedArg::new(name, type_tag, 1, 0, data)
+    }
+
+    /// The triangle, wearing a named shader.
+    fn emissive(shader: &str, parameters: &[OwnedArg]) -> Scene {
+        let mut scene = triangle();
+
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("emit", "shader").expect("a recordable edit");
+
+        let mut attributes = vec![arg(
+            "shaderfilename",
+            Type::String,
+            OwnedData::String(vec![shader.as_bytes().to_vec()]),
+        )];
+        attributes.extend(parameters.iter().cloned());
+        scene
+            .set_attribute("emit", attributes)
+            .expect("a recordable edit");
+
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("emit", None, "attr", "surfaceshader")
+            .unwrap();
+
+        scene
     }
 
     /// A triangle, a camera, a screen and an output -- the smallest
@@ -2178,6 +2487,194 @@ mod tests {
         );
     }
 
+    /// Geometry wearing an emitter is a light, and stops being a
+    /// shape.
+    ///
+    /// ɴsɪ has no light nodes at all (specification 4.5), so this is
+    /// the only way an area light can arrive. The mesh is still
+    /// emitted, because a `MeshLight` points at it, but it is out of
+    /// the `Layer` -- `RenderContext::createMeshLightLayer` warns and
+    /// skips a light whose geometry is in the main layer.
+    #[test]
+    fn a_mesh_wearing_an_emitter_becomes_a_mesh_light() {
+        let scene = emissive("areaLight", &[]);
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("MeshLight(\"tri/light\") {"), "{rdla}");
+        assert!(
+            rdla.contains("[\"geometry\"] = RdlMeshGeometry(\"tri\")"),
+            "{rdla}"
+        );
+        assert!(
+            rdla.contains(
+                "LightSet(\"/nsi/lights\") {\n    MeshLight(\"tri/light\"),"
+            ),
+            "{rdla}"
+        );
+
+        // The mesh exists, and is in neither the layer nor the
+        // geometry set.
+        assert!(rdla.contains("RdlMeshGeometry(\"tri\") {"), "{rdla}");
+        assert!(!rdla.contains("{RdlMeshGeometry(\"tri\"), \"\","), "{rdla}");
+        assert!(
+            !rdla.contains("GeometrySet(\"/nsi/geometries\") {\n    RdlMeshGeometry(\"tri\")"),
+            "{rdla}"
+        );
+
+        // And the difference from ɴsɪ is said out loud.
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("visible to camera rays")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// The three parameters every 3Delight light shader declares are
+    /// the three MoonRay's `Light` base class declares.
+    #[test]
+    fn a_lights_colour_and_intensity_cross() {
+        let scene = emissive(
+            "pointLight",
+            &[
+                arg(
+                    "i_color",
+                    Type::Color,
+                    OwnedData::F32(vec![1.0, 0.5, 0.0]),
+                ),
+                arg("intensity", Type::F32, OwnedData::F32(vec![7.0])),
+                arg("exposure", Type::F32, OwnedData::F32(vec![2.0])),
+            ],
+        );
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("SphereLight(\"tri/light\") {"), "{rdla}");
+        assert!(rdla.contains("[\"color\"] = Rgb(1, 0.5, 0)"), "{rdla}");
+        assert!(rdla.contains("[\"intensity\"] = 7"), "{rdla}");
+        assert!(rdla.contains("[\"exposure\"] = 2"), "{rdla}");
+    }
+
+    /// A spot's cone angles, derived from the specification's own
+    /// listing 4.3 rather than assumed.
+    ///
+    /// Both sides are full angles, and ɴsɪ's `penumbraAngle` is added
+    /// to the *half* angle, so it counts double.
+    #[test]
+    fn a_spots_penumbra_widens_the_outer_cone_twice_over() {
+        let scene = emissive(
+            "spotLight",
+            &[
+                arg("coneAngle", Type::F32, OwnedData::F32(vec![40.0])),
+                arg("penumbraAngle", Type::F32, OwnedData::F32(vec![5.0])),
+            ],
+        );
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("SpotLight(\"tri/light\") {"), "{rdla}");
+        assert!(rdla.contains("[\"outer_cone_angle\"] = 50"), "{rdla}");
+        assert!(rdla.contains("[\"inner_cone_angle\"] = 40"), "{rdla}");
+    }
+
+    /// A negative penumbra softens inward, so the outer cone is the
+    /// one that stays put.
+    #[test]
+    fn a_negative_penumbra_narrows_the_inner_cone() {
+        let scene = emissive(
+            "spotLight",
+            &[
+                arg("coneAngle", Type::F32, OwnedData::F32(vec![60.0])),
+                arg("penumbraAngle", Type::F32, OwnedData::F32(vec![-10.0])),
+            ],
+        );
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("[\"outer_cone_angle\"] = 60"), "{rdla}");
+        assert!(rdla.contains("[\"inner_cone_angle\"] = 40"), "{rdla}");
+    }
+
+    /// The specification's own emitter spells the same two things
+    /// `Cs` and `power`.
+    #[test]
+    fn the_specifications_emitter_is_recognised_too() {
+        let scene = emissive(
+            "emitter",
+            &[
+                arg("Cs", Type::Color, OwnedData::F32(vec![0.0, 1.0, 0.0])),
+                arg("power", Type::F32, OwnedData::F32(vec![100.0])),
+            ],
+        );
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("MeshLight(\"tri/light\") {"), "{rdla}");
+        assert!(rdla.contains("[\"color\"] = Rgb(0, 1, 0)"), "{rdla}");
+        assert!(rdla.contains("[\"intensity\"] = 100"), "{rdla}");
+    }
+
+    /// A shader the table does not know leaves its geometry a shape.
+    ///
+    /// The safe direction to be wrong in: a mesh that should have been
+    /// a light renders dark and visible, which looks like what it is.
+    /// A mesh silently promoted to a light disappears.
+    #[test]
+    fn an_unknown_shader_leaves_its_geometry_a_shape() {
+        let scene = emissive("houseEmitter", &[]);
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(!rdla.contains("MeshLight"), "{rdla}");
+        assert!(rdla.contains("{RdlMeshGeometry(\"tri\"), \"\","), "{rdla}");
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("renders black")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// A light disconnected from `.root` lights nothing.
+    ///
+    /// Switched off rather than left out, so that reconnecting it is an
+    /// attribute edit rather than a change of set membership -- which
+    /// would force a whole-scene re-apply.
+    #[test]
+    fn a_detached_light_is_switched_off() {
+        let mut scene = triangle();
+        scene
+            .create("env", "environment")
+            .expect("a recordable edit");
+        scene.connect("env", None, ".root", "objects").unwrap();
+
+        let connected = flush(&scene).to_rdla();
+        assert!(connected.contains("EnvLight(\"env\") {\n}"), "{connected}");
+
+        scene.disconnect("env", None, ".root", "objects").unwrap();
+        let detached = flush(&scene).to_rdla();
+
+        assert!(
+            detached.contains("EnvLight(\"env\") {\n    [\"on\"] = false,"),
+            "{detached}"
+        );
+        // Still in the set: membership is what a narrow update cannot
+        // change.
+        assert!(
+            detached.contains(
+                "LightSet(\"/nsi/lights\") {\n    EnvLight(\"env\"),"
+            ),
+            "{detached}"
+        );
+    }
+
     /// A moving transform becomes rdl2's two-sample `blur(a, b)`.
     ///
     /// This is the capability that distinguishes this backend from the
@@ -2262,6 +2759,7 @@ mod tests {
         scene
             .create("env", "environment")
             .expect("a recordable edit");
+        scene.connect("env", None, ".root", "objects").unwrap();
 
         let flushed = flush(&scene);
         let rdla = flushed.to_rdla();

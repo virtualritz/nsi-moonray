@@ -114,9 +114,15 @@ fn viewing(scene: &mut Scene, width: i32, height: i32) {
         .connect("screen", None, "cam", "screens")
         .expect("known attribute");
 
+    // Connected, not merely created: a node that does not reach
+    // `.root` is not in the scene, and the flush now switches such a
+    // light off rather than letting it light anyway.
     scene
         .create("env", "environment")
         .expect("a recordable edit");
+    scene
+        .connect("env", None, ".root", "objects")
+        .expect("known attribute");
 }
 
 /// Render a scene and read the image back as RGB rows.

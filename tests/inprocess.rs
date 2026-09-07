@@ -720,6 +720,118 @@ fn the_frame_matches_3delights_framing() {
     close(right, 299, "the right of the quad");
 }
 
+/// **`T1.7a`.** An ɴsɪ light lights the scene.
+///
+/// ɴsɪ has no light nodes: geometry wearing an emitter *is* the light
+/// (specification 4.5), and `LIGHTS` recognises the emitter by name.
+/// The mapping is asserted as text in `flush::tests`; this is the part
+/// text cannot reach -- a light that never reaches MoonRay's light set
+/// emits a perfectly correct scene and renders black.
+///
+/// A `pointLight` rather than an `areaLight` because the two differ
+/// only in which row of `LIGHTS` matches, and MoonRay's `MeshLight`
+/// pulls in a `DwaBaseMaterial` that ships with `moonshine_dwa` rather
+/// than with `moonray` (`research.md` F12), which this build does not
+/// have.
+///
+/// The scene's own environment is disconnected, so the only thing that
+/// can light the quad is the lamp beside it.
+#[test]
+fn a_light_shader_lights_the_scene() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    nsi.disconnect("light", None, ".root", "objects").unwrap();
+
+    // An ɴsɪ point light: "an epsilon sized geometry (a small disk, a
+    // particle, etc.)" wearing a shader that emits, placed by a
+    // transform. To the right of the quad and in front of it.
+    nsi.create("lampxf", "transform").unwrap();
+    nsi.set_attribute(
+        "lampxf",
+        vec![arg(
+            "transformationmatrix",
+            Type::MatrixF64,
+            OwnedData::F64(vec![
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                3.0, 0.0, -4.0, 1.0,
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.connect("lampxf", None, ".root", "objects").unwrap();
+
+    nsi.create("lamp", "mesh").unwrap();
+    nsi.set_attribute(
+        "lamp",
+        vec![
+            arg("nvertices", Type::I32, OwnedData::I32(vec![3])),
+            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2])),
+            arg(
+                "P",
+                Type::Point,
+                OwnedData::F32(vec![
+                    0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01, 0.0,
+                ]),
+            ),
+        ],
+    )
+    .unwrap();
+    nsi.connect("lamp", None, "lampxf", "objects").unwrap();
+
+    nsi.create("lampattr", "attributes").unwrap();
+    nsi.create("emit", "shader").unwrap();
+    nsi.set_attribute(
+        "emit",
+        vec![
+            arg(
+                "shaderfilename",
+                Type::String,
+                OwnedData::String(vec![b"pointLight".to_vec()]),
+            ),
+            arg("intensity", Type::F32, OwnedData::F32(vec![40.0])),
+        ],
+    )
+    .unwrap();
+    nsi.connect("lampattr", None, "lamp", "geometryattributes")
+        .unwrap();
+    nsi.connect("emit", None, "lampattr", "surfaceshader")
+        .unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let pixels = session.render().snapshot().expect("a frame").2;
+
+    // Columns inside the quad: at z = -5 with a 45-degree vertical
+    // field of view it covers roughly the middle third of the frame,
+    // so the quarter columns other tests use fall outside it.
+    let right = column(&pixels, width, height, width * 5 / 8);
+    let left = column(&pixels, width, height, width * 3 / 8);
+
+    assert!(
+        right > 0.0,
+        "the ɴsɪ light should light the quad: left {left}, right {right}"
+    );
+    // The lamp is to the right, so that side is the brighter one. An
+    // evenly lit frame would mean something else lit it.
+    assert!(
+        right > left * 1.1,
+        "the side facing the lamp should be brighter: left {left}, \
+         right {right}"
+    );
+}
+
 /// **`T6.6`.** An instanced scene renders — two copies of one
 /// prototype, in two places.
 ///

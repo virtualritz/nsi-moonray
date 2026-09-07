@@ -209,11 +209,35 @@ Rust on both sides, so **no ndspy marshalling is involved**.
       points at -- a row with no light set is lit by nothing. A scene
       with no light at all is reported, because a correct scene
       rendering black otherwise looks like a bug here.
-- [ ] T1.7a Area lights. In ɴsɪ they are geometry wearing an emissive
-      shader, and spotting one means reading a shader MoonRay cannot
-      run. MoonRay has `RectLight`, `DiskLight`, `SphereLight`,
-      `DistantLight`, `SpotLight` and `CylinderLight` waiting; what is
-      missing is a rule for recognising them that is not a guess.
+- [x] T1.7a Lights. ɴsɪ has **no light nodes at all**: section 4.5 of
+      the specification says any geometry whose surface shader produces
+      an `emission()` closure is a light. So recognising one means
+      knowing what a shader does, and MoonRay runs no OSL -- there is
+      no attribute to read. What *is* readable is the shader's name,
+      and the emitters in practical use are the same short list
+      `PARAMETERS` is built from. `LIGHTS` in `flush.rs` is that rule:
+      `areaLight` and the specification's own `emitter` become a
+      `MeshLight`, `pointLight` a `SphereLight`, `spotLight` a
+      `SpotLight`, `distantLight` and `directionalLight` a
+      `DistantLight`. `i_color`, `intensity` and `exposure` -- which
+      every 3Delight light shader declares -- are the three
+      `scene_rdl2`'s `Light` base class declares, so that part is a
+      correspondence rather than an interpretation; the spot's cone
+      angles are derived from the specification's listing 4.3, where
+      `penumbraAngle` is added to the *half* angle and so counts twice.
+
+      A shader not on the list leaves its geometry a shape, which is
+      the safe direction: a mesh that should have been a light renders
+      dark and visible, whereas one silently promoted to a light
+      disappears from the frame.
+
+      `research.md` F11 and F12;
+      `flush::tests::a_mesh_wearing_an_emitter_becomes_a_mesh_light`
+      and four siblings; `inprocess::a_light_shader_lights_the_scene`
+      renders one. A `MeshLight` cannot be rendered on this build --
+      MoonRay creates a `DwaBaseMaterial` for it, which ships with
+      `moonshine_dwa` rather than `moonray` (F12) -- so the render test
+      uses a `pointLight`, which differs only in which row matches.
 - [x] T1.6 ɴsɪ's `fov` is **vertical** -- measured against 3Delight,
       not inferred. The specification says only "the field of view
       angle, in degrees", and reading it as horizontal renders a

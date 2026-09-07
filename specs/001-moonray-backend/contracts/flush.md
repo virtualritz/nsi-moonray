@@ -36,13 +36,8 @@ Depends on `nsi-intermediate` having resolved graph semantics already.
 
 | An ɴsɪ `environment` lights the scene | **Partial** | `flush.rs` -- `EnvLight` in a `LightSet` that every `Layer` row references; `Light.cc` declares `color`, `intensity` and `texture`, all left at defaults | `flush::tests::an_environment_lights_the_scene` | A render. And the environment's texture, which lives in an OSL shader MoonRay cannot run. |
 | A scene with no light says so | **Covered** | `flush.rs` -- a scene whose `Layer` rows have no light set renders black | `flush::tests::a_triangle_becomes_a_mesh_a_camera_and_an_output` asserts the limitation is reported | -- |
-
-**Area lights are not mapped.** ɴsɪ has no light nodes at all: section
-4.5 of the specification says any geometry whose surface shader
-produces an `emission()` closure is a light. So recognising one means
-knowing what a shader does, and MoonRay runs no OSL. What is readable
-is the shader's *name*, and the shaders in practical use are the same
-short list `PARAMETERS` is built from. `T1.7a`.
+| **Geometry wearing an emitter is a light** | **Covered** | ɴsɪ has no light nodes: specification 4.5 makes any geometry whose surface shader produces an `emission()` closure a light, so the rule is the shader's *name* — `LIGHTS` in `flush.rs`, read off the same shipped `.oso` files as `PARAMETERS` (`research.md` F11). `Light.cc`'s `color`/`intensity`/`exposure` are the three every 3Delight light shader declares | `flush::tests::a_mesh_wearing_an_emitter_becomes_a_mesh_light`, `a_lights_colour_and_intensity_cross`, both cone-angle cases, `the_specifications_emitter_is_recognised_too`, `an_unknown_shader_leaves_its_geometry_a_shape`; `inprocess::a_light_shader_lights_the_scene` renders one | A `MeshLight` cannot render on a `moonray`-only build: MoonRay creates a `DwaBaseMaterial` for its geometry and that ships with `moonshine_dwa` (`research.md` F12). The emission itself is MoonRay's, not the OSL closure's. |
+| **A light out of the scene lights nothing** | **Covered** | `flush.rs` — a light that does not reach `.root` is emitted with `on` false rather than left out, so reconnecting it stays an attribute edit rather than a change of set membership | `flush::tests::a_detached_light_is_switched_off` | -- |
 
 ## Invariants
 

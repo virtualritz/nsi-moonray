@@ -61,3 +61,8 @@ is geometry and framing rather than shading.
 - **Shader parameters belong to the shader**, and the shaders in
   practical use are a table -- `flush.rs`'s `PARAMETERS`, read off
   these files rather than guessed.
+- **A light is a shader too.** ɴsɪ has no light nodes; geometry whose
+  shader emits *is* the light. `parameters.sh areaLight pointLight
+  spotLight distantLight` reads the other half of that table --
+  `flush.rs`'s `LIGHTS` -- and shows the three parameters every one of
+  them shares with `scene_rdl2`'s `Light` base class.

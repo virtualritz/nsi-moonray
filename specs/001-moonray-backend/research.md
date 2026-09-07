@@ -487,3 +487,51 @@ emissive parameter set to something other than black, is emissive.
 Anything else is reported rather than guessed at -- a mesh silently
 promoted to a light is worse than a mesh that stays a mesh and says
 so.
+
+### F12: `MeshLight` needs a shader that is not in `moonray`
+
+An ɴsɪ area light is a mesh wearing an emitter, and MoonRay's
+`MeshLight` is the structural equivalent: it takes a `geometry`
+pointing at the mesh and lights from its surface. Two things about it
+were captured rather than assumed, both from
+`rndr/RenderContext.cc:316` (`createMeshLightLayer`).
+
+**The geometry must not be in the render layer.** MoonRay builds a
+`Layer` of its own for a mesh light's geometry, and refuses geometry
+that is already in the main one:
+
+> We cannot load in a geometry that already exists in the main scene
+> layer ... `rdlLight->warn(...)`; `continue;`
+
+So the flush emits the mesh, leaves it out of both the `Layer` and the
+`GeometrySet`, and reports the consequence: in ɴsɪ an emissive mesh is
+*also* visible to camera rays, and here it is not.
+
+**And it hard-codes a shader `moonray` does not ship.** The same
+function does:
+
+```cpp
+mSceneContext->createSceneObject("DwaBaseMaterial",
+        geom->getName() + "_MeshLightMaterial")
+```
+
+`DwaBaseMaterial` lives in `moonshine_dwa`, not in `moonray` or
+`scene_rdl2`. On the build here -- `scene_rdl2` plus `moonray`, 68
+DSOs -- rendering any scene containing a `MeshLight` fails in render
+prep:
+
+```
+Error: Couldn't find DSO for 'DwaBaseMaterial' in search path ...
+```
+
+`startFrame` then returns `CANCELLED` rather than `FINISHED`, which
+this backend reports as a frame that did not start. A full OpenMoonRay
+install has `moonshine_dwa` and does not hit this; a minimal one does,
+and nothing in the scene says why.
+
+That is why `T1.7a`'s render test uses a `pointLight` rather than an
+`areaLight`. The two differ only in which row of `LIGHTS` matches, so
+the recognition rule -- the thing the task was actually blocked on --
+is tested end to end either way; `SphereLight`, `SpotLight` and
+`DistantLight` have no such dependency. The `MeshLight` mapping itself
+is asserted as a document, which is where the two rules above live.
