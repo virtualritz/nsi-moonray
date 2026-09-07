@@ -432,6 +432,43 @@ The general lesson is the one this repository keeps relearning: a test
 that cannot fail is worse than no test, and the only way to know is to
 break the thing it tests and watch.
 
+### O10: Three ways a group spec is wrong, and three different silences
+
+`oslquery-petite` -- a pure-Rust `.oso` parser, no C++ -- lets the
+emitted spec be checked against what the shader really declares,
+before OSL sees it. Whether that is worth a dependency depends on what
+OSL does with a bad spec, so it was measured with `tools/osl-probe`
+rather than assumed. It does three different things:
+
+| Spec says | OSL 1.13 does |
+| --- | --- |
+| a parameter the shader lacks | `WARNING: attempting to set nonexistent parameter: rooughness`, and shades on |
+| a value for an **output** | accepts it, ignores it, **says nothing at all** |
+| a connection from a non-output | `ERROR: ConnectShaders ...` then `ERROR: ShaderGroupBegin: error parsing group description` -- **the group does not exist** |
+
+The first draft of this check claimed the first case was fatal. It is
+not; the *third* is. Getting that backwards would have put a wrong
+justification in the code, which is worse than no comment.
+
+Each case argues for the check differently:
+
+- The **warning** names the parameter and not the ɴsɪ node that asked
+  for it, and it goes to OSL's error handler -- which this backend
+  does not own and a host may have redirected. Checked here it becomes
+  a limitation naming the handle.
+- The **output** case is the one that earns the dependency. Nothing
+  reports it anywhere: the value is accepted, discarded, and the
+  shader renders its default. A scene author sees a parameter that
+  does nothing.
+- The **connection** case is fatal and takes the whole surface with
+  it. Dropping one connection loses an input; keeping it loses the
+  shader.
+
+`Cargo.toml` carries the dependency non-optionally, because
+`Shading::Osl` is a choice rather than a `cfg` -- a scene flushed on a
+machine with no OSL may be rendered on one that has it, and the check
+costs no C++ toolchain either way.
+
 ## Open questions
 
 - **Displacement.** ɴsɪ has `displacementshader`; MoonRay has a

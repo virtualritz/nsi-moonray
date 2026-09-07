@@ -132,6 +132,23 @@ ndspy-sys = "0.2"
 # come from `snapshotDelta` and never reach a file. See
 # `specs/002-interactive-updates`.
 exr = "1"
+# Checks an emitted OSL group specification against the shader it
+# names, *before* OSL sees it.
+#
+# Measured, against OSL 1.13: a parameter the shader lacks draws a
+# warning that names the parameter and not the ɴsɪ node that asked for
+# it; a value set on an **output** draws nothing at all and the shader
+# renders its default; and a connection from a non-output refuses the
+# whole group, so the surface shades nothing. One silent, one
+# misattributed, one fatal. With the declarations in hand all three
+# become limitations naming the handle -- which is ɴsɪ's rule, not a
+# nicety.
+#
+# Not optional, and pure Rust: it reads `.oso`, which is a text format,
+# so this costs no C++ toolchain and works in a build that has no OSL
+# at all. That matters because `Shading::Osl` is a choice rather than a
+# `cfg` -- a scene flushed here may be rendered somewhere else.
+oslquery-petite = "0.1.2"
 # Reads a `.nsi` stream, so `mnry` takes ɴsɪ as well as `.rdla`. It
 # drives `nsi_trait::Nsi`, which `nsi_intermediate::Recorder`
 # implements, so the parser feeds this backend with nothing to write
