@@ -25,9 +25,12 @@ tools/scalar-material/build.sh /path/to/install
 ```
 
 `build.sh` compiles the two translation units directly rather than
-through `moonray_dso_simple`, whose CMake config asks for a CppUnit
-this container does not have. The flags are the ones `build.rs` uses
-for the shim, for the same reason: rdl2's headers assume them.
+through `moonray_dso_simple`. That rule is the right one for a shipped
+DSO and it is what a real OSL material would use — but it lives in
+MoonRay's build tree, and `SceneRdl2Config.cmake` pulls in a CppUnit
+this container does not have, so a probe that needs neither should not
+need both. The flags are the ones `build.rs` uses for the shim, for
+the same reason: rdl2's headers assume them.
 
 Then, with a scene assigning `ScalarProbe` to a lit quad:
 
