@@ -19,6 +19,7 @@
 
 use crate::{
     document::{Body, Document, Object as Described},
+    name::Name,
     rdl2::{Context, Error, Object, Timestep},
     value::{Reference, Value},
 };
@@ -195,7 +196,7 @@ fn is_empty(described: &Described) -> bool {
 /// row's material, means MoonRay silently does not render the shape.
 pub fn apply(document: &Document, context: &Context) -> Vec<String> {
     let mut report = Vec::new();
-    let mut objects: HashMap<(String, String), Object<'_>> = HashMap::new();
+    let mut objects: HashMap<(Name, Name), Object<'_>> = HashMap::new();
 
     // Pass one: every object exists.
     for described in &document.objects {
@@ -321,16 +322,16 @@ pub fn apply(document: &Document, context: &Context) -> Vec<String> {
 }
 
 /// rdl2 reaches `SceneVariables` by class; everything else by name.
-fn object_name(described: &Described) -> String {
+fn object_name(described: &Described) -> Name {
     described
         .name
         .clone()
-        .unwrap_or_else(|| SCENE_VARIABLES.to_string())
+        .unwrap_or_else(|| Name::new(SCENE_VARIABLES))
 }
 
 fn resolve<'a>(
     reference: &Reference,
-    objects: &HashMap<(String, String), Object<'a>>,
+    objects: &HashMap<(Name, Name), Object<'a>>,
 ) -> Option<Object<'a>> {
     objects
         .get(&(reference.class.clone(), reference.name.clone()))
@@ -341,7 +342,7 @@ fn resolve<'a>(
 /// absent when the document named something.
 fn optional<'a>(
     reference: &Option<Reference>,
-    objects: &HashMap<(String, String), Object<'a>>,
+    objects: &HashMap<(Name, Name), Object<'a>>,
     layer: &str,
     what: &str,
     report: &mut Vec<String>,
@@ -365,7 +366,7 @@ fn set(
     attribute: &str,
     value: &Value,
     timestep: Timestep,
-    objects: &HashMap<(String, String), Object<'_>>,
+    objects: &HashMap<(Name, Name), Object<'_>>,
     report: &mut Vec<String>,
 ) -> Result<(), Error> {
     match value {
@@ -435,7 +436,7 @@ fn vector(
     update: &crate::rdl2::Update<'_>,
     attribute: &str,
     values: &[Value],
-    objects: &HashMap<(String, String), Object<'_>>,
+    objects: &HashMap<(Name, Name), Object<'_>>,
 ) -> Result<(), Error> {
     let Some(first) = values.first() else {
         return Ok(());

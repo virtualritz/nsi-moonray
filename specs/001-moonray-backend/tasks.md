@@ -471,15 +471,35 @@ says so in its own doc. This backend calls none of it.
       `edges_to_attribute` had to build two `String`s to probe its key
       on every call. Additive, so a consumer that disagrees still
       compiles. `research.md` F14.
-- [ ] T7.3 **The flushed document is bigger than the scene.** Fell out
-      of `T7.2`: 109 MB against 103 MB, and it did not shrink when the
-      scene did, because `Document` copies every handle into `String`s
-      it owns -- `Object::name` once, and `Reference` twice per
-      `Layer` row, up to nine of them. It is resident for the life of
-      an interactive session, since `apply_affected` diffs against it
-      between frames. Interning is the fix that fits; borrowing is not,
-      because `Session` holds the previous document across an edit to
-      the scene that produced it. `research.md` F14.
+- [x] T7.3 **The flushed document was bigger than the scene.** Fell
+      out of `T7.2`: 109 MB against 103 MB, and it did not shrink when
+      the scene did, because `Document` copied every handle into
+      `String`s it owned -- `Object::name` once, and `Reference` twice
+      per `Layer` row, up to nine of them -- and it is resident for the
+      life of an interactive session, since `apply_affected` diffs
+      against it between frames.
+
+      `src/name.rs` is the fix: `Name`, a `Ustr` with
+      `interned_handles` and a `Box<str>` without, carrying every class
+      name, handle, attribute name and part. `Value::String` is
+      deliberately not one -- file paths are neither short nor
+      repeated, and interning them would put unbounded, never-freed
+      strings in a global table. The document is now **71.2 MB, 35%
+      smaller**, and costs less than the scene again.
+
+      Borrowing was the other candidate and does not work: `Session`
+      holds the previous document across an edit to the scene that
+      produced it, which is exactly the borrow that cannot outlive its
+      source.
+
+      Two things worth keeping from doing it. `Borrow<str>` is a
+      promise that a `Name` hashes as the `str` it borrows as, and
+      `Ustr`'s own `Hash` is not that -- a derived one made
+      `HashMap<Name, _>::get("quad")` answer `None` for a key that was
+      there, silently. And `Debug` is hand-written to print quoted, as
+      `String` does, because handles reach users through `{handle:?}`
+      in every limitation message. `research.md` F14; the oracle tests
+      are what say the written bytes did not move.
 
 ## Not Now
 

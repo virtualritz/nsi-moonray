@@ -64,7 +64,7 @@ cli = [
 # switches upstream's *storage* and every public signature still takes
 # and returns `&str`, so a consumer that disagrees about the feature
 # still compiles against this crate.
-interned_handles = ["nsi-intermediate/ustr_handles"]
+interned_handles = ["dep:ustr", "nsi-intermediate/ustr_handles"]
 
 [build-dependencies]
 # Builds `shim/src/scene.cc` when the `rdl2` feature is on. Not
@@ -110,6 +110,12 @@ notify = { version = "8", optional = true }
 # submodule stops blocking a fetch, building this crate means cloning
 # `nsi` next to it. `T0.7`.
 nsi-intermediate = { path = "../nsi/crates/nsi-intermediate" }
+# The same intern table upstream fills with every handle in the scene.
+# `Name` -- a class name, a handle, an attribute name -- is a `Ustr`
+# with this and a `Box<str>` without, and a flushed document is mostly
+# those. See `src/name.rs` for why, and `research.md` F14 for what it
+# was measured to cost before.
+ustr = { version = "1", optional = true }
 # The ɴsɪ types the C entry points speak: `FfiParam` is layout-identical
 # to `NSIParam_t`, and `Type` carries the `NSIType_t` values.
 nsi-trait = { path = "../nsi/crates/nsi-trait" }

@@ -23,22 +23,25 @@ two halves differ in exactly one thing.
 
 50 000 shapes — 100 001 nodes, 50 005 rdl2 objects — on this container:
 
-| | scene | per node | build | flush | per object |
-| --- | --- | --- | --- | --- | --- |
-| as upstream ships | 144.6 MB | 1516 B | 35.3 s | +109.8 MB | 2303 B |
-| `interned` | 103.1 MB | 1081 B | 11.3 s | +109.1 MB | 2288 B |
+| | scene | per node | record | flush | per object | total |
+| --- | --- | --- | --- | --- | --- | --- |
+| as it ships | 144.7 MB | 1517 B | 32.6 s | +100.1 MB | 2098 B | 244.8 MB |
+| `interned` | 103.1 MB | 1080 B | 11.7 s | +71.2 MB | 1493 B | 174.3 MB |
 
-**29 % smaller and 3.1× faster to build.** The speed is not a side
-effect of the size: `edges_to_attribute` had to build two `String`s to
-probe its key on every call, and interned it probes with a pair of
-`u64`s. Flushing takes half a second either way, so all of that 24
-seconds was scene recording.
+**29 % off the scene, 29 % off the document, and 2.8× faster to
+record.** The speed is not a side effect of the size:
+`edges_to_attribute` had to build two `String`s to probe its key on
+every call, and interned it probes with a pair of `u64`s. Flushing
+takes half a second either way, so all of that 21 seconds was scene
+recording.
 
-`nsi-moonray`'s `interned_handles` feature forwards to upstream's, and
-is **on by default** on the strength of these numbers.
+`nsi-moonray`'s `interned_handles` feature turns on both halves —
+upstream's `ustr_handles` and this crate's interned
+[`Name`](../../src/name.rs) — and is **on by default** on the strength
+of these numbers.
 
-The other thing this says is about **this** crate: the flushed document
-is now larger than the scene it came from, 109 MB against 103 MB, at
-2288 bytes an object. `Document` copies every handle into `String`s —
-`Object::name`, and `Reference` twice per `Layer` row — and hands back
-much of what upstream just saved. `research.md` F14.
+This is also the instrument that found the document problem it just
+measured the fix for. Before `Name`, the flushed document cost 109 MB
+against the scene's 103 MB — *more than the scene it came from*, and
+unmoved by upstream's interning, because `Document` copied every handle
+into `String`s of its own. It is now 71 MB. `research.md` F14.

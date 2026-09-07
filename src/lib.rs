@@ -57,6 +57,7 @@ pub mod capi;
 pub mod display;
 pub mod document;
 pub mod flush;
+pub mod name;
 #[cfg(feature = "rdl2")]
 pub mod rdl2;
 pub mod render;
@@ -74,4 +75,5 @@ pub mod value;
 
 pub use document::{Assignment, Body, Document, Object};
 pub use flush::{Flushed, flush};
+pub use name::Name;
 pub use value::{Reference, Value};

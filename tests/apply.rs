@@ -9,6 +9,7 @@
 use nsi_moonray::{
     apply::apply,
     document::{Assignment, Body, Document, Object as Described},
+    name::Name,
     rdl2::Context,
     value::{Reference, Value},
 };
@@ -67,13 +68,13 @@ fn sets_and_layer_rows_apply() {
 
     let mut document = Document::default();
     document.push(Described {
-        class: "GeometrySet".to_string(),
-        name: Some("/set".to_string()),
+        class: Name::new("GeometrySet"),
+        name: Some(Name::new("/set")),
         body: Body::Set(vec![]),
     });
     document.push(Described {
-        class: "Layer".to_string(),
-        name: Some("/layer".to_string()),
+        class: Name::new("Layer"),
+        name: Some(Name::new("/layer")),
         body: Body::Layer(vec![]),
     });
 
@@ -101,8 +102,8 @@ fn a_dangling_reference_is_reported() {
 
     let mut document = Document::default();
     document.push(Described {
-        class: "GeometrySet".to_string(),
-        name: Some("/set".to_string()),
+        class: Name::new("GeometrySet"),
+        name: Some(Name::new("/set")),
         body: Body::Set(vec![Reference::new("GeometrySet", "/nowhere")]),
     });
 
@@ -124,8 +125,8 @@ fn a_layer_row_with_no_geometry_is_reported() {
 
     let mut document = Document::default();
     document.push(Described {
-        class: "Layer".to_string(),
-        name: Some("/layer".to_string()),
+        class: Name::new("Layer"),
+        name: Some(Name::new("/layer")),
         body: Body::Layer(vec![Assignment::default()]),
     });
 

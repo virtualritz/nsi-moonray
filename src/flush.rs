@@ -17,6 +17,7 @@
 
 use crate::{
     document::{Assignment, Body, Document, Object},
+    name::Name,
     value::{Reference, Value},
 };
 use nsi_intermediate::{IDENTITY, Node, OwnedData, Scene};
@@ -431,8 +432,8 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
         None
     } else {
         objects.push(Object {
-            class: "LightSet".to_string(),
-            name: Some(LIGHT_SET.to_string()),
+            class: Name::new("LightSet"),
+            name: Some(Name::new(LIGHT_SET)),
             body: Body::Set(lights),
         });
         Some(Reference::new("LightSet", LIGHT_SET))
@@ -466,15 +467,15 @@ pub fn flush_for(scene: &Scene, purpose: Purpose) -> Flushed {
 
     if !geometries.is_empty() {
         objects.push(Object {
-            class: "GeometrySet".to_string(),
-            name: Some("/nsi/geometries".to_string()),
+            class: Name::new("GeometrySet"),
+            name: Some(Name::new("/nsi/geometries")),
             body: Body::Set(geometries),
         });
     }
 
     objects.push(Object {
-        class: "Layer".to_string(),
-        name: Some("/nsi/layer".to_string()),
+        class: Name::new("Layer"),
+        name: Some(Name::new("/nsi/layer")),
         body: Body::Layer(assignments),
     });
 

@@ -679,8 +679,42 @@ Two ways out, neither taken yet:
   `Value` and `Object` keep owning their names and nothing about the
   API changes.
 
-Interning is the one that fits, and it is measurable the same way. Not
-done here because it is a change to every constructor in `document.rs`
-and `value.rs` and the oracle tests pin their output byte for byte --
-which is the good problem to have, since it means the change cannot
-quietly alter what is written.
+Interning is the one that fits, and it was done: [`Name`](../../src/name.rs).
+A `Ustr` with `interned_handles` and a `Box<str>` without, carrying
+`Object::class`, `Object::name`, both halves of a `Reference`, every
+attribute name and a `Layer` row's part. `Value::String` is
+deliberately **not** one: file paths and channel names are neither
+short nor repeated, and interning them would put unbounded,
+never-freed strings in a global table.
+
+Measured the same way, on the same scene:
+
+| | scene | record | flush | per object | total |
+| --- | --- | --- | --- | --- | --- |
+| before `Name`, interned | 103.1 MB | 11.3 s | +109.1 MB | 2288 B | 212.3 MB |
+| after, `Box<str>` | 144.7 MB | 32.6 s | +100.1 MB | 2098 B | 244.8 MB |
+| after, `Ustr` | 103.1 MB | 11.7 s | **+71.2 MB** | **1493 B** | **174.3 MB** |
+
+The document is **35% smaller** and back to costing less than the
+scene it came from. `Box<str>` alone -- what a build without the
+feature gets -- takes 9% off on its own, from the sixteen bytes and
+exact-size allocation against a `String`'s twenty-four and its spare
+capacity.
+
+Two things fell out of doing it that are worth keeping.
+
+**`Borrow<str>` is a promise about hashing.** `Ustr`'s own `Hash` is a
+precomputed hash of the pointer, so a derived `Hash` on the wrapper
+made `HashMap<Name, _>::get("quad")` answer `None` for a key that was
+there -- silently, since `Borrow` makes it compile. `Name` hashes its
+*text*, which is also what makes the two feature configurations behave
+identically rather than merely compile alike. A test covers it.
+
+**`Debug` had to be hand-written** to print a quoted string as `String`
+does: handles reach users through `{handle:?}` in the limitation
+messages this backend reports, and a derived one would have put
+`Name("…")` in every message it writes.
+
+The oracle tests are what say the bytes did not move: they rebuild
+four scenes by hand and assert this crate writes exactly what rdl2's
+`AsciiWriter` wrote. They pass unchanged.

@@ -10,6 +10,7 @@
 //! C++'s `%g` with `max_digits10`, which is neither Rust's `{}` nor its
 //! `{:?}`.
 
+use crate::name::Name;
 use std::fmt;
 
 /// Significant digits rdl2 prints a `Float` with:
@@ -24,12 +25,12 @@ const DOUBLE_DIGITS: usize = 17;
 /// class name applied to the object's name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reference {
-    pub class: String,
-    pub name: String,
+    pub class: Name,
+    pub name: Name,
 }
 
 impl Reference {
-    pub fn new(class: impl Into<String>, name: impl Into<String>) -> Self {
+    pub fn new(class: impl Into<Name>, name: impl Into<Name>) -> Self {
         Self {
             class: class.into(),
             name: name.into(),

@@ -5,11 +5,11 @@ edition = "2024"
 publish = false
 
 [features]
-# Upstream's interned handles, which `nsi-moonray`'s own
-# `interned_handles` forwards to. Named here rather than reached
-# through that feature so the two halves of the measurement differ in
-# exactly one thing.
-interned = ["nsi-intermediate/ustr_handles"]
+# `nsi-moonray`'s `interned_handles`, which turns on upstream's
+# `ustr_handles` *and* this crate's own interned `Name`. One flag, so
+# the two halves of the measurement differ in exactly one thing --
+# which is also how the crate ships it.
+interned = ["nsi-moonray/interned_handles"]
 
 [dependencies]
 # Sibling checkouts, the same convention the crate itself uses.

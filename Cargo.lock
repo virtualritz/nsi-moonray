@@ -672,6 +672,7 @@ dependencies = [
  "nsi-intermediate",
  "nsi-parse",
  "nsi-trait",
+ "ustr",
 ]
 
 [[package]]

@@ -7,7 +7,10 @@
 //! the last — so that what this crate writes can be diffed against what
 //! rdl2's own `AsciiWriter` writes for the same scene.
 
-use crate::value::{Reference, Value};
+use crate::{
+    name::Name,
+    value::{Reference, Value},
+};
 use std::io::{self, Write};
 
 /// rdl2's indent, which is four spaces.
@@ -23,7 +26,7 @@ pub struct Assignment {
     pub geometry: Option<Reference>,
     /// The part name. Empty means the whole geometry, which is what an
     /// ɴsɪ scene without face groups produces.
-    pub part: String,
+    pub part: Name,
     pub material: Option<Reference>,
     pub light_set: Option<Reference>,
     pub displacement: Option<Reference>,
@@ -84,7 +87,7 @@ pub enum Body {
     /// `["name"] = value,` per attribute, in the order given. rdl2
     /// writes attributes in declaration order, so a backend that wants
     /// a clean diff has to feed them in that order.
-    Attributes(Vec<(String, Value)>),
+    Attributes(Vec<(Name, Value)>),
     /// A `GeometrySet`, `LightSet` or any other set: bare references,
     /// one per line.
     Set(Vec<Reference>),
@@ -95,16 +98,16 @@ pub enum Body {
 /// One `SceneObject` in the file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Object {
-    pub class: String,
+    pub class: Name,
     /// `None` for `SceneVariables`, which is a singleton and is written
     /// without a name or parentheses.
-    pub name: Option<String>,
+    pub name: Option<Name>,
     pub body: Body,
 }
 
 impl Object {
     /// An object with attributes.
-    pub fn new(class: impl Into<String>, name: impl Into<String>) -> Self {
+    pub fn new(class: impl Into<Name>, name: impl Into<Name>) -> Self {
         Self {
             class: class.into(),
             name: Some(name.into()),
@@ -115,14 +118,14 @@ impl Object {
     /// The scene variables, which have no name.
     pub fn scene_variables() -> Self {
         Self {
-            class: "SceneVariables".to_string(),
+            class: Name::new("SceneVariables"),
             name: None,
             body: Body::Attributes(Vec::new()),
         }
     }
 
     /// Append an attribute. Order is preserved.
-    pub fn set(mut self, name: impl Into<String>, value: Value) -> Self {
+    pub fn set(mut self, name: impl Into<Name>, value: Value) -> Self {
         match &mut self.body {
             Body::Attributes(attributes) => {
                 attributes.push((name.into(), value))
@@ -228,8 +231,8 @@ mod tests {
     fn a_set_writes_bare_references() {
         let mut document = Document::default();
         document.push(Object {
-            class: "GeometrySet".to_string(),
-            name: Some("/gs".to_string()),
+            class: Name::new("GeometrySet"),
+            name: Some(Name::new("/gs")),
             body: Body::Set(vec![Reference::new("RdlMeshGeometry", "/mesh")]),
         });
         assert_eq!(
@@ -244,8 +247,8 @@ mod tests {
     fn a_layer_row_has_nine_columns() {
         let mut document = Document::default();
         document.push(Object {
-            class: "Layer".to_string(),
-            name: Some("/layer".to_string()),
+            class: Name::new("Layer"),
+            name: Some(Name::new("/layer")),
             body: Body::Layer(vec![Assignment::new(
                 Reference::new("RdlMeshGeometry", "/mesh"),
                 Some(Reference::new("DwaBaseMaterial", "/material")),
