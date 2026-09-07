@@ -21,8 +21,9 @@ written; see
 What crosses: polygon meshes and subdivision surfaces with creases and
 corners, instancing (native on both sides, nested, and blurred),
 transform and deformation motion blur on one scene-wide shutter,
-cameras, render outputs — built-in, primitive-variable and per-lobe
-AOVs — OpenVDB volumes, `st`, `N` and arbitrary primitive variables in
+cameras — perspective, orthographic, fisheye and spherical — render
+outputs, including built-in, primitive-variable and per-lobe AOVs,
+OpenVDB volumes, `st`, `N` and arbitrary primitive variables in
 any of ɴsɪ's interpolations,
 and lights — which in ɴsɪ are geometry wearing an emissive shader
 rather than nodes of their own.

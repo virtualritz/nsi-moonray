@@ -50,6 +50,34 @@ const XFORM_LIST: i32 = 2;
 /// MoonRay's perspective camera DSO.
 const PERSPECTIVE_CAMERA: &str = "PerspectiveCamera";
 
+/// The camera classes, by the node type each comes from.
+///
+/// Four of the interface's five have a MoonRay counterpart and the
+/// mapping is a rename; the fifth, `cylindricalcamera`, has none.
+/// Getting this wrong is the quiet kind of wrong -- a scene shot
+/// through an orthographic camera rendered in perspective is a
+/// perfectly good image of the wrong thing -- which is why the class
+/// travels with the handle rather than being assumed at the reference.
+const CAMERAS: [(&str, &str); 4] = [
+    ("perspectivecamera", PERSPECTIVE_CAMERA),
+    ("orthographiccamera", "OrthographicCamera"),
+    ("fisheyecamera", "FisheyeCamera"),
+    ("sphericalcamera", "SphericalCamera"),
+];
+
+/// The MoonRay class one camera node becomes.
+fn camera_class(scene: &Scene, handle: &str) -> &'static str {
+    scene
+        .node(handle)
+        .and_then(|node| {
+            CAMERAS
+                .iter()
+                .find(|(nsi, _)| *nsi == node.node_type())
+                .map(|(_, class)| *class)
+        })
+        .unwrap_or(PERSPECTIVE_CAMERA)
+}
+
 /// MoonRay's environment light DSO.
 const ENVIRONMENT_LIGHT: &str = "EnvLight";
 
@@ -420,7 +448,13 @@ pub fn flush_with(
                  `PointDataGrid`, and it was skipped"
             )),
 
-            "perspectivecamera" => {
+            "cylindricalcamera" => flushed.limitations.push(format!(
+                "{handle:?} is a `cylindricalcamera`; MoonRay has no \
+                 cylindrical projection, and the camera was skipped"
+            )),
+
+            "perspectivecamera" | "orthographiccamera" | "fisheyecamera"
+            | "sphericalcamera" => {
                 objects.push(camera(
                     scene,
                     handle,
@@ -547,8 +581,10 @@ pub fn flush_with(
             variables = variables.set("output_file", Value::String(file));
         }
 
-        variables = variables
-            .set("camera", Value::Object(camera_reference(&output.camera)));
+        variables = variables.set(
+            "camera",
+            Value::Object(camera_reference(scene, &output.camera)),
+        );
     }
 
     if cameras == 0 {
@@ -2498,32 +2534,89 @@ fn camera(
     shutter: Option<[f64; 2]>,
     flushed: &mut Flushed,
 ) -> Object {
+    let class = camera_class(scene, handle);
     let Some(node) = scene.node(handle) else {
-        return Object::new(PERSPECTIVE_CAMERA, handle);
+        return Object::new(class, handle);
     };
 
-    let mut object = Object::new(PERSPECTIVE_CAMERA, handle);
+    let mut object = Object::new(class, handle);
 
     object = with_transform(object, scene, handle, shutter, flushed);
 
-    match node.effective("fov").map(|arg| &arg.data) {
-        Some(OwnedData::F32(values)) if !values.is_empty() => {
-            object =
-                object.set("focal", Value::Float(focal(values[0], resolution)));
+    let degrees = match node.effective("fov").map(|arg| &arg.data) {
+        Some(OwnedData::F32(values)) => values.first().copied(),
+        Some(OwnedData::F64(values)) => values.first().map(|v| *v as f32),
+        _ => None,
+    };
+
+    match class {
+        // A perspective camera's field of view is a focal length in
+        // MoonRay, against a fixed film aperture. See `focal`.
+        PERSPECTIVE_CAMERA => match degrees {
+            Some(degrees) => {
+                object = object
+                    .set("focal", Value::Float(focal(degrees, resolution)));
+            }
+            None => flushed.limitations.push(format!(
+                "camera {handle:?} has no \"fov\"; MoonRay's default focal \
+                 length is used"
+            )),
+        },
+
+        // A fisheye's is an angle on both sides, so it crosses as
+        // itself.
+        "FisheyeCamera" => {
+            if let Some(degrees) = degrees {
+                object = object.set("fov", Value::Float(degrees));
+            }
+            object = fisheye_mapping(object, node, handle, flushed);
         }
-        Some(OwnedData::F64(values)) if !values.is_empty() => {
-            object = object.set(
-                "focal",
-                Value::Float(focal(values[0] as f32, resolution)),
-            );
-        }
-        _ => flushed.limitations.push(format!(
-            "camera {handle:?} has no \"fov\"; MoonRay's default focal \
-             length is used"
-        )),
+
+        // Orthographic and spherical cameras have no attributes of
+        // their own on either side.
+        _ => {}
     }
 
     object
+}
+
+/// The interface's fisheye mappings, as MoonRay's `mapping` enum.
+///
+/// Three of the four are the same idea under the same name. The fourth
+/// is not: `equisolidangle` is MoonRay's `equisolid angle`, with a
+/// space, and a name it does not know leaves the enum at its default
+/// rather than failing -- so an unrecognised one is reported.
+fn fisheye_mapping(
+    object: Object,
+    node: &Node,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    let Some(OwnedData::String(values)) =
+        node.effective("mapping").map(|arg| &arg.data)
+    else {
+        return object;
+    };
+    let Some(name) = values.first() else {
+        return object;
+    };
+    let name = String::from_utf8_lossy(name).into_owned();
+
+    let mapping = match name.as_str() {
+        "equidistant" => "equidistant",
+        "equisolidangle" => "equisolid angle",
+        "orthographic" => "orthographic",
+        "stereographic" => "stereographic",
+        other => {
+            flushed.limitations.push(format!(
+                "camera {handle:?} asks for fisheye mapping {other:?}, \
+                 which MoonRay does not have; its default is used"
+            ));
+            return object;
+        }
+    };
+
+    object.set("mapping", Value::String(mapping.to_owned()))
 }
 
 /// ɴsɪ's vertical field of view, in degrees, as MoonRay's focal length
@@ -2887,8 +2980,8 @@ fn resolution(scene: &Scene) -> (i32, i32) {
     (1920, 1080)
 }
 
-fn camera_reference(handle: &str) -> Reference {
-    Reference::new(PERSPECTIVE_CAMERA, handle)
+fn camera_reference(scene: &Scene, handle: &str) -> Reference {
+    Reference::new(camera_class(scene, handle), handle)
 }
 
 #[cfg(test)]
@@ -3487,6 +3580,100 @@ mod tests {
                 .limitations
                 .iter()
                 .any(|line| line.contains("temperaturegrid")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// **Each camera node becomes its own MoonRay class.**
+    ///
+    /// The class has to travel with the handle: a scene shot through an
+    /// orthographic camera and rendered in perspective is a perfectly
+    /// good image of the wrong thing, and `SceneVariables` points at
+    /// the camera by class *and* name, so getting it wrong there points
+    /// at nothing at all.
+    #[test]
+    fn each_camera_node_becomes_its_own_class() {
+        for (node_type, class) in [
+            ("orthographiccamera", "OrthographicCamera"),
+            ("fisheyecamera", "FisheyeCamera"),
+            ("sphericalcamera", "SphericalCamera"),
+        ] {
+            let mut scene = triangle();
+            // `triangle` brings a perspective camera; this replaces the
+            // one the screen is connected to.
+            scene.delete("cam").expect("a recordable edit");
+            scene.create("cam", node_type).expect("a recordable edit");
+            scene.connect("cam", None, ".root", "objects").unwrap();
+            scene.connect("screen", None, "cam", "screens").unwrap();
+
+            let rdla = flush(&scene).to_rdla();
+
+            assert!(rdla.contains(&format!("{class}(\"cam\") {{")), "{rdla}");
+            // And `SceneVariables` names it by that class.
+            assert!(
+                rdla.contains(&format!("[\"camera\"] = {class}(\"cam\")")),
+                "{rdla}"
+            );
+        }
+    }
+
+    /// A fisheye's `fov` is an angle on both sides, so it crosses as
+    /// itself rather than as a focal length -- and its mapping is the
+    /// same idea under a slightly different spelling.
+    #[test]
+    fn a_fisheye_carries_its_field_of_view_and_mapping() {
+        let mut scene = triangle();
+        scene.delete("cam").expect("a recordable edit");
+        scene
+            .create("cam", "fisheyecamera")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(
+                "cam",
+                vec![
+                    arg("fov", Type::F32, OwnedData::F32(vec![180.0])),
+                    arg(
+                        "mapping",
+                        Type::String,
+                        OwnedData::String(vec![b"equisolidangle".to_vec()]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("cam", None, ".root", "objects").unwrap();
+        scene.connect("screen", None, "cam", "screens").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("[\"fov\"] = 180"), "{rdla}");
+        // MoonRay spells it with a space.
+        assert!(
+            rdla.contains("[\"mapping\"] = \"equisolid angle\""),
+            "{rdla}"
+        );
+        // Not a focal length: that is the perspective camera's answer.
+        assert!(!rdla.contains("focal"), "{rdla}");
+    }
+
+    /// MoonRay has no cylindrical projection, and a camera that quietly
+    /// became a perspective one would render a plausible wrong image.
+    #[test]
+    fn a_cylindrical_camera_is_reported() {
+        let mut scene = triangle();
+        scene.delete("cam").expect("a recordable edit");
+        scene
+            .create("cam", "cylindricalcamera")
+            .expect("a recordable edit");
+        scene.connect("cam", None, ".root", "objects").unwrap();
+
+        let flushed = flush(&scene);
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("cylindricalcamera")),
             "{:?}",
             flushed.limitations
         );

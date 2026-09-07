@@ -654,6 +654,14 @@ shader's own default in place.
   interface's `emissiongrid` says nothing about the type.
 - **`vdbparticles`.** MoonRay has no point-cloud geometry that reads an
   OpenVDB `PointDataGrid`.
+- **An orthographic camera renders through `moonray` and not through
+  the in-process path.** The flush emits the right class and the right
+  attributes -- asserted in `flush::tests`, and the emitted `.rdla`
+  hands to `moonray` and renders, in both execution modes. The same
+  document applied to a live `SceneContext` and rendered
+  progressively comes back empty, with no error from `apply` and no
+  complaint from render prep. Batch against progressive is the
+  difference that has not been ruled out.
 - **AOV forwarding.** 3Delight has a per-object attribute that puts a
   diffuse surface seen in a mirror into the *diffuse* AOV rather than
   the reflection one. MoonRay's LPEs have no equivalent, and inventing
