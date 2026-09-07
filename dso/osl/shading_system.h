@@ -45,6 +45,7 @@ struct ShadingPoint {
 /// carries its id and OSL's `register_closure` is what binds the two.
 /// The order is the registration order and nothing else depends on it.
 enum ClosureId {
+    // OSL's originals.
     CLOSURE_EMISSION,
     CLOSURE_BACKGROUND,
     CLOSURE_DIFFUSE,
@@ -54,6 +55,19 @@ enum ClosureId {
     CLOSURE_REFRACTION,
     CLOSURE_TRANSPARENT,
     CLOSURE_MICROFACET,
+    CLOSURE_SUBSURFACE,
+    // MaterialX's, which is what a shader written this decade emits.
+    CLOSURE_MX_OREN_NAYAR,
+    CLOSURE_MX_BURLEY,
+    CLOSURE_MX_DIELECTRIC,
+    CLOSURE_MX_CONDUCTOR,
+    CLOSURE_MX_GENERALIZED_SCHLICK,
+    CLOSURE_MX_TRANSLUCENT,
+    CLOSURE_MX_TRANSPARENT,
+    CLOSURE_MX_SUBSURFACE,
+    CLOSURE_MX_SHEEN,
+    CLOSURE_MX_UNIFORM_EDF,
+    CLOSURE_MX_LAYER,
     CLOSURE_COUNT,
 };
 
@@ -98,6 +112,104 @@ struct MicrofacetParams {
     float eta;
     int refract;
     OSL::ustring label;
+};
+
+struct SubsurfaceParams {
+    OSL::Vec3 N;
+    float eta;
+    float g;
+    OSL::Color3 mfp;
+    OSL::Color3 albedo;
+    OSL::ustring label;
+};
+
+/// MaterialX's diffuse closures: `oren_nayar_diffuse_bsdf` and
+/// `burley_diffuse_bsdf` declare the same three.
+struct MxDiffuseParams {
+    OSL::Vec3 N;
+    OSL::Color3 albedo;
+    float roughness;
+    OSL::ustring label;
+};
+
+/// What every MaterialX microfacet closure starts with. The order is
+/// the contract: OSL writes into this layout, so it has to match the
+/// registration field for field.
+struct MxDielectricParams {
+    OSL::Vec3 N;
+    OSL::Vec3 U;
+    OSL::Color3 reflection_tint;
+    OSL::Color3 transmission_tint;
+    float roughness_x;
+    float roughness_y;
+    float ior;
+    OSL::ustring distribution;
+    float thinfilm_thickness;
+    float thinfilm_ior;
+    OSL::ustring label;
+};
+
+struct MxConductorParams {
+    OSL::Vec3 N;
+    OSL::Vec3 U;
+    float roughness_x;
+    float roughness_y;
+    OSL::Color3 ior;
+    OSL::Color3 extinction;
+    OSL::ustring distribution;
+    float thinfilm_thickness;
+    float thinfilm_ior;
+    OSL::ustring label;
+};
+
+struct MxGeneralizedSchlickParams {
+    OSL::Vec3 N;
+    OSL::Vec3 U;
+    OSL::Color3 reflection_tint;
+    OSL::Color3 transmission_tint;
+    float roughness_x;
+    float roughness_y;
+    OSL::Color3 f0;
+    OSL::Color3 f90;
+    float exponent;
+    OSL::ustring distribution;
+    float thinfilm_thickness;
+    float thinfilm_ior;
+    OSL::ustring label;
+};
+
+struct MxTranslucentParams {
+    OSL::Vec3 N;
+    OSL::Color3 albedo;
+    OSL::ustring label;
+};
+
+struct MxSubsurfaceParams {
+    OSL::Vec3 N;
+    OSL::Color3 albedo;
+    float transmission_depth;
+    OSL::Color3 transmission_color;
+    float anisotropy;
+    OSL::ustring label;
+};
+
+struct MxSheenParams {
+    OSL::Vec3 N;
+    OSL::Color3 albedo;
+    float roughness;
+    OSL::ustring label;
+};
+
+struct MxUniformEdfParams {
+    OSL::Color3 emittance;
+    OSL::ustring label;
+};
+
+/// `layer(top, base)`: two closures rather than parameters, which is
+/// why the walk descends into them instead of reading a struct.
+struct MxLayerParams {
+    OSL::ClosureColor* top;
+    OSL::ClosureColor* base;
 };
 
 /// The `ShadingSystem` every `Osl` material shares.

@@ -139,6 +139,26 @@ add_microfacet(Walk& walk, const MicrofacetParams& params,
                                          ispc::BSDFBUILDER_PHYSICAL, label);
 }
 
+void walk_closure(Walk& walk, const OSL::ClosureColor* closure,
+                  const scene_rdl2::math::Color& weight);
+
+/// Subsurface, which MoonRay wants as a scattering radius.
+///
+/// `RandomWalkSubsurface` needs the material and a normal-evaluation
+/// function for its own crease handling; neither is available from a
+/// shading point, so it gets nulls and MoonRay falls back to the
+/// unattenuated form.
+void
+add_subsurface(Walk& walk, const scene_rdl2::math::Vec3f& normal,
+               const scene_rdl2::math::Color& albedo,
+               const scene_rdl2::math::Color& radius, int label)
+{
+    const RandomWalkSubsurface subsurface(normal, albedo, radius, 1.0f,
+                                          false, nullptr, nullptr, nullptr);
+    walk.bsdf.addRandomWalkSubsurface(subsurface, 1.0f,
+                                      ispc::BSDFBUILDER_PHYSICAL, label);
+}
+
 /// Flatten one closure tree into `BsdfBuilder` calls.
 ///
 /// OSL hands back a tree of `add`, `mul` and component nodes and
@@ -241,6 +261,136 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
         add_microfacet(walk, *component->as<MicrofacetParams>(), total);
         return;
 
+    case CLOSURE_SUBSURFACE: {
+        const auto* params = component->as<SubsurfaceParams>();
+        add_subsurface(walk, to_vec3(params->N), total,
+                       to_color(params->mfp),
+                       label_index(params->label));
+        return;
+    }
+
+    // MaterialX, which is what a shader written this decade emits.
+    case CLOSURE_MX_OREN_NAYAR:
+    case CLOSURE_MX_BURLEY: {
+        // Burley is a diffuse with a roughness term, which is the
+        // shape MoonRay's Oren-Nayar lobe has. Nearer than Lambert,
+        // and reported nowhere because it is a lobe substitution
+        // rather than a lost parameter.
+        const auto* params = component->as<MxDiffuseParams>();
+        const OrenNayarBRDF brdf(to_vec3(params->N),
+                                 total * to_color(params->albedo),
+                                 params->roughness);
+        walk.bsdf.addOrenNayarBRDF(brdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
+                                   label_index(params->label));
+        return;
+    }
+
+    case CLOSURE_MX_DIELECTRIC: {
+        const auto* params = component->as<MxDielectricParams>();
+        const scene_rdl2::math::Color transmission =
+            total * to_color(params->transmission_tint);
+        const int label = label_index(params->label);
+
+        // Reflection and transmission in one lobe when both are
+        // wanted, which is what MoonRay's BSDF form is for: it
+        // balances the two by Fresnel rather than letting the shader
+        // add them and exceed one. The two weights are scalars, so a
+        // coloured tint collapses to its Rec. 709 luminance; a grey
+        // one — the common case — passes through unchanged.
+        const MicrofacetIsotropicBSDF bsdf(
+            to_vec3(params->N), params->ior, params->roughness_x,
+            distribution(params->distribution),
+            ispc::MICROFACET_GEOMETRIC_SMITH, transmission, 0.0f,
+            params->ior,
+            scene_rdl2::math::luminance(total
+                                        * to_color(params->reflection_tint)),
+            scene_rdl2::math::luminance(transmission));
+        walk.bsdf.addMicrofacetIsotropicBSDF(
+            bsdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL, label, label);
+        return;
+    }
+
+    case CLOSURE_MX_CONDUCTOR: {
+        const auto* params = component->as<MxConductorParams>();
+        // MoonRay's conductor takes the complex index of refraction
+        // directly, which is exactly what MaterialX supplies.
+        const MicrofacetIsotropicBRDF brdf(
+            to_color(params->ior), to_color(params->extinction),
+            to_vec3(params->N), params->roughness_x,
+            distribution(params->distribution),
+            ispc::MICROFACET_GEOMETRIC_SMITH);
+        walk.bsdf.addMicrofacetIsotropicBRDF(
+            brdf, scene_rdl2::math::luminance(total),
+            ispc::BSDFBUILDER_PHYSICAL,
+            label_index(params->label));
+        return;
+    }
+
+    case CLOSURE_MX_GENERALIZED_SCHLICK: {
+        const auto* params = component->as<MxGeneralizedSchlickParams>();
+        // Schlick's `f0` and `f90` are reflectivity at normal and
+        // grazing incidence, which is what MoonRay's artist-friendly
+        // conductor constructor calls reflectivity and edge tint. The
+        // `exponent` has no counterpart and is not carried.
+        const MicrofacetIsotropicBRDF brdf(
+            to_vec3(params->N),
+            total * to_color(params->f0) * to_color(params->reflection_tint),
+            to_color(params->f90), params->roughness_x,
+            distribution(params->distribution),
+            ispc::MICROFACET_GEOMETRIC_SMITH);
+        walk.bsdf.addMicrofacetIsotropicBRDF(
+            brdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
+            label_index(params->label));
+        return;
+    }
+
+    case CLOSURE_MX_TRANSLUCENT: {
+        const auto* params = component->as<MxTranslucentParams>();
+        const LambertianBTDF btdf(-to_vec3(params->N),
+                                  total * to_color(params->albedo));
+        walk.bsdf.addLambertianBTDF(btdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
+                                    label_index(params->label));
+        return;
+    }
+
+    case CLOSURE_MX_SUBSURFACE: {
+        const auto* params = component->as<MxSubsurfaceParams>();
+        // MaterialX gives a depth and a colour where MoonRay wants a
+        // per-channel radius; the depth scales the colour into one.
+        add_subsurface(walk, to_vec3(params->N),
+                       total * to_color(params->albedo),
+                       to_color(params->transmission_color)
+                           * params->transmission_depth,
+                       label_index(params->label));
+        return;
+    }
+
+    case CLOSURE_MX_SHEEN: {
+        const auto* params = component->as<MxSheenParams>();
+        const VelvetBRDF brdf(to_vec3(params->N), params->roughness,
+                              total * to_color(params->albedo), true);
+        walk.bsdf.addVelvetBRDF(brdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
+                                label_index(params->label));
+        return;
+    }
+
+    case CLOSURE_MX_UNIFORM_EDF: {
+        const auto* params = component->as<MxUniformEdfParams>();
+        walk.emission = walk.emission + total * to_color(params->emittance);
+        return;
+    }
+
+    case CLOSURE_MX_LAYER: {
+        // Two closures rather than parameters. `BsdfBuilder` layers by
+        // the order lobes arrive, so the top goes first -- which is
+        // what `BSDFBUILDER_PHYSICAL` then conserves energy across.
+        const auto* params = component->as<MxLayerParams>();
+        walk_closure(walk, params->top, weight);
+        walk_closure(walk, params->base, weight);
+        return;
+    }
+
+    case CLOSURE_MX_TRANSPARENT:
     case CLOSURE_TRANSPARENT:
         // Straight-through transmission. MoonRay expresses this as
         // presence rather than as a lobe, and presence is evaluated on

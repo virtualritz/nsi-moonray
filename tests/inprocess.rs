@@ -1748,3 +1748,110 @@ fn a_delta_snapshot_agrees_with_a_full_one() {
 
     let _ = session.render().stop();
 }
+
+/// **A MaterialX closure becomes a MoonRay lobe.**
+///
+/// The MaterialX closures are a second, parallel vocabulary in OSL:
+/// `oren_nayar_diffuse_bsdf` carries its own albedo rather than being
+/// multiplied by one, and its parameters sit at offsets this crate
+/// declares in `register_closures`. A wrong offset does not fail --
+/// `as<MxDiffuseParams>()` reads whatever is there -- so the albedo is
+/// asserted per channel, exactly as the classic-closure test does, and
+/// for the same reason.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn a_materialx_closure_renders() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-materialx");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("mx.osl");
+    // No `* tint` and no `diffuse()`: the closure is the whole shader,
+    // so what reaches the frame can only have come through
+    // `MxDiffuseParams`.
+    std::fs::write(
+        &source,
+        "surface mx(color tint = color(1, 1, 1))\n\
+         {\n    Ci = oren_nayar_diffuse_bsdf(N, tint, 0.0);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("mx.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    nsi.create("attr", "attributes").unwrap();
+    nsi.create("mx", "shader").unwrap();
+    nsi.set_attribute(
+        "mx",
+        vec![
+            arg(
+                "shaderfilename",
+                Type::String,
+                OwnedData::String(vec![
+                    directory
+                        .join("mx.oso")
+                        .to_string_lossy()
+                        .into_owned()
+                        .into_bytes(),
+                ]),
+            ),
+            arg("tint", Type::Color, OwnedData::F32(vec![0.05, 0.7, 0.6])),
+        ],
+    )
+    .unwrap();
+    nsi.connect("attr", None, "quad", "geometryattributes")
+        .unwrap();
+    nsi.connect("mx", None, "attr", "surfaceshader").unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+    let centre = ((height / 2) * width + width / 2) * 4;
+    let (red, green, blue) =
+        (pixels[centre], pixels[centre + 1], pixels[centre + 2]);
+
+    assert!(
+        green > 0.0,
+        "the MaterialX closure should have shaded something -- black \
+         means it was never registered, so OSL dropped it: {red} \
+         {green} {blue}"
+    );
+    // The same triple the classic-closure test uses, and the same
+    // three questions of it: an albedo read from the wrong offset
+    // fails at least one.
+    assert!(
+        green > red * 5.0,
+        "green should dominate red: {red} {green} {blue}"
+    );
+    assert!(
+        blue > red * 5.0,
+        "blue should dominate red: {red} {green} {blue}"
+    );
+    assert!(
+        green > blue,
+        "green should exceed blue, as `tint` says: {red} {green} {blue}"
+    );
+}
