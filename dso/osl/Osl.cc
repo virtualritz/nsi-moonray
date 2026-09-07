@@ -61,6 +61,38 @@ label_index(const OSL::ustring& label)
     return 0;
 }
 
+/// A 3Delight AOV name, as a lobe label.
+///
+/// `outputvariable("reflection", ...)` is 3Delight's way of naming the
+/// specular part of a shader, and MoonRay's lobe labels are the same
+/// idea under different words -- so the two are reconciled here rather
+/// than left as two vocabularies for one thing. The names are
+/// 3Delight's own, read off the shaders it ships.
+///
+/// A name with no lobe behind it -- `"albedo"`, which is data rather
+/// than scattering -- leaves the label alone.
+int
+aov_label(const OSL::ustring& name)
+{
+    static const struct {
+        const char* aov;
+        const char* label;
+    } known[] = {
+        { "diffuse", "diffuse" },   { "reflection", "specular" },
+        { "refraction", "transmission" },
+        { "subsurface", "subsurface" }, { "sheen", "sheen" },
+        { "coating", "coat" },      { "incandescence", "emission" },
+        { "hair", "hair" },
+    };
+
+    for (const auto& entry : known) {
+        if (name == entry.aov) {
+            return label_index(OSL::ustring(entry.label));
+        }
+    }
+    return 0;
+}
+
 scene_rdl2::math::Color
 to_color(const OSL::Color3& color)
 {
@@ -93,6 +125,27 @@ distribution(const OSL::ustring& name)
 /// What one walk of a closure tree accumulates.
 struct Walk {
     BsdfBuilder& bsdf;
+    /// How a lobe added here interacts with the ones around it.
+    ///
+    /// **OSL's `+` is a sum, not a layering.** `Ci = a + b` says the
+    /// two closures add; MoonRay's `BSDFBUILDER_PHYSICAL` says the
+    /// first attenuates the second, so a shader written as
+    /// `diffuse() + microfacet()` lost whichever came second --
+    /// measured: the specular AOV was black, and swapping the two
+    /// terms in the shader swapped which one vanished.
+    ///
+    /// So an `add` node walks its children additively, and *layering*
+    /// -- MaterialX's `layer` and 3Delight's `layer_closures`, which
+    /// are the closures that mean it -- is what turns the attenuation
+    /// on. The flags compose, so a layer inside a layer still layers.
+    int behaviour = ispc::BSDFBUILDER_ADDITIVE;
+    /// The label a lobe takes when it carries none of its own.
+    ///
+    /// 3Delight's shaders label nothing directly: they wrap each part
+    /// of the surface in `outputvariable("reflection", ...)` and so on,
+    /// which is the same intent one level up. So the wrapper sets this
+    /// for the closures inside it.
+    int label = 0;
     /// The shading normal, for a closure that carries no normal of its
     /// own. `subsurface` is one: OSL declares no `N` formal for it, and
     /// a shader that passes none means "the surface's".
@@ -104,6 +157,14 @@ struct Walk {
     unsigned unmapped = 0;
 };
 
+/// The label for one lobe: its own if it has one, the walk's otherwise.
+int
+labelled(const Walk& walk, const OSL::ustring& label)
+{
+    const int own = label_index(label);
+    return own != 0 ? own : walk.label;
+}
+
 void
 add_microfacet(Walk& walk, const MicrofacetParams& params,
                const scene_rdl2::math::Color& weight)
@@ -112,14 +173,14 @@ add_microfacet(Walk& walk, const MicrofacetParams& params,
     // OSL's alpha is a roughness; MoonRay's `roughness` is the same
     // quantity for its GGX and Beckmann lobes.
     const float roughness = params.xalpha;
-    const int label = label_index(params.label);
+    const int label = labelled(walk, params.label);
 
     if (params.refract) {
         const MicrofacetIsotropicBTDF btdf(
             normal, params.eta, roughness, distribution(params.dist),
             ispc::MICROFACET_GEOMETRIC_SMITH, weight, 0.0f);
         walk.bsdf.addMicrofacetIsotropicBTDF(
-            btdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL, label);
+            btdf, 1.0f, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour), label);
         return;
     }
 
@@ -135,7 +196,7 @@ add_microfacet(Walk& walk, const MicrofacetParams& params,
             distribution(params.dist), ispc::MICROFACET_GEOMETRIC_SMITH);
         walk.bsdf.addMicrofacetIsotropicBRDF(
             brdf, scene_rdl2::math::luminance(weight),
-            ispc::BSDFBUILDER_PHYSICAL, label);
+            static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour), label);
         return;
     }
 
@@ -146,7 +207,7 @@ add_microfacet(Walk& walk, const MicrofacetParams& params,
             normal, params.eta, roughness, distribution(params.dist),
             ispc::MICROFACET_GEOMETRIC_SMITH);
         walk.bsdf.addMicrofacetIsotropicBRDF(
-            brdf, weight.r, ispc::BSDFBUILDER_PHYSICAL, label);
+            brdf, weight.r, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour), label);
         return;
     }
 
@@ -158,7 +219,7 @@ add_microfacet(Walk& walk, const MicrofacetParams& params,
         normal, weight, weight, roughness, distribution(params.dist),
         ispc::MICROFACET_GEOMETRIC_SMITH);
     walk.bsdf.addMicrofacetIsotropicBRDF(brdf, 1.0f,
-                                         ispc::BSDFBUILDER_PHYSICAL, label);
+                                         static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour), label);
 }
 
 void walk_closure(Walk& walk, const OSL::ClosureColor* closure,
@@ -178,7 +239,7 @@ add_subsurface(Walk& walk, const scene_rdl2::math::Vec3f& normal,
     const RandomWalkSubsurface subsurface(normal, albedo, radius, 1.0f,
                                           false, nullptr, nullptr, nullptr);
     walk.bsdf.addRandomWalkSubsurface(subsurface, 1.0f,
-                                      ispc::BSDFBUILDER_PHYSICAL, label);
+                                      static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour), label);
 }
 
 /// Flatten one closure tree into `BsdfBuilder` calls.
@@ -232,8 +293,8 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
     case CLOSURE_DIFFUSE: {
         const auto* params = component->as<DiffuseParams>();
         const LambertianBRDF brdf(to_vec3(params->N), total);
-        walk.bsdf.addLambertianBRDF(brdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
-                                    label_index(params->label));
+        walk.bsdf.addLambertianBRDF(brdf, 1.0f, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour),
+                                    labelled(walk, params->label));
         return;
     }
 
@@ -242,30 +303,30 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
         // OSL's `translucent` diffuses on the far side, which is
         // MoonRay's Lambertian BTDF. Its normal points the other way.
         const LambertianBTDF btdf(-to_vec3(params->N), total);
-        walk.bsdf.addLambertianBTDF(btdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
-                                    label_index(params->label));
+        walk.bsdf.addLambertianBTDF(btdf, 1.0f, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour),
+                                    labelled(walk, params->label));
         return;
     }
 
     case CLOSURE_OREN_NAYAR: {
         const auto* params = component->as<OrenNayarParams>();
         const OrenNayarBRDF brdf(to_vec3(params->N), total, params->sigma);
-        walk.bsdf.addOrenNayarBRDF(brdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
-                                   label_index(params->label));
+        walk.bsdf.addOrenNayarBRDF(brdf, 1.0f, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour),
+                                   labelled(walk, params->label));
         return;
     }
 
     case CLOSURE_REFLECTION: {
         const auto* params = component->as<ReflectionParams>();
         const scene_rdl2::math::Vec3f normal = to_vec3(params->N);
-        const int label = label_index(params->label);
+        const int label = labelled(walk, params->label);
         if (is_grey(total)) {
             const MirrorBRDF brdf(normal, params->eta);
             walk.bsdf.addMirrorBRDF(brdf, total.r,
-                                    ispc::BSDFBUILDER_PHYSICAL, label);
+                                    static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour), label);
         } else {
             const MirrorBRDF brdf(total, total, normal);
-            walk.bsdf.addMirrorBRDF(brdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
+            walk.bsdf.addMirrorBRDF(brdf, 1.0f, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour),
                                     label);
         }
         return;
@@ -274,8 +335,8 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
     case CLOSURE_REFRACTION: {
         const auto* params = component->as<RefractionParams>();
         const MirrorBTDF btdf(to_vec3(params->N), params->eta, total, 0.0f);
-        walk.bsdf.addMirrorBTDF(btdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
-                                label_index(params->label));
+        walk.bsdf.addMirrorBTDF(btdf, 1.0f, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour),
+                                labelled(walk, params->label));
         return;
     }
 
@@ -293,7 +354,7 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
                 ? walk.normal
                 : to_vec3(given);
         add_subsurface(walk, normal, total, to_color(params->mfp),
-                       label_index(params->label));
+                       labelled(walk, params->label));
         return;
     }
 
@@ -308,8 +369,8 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
         const OrenNayarBRDF brdf(to_vec3(params->N),
                                  total * to_color(params->albedo),
                                  params->roughness);
-        walk.bsdf.addOrenNayarBRDF(brdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
-                                   label_index(params->label));
+        walk.bsdf.addOrenNayarBRDF(brdf, 1.0f, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour),
+                                   labelled(walk, params->label));
         return;
     }
 
@@ -317,7 +378,7 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
         const auto* params = component->as<MxDielectricParams>();
         const scene_rdl2::math::Color transmission =
             total * to_color(params->transmission_tint);
-        const int label = label_index(params->label);
+        const int label = labelled(walk, params->label);
 
         // Reflection and transmission in one lobe when both are
         // wanted, which is what MoonRay's BSDF form is for: it
@@ -334,7 +395,7 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
                                         * to_color(params->reflection_tint)),
             scene_rdl2::math::luminance(transmission));
         walk.bsdf.addMicrofacetIsotropicBSDF(
-            bsdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL, label, label);
+            bsdf, 1.0f, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour), label, label);
         return;
     }
 
@@ -349,8 +410,8 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
             ispc::MICROFACET_GEOMETRIC_SMITH);
         walk.bsdf.addMicrofacetIsotropicBRDF(
             brdf, scene_rdl2::math::luminance(total),
-            ispc::BSDFBUILDER_PHYSICAL,
-            label_index(params->label));
+            static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour),
+            labelled(walk, params->label));
         return;
     }
 
@@ -367,8 +428,8 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
             distribution(params->distribution),
             ispc::MICROFACET_GEOMETRIC_SMITH);
         walk.bsdf.addMicrofacetIsotropicBRDF(
-            brdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
-            label_index(params->label));
+            brdf, 1.0f, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour),
+            labelled(walk, params->label));
         return;
     }
 
@@ -376,8 +437,8 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
         const auto* params = component->as<MxTranslucentParams>();
         const LambertianBTDF btdf(-to_vec3(params->N),
                                   total * to_color(params->albedo));
-        walk.bsdf.addLambertianBTDF(btdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
-                                    label_index(params->label));
+        walk.bsdf.addLambertianBTDF(btdf, 1.0f, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour),
+                                    labelled(walk, params->label));
         return;
     }
 
@@ -389,7 +450,7 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
                        total * to_color(params->albedo),
                        to_color(params->transmission_color)
                            * params->transmission_depth,
-                       label_index(params->label));
+                       labelled(walk, params->label));
         return;
     }
 
@@ -397,8 +458,8 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
         const auto* params = component->as<MxSheenParams>();
         const VelvetBRDF brdf(to_vec3(params->N), params->roughness,
                               total * to_color(params->albedo), true);
-        walk.bsdf.addVelvetBRDF(brdf, 1.0f, ispc::BSDFBUILDER_PHYSICAL,
-                                label_index(params->label));
+        walk.bsdf.addVelvetBRDF(brdf, 1.0f, static_cast<ispc::BsdfBuilderBehavior>(walk.behaviour),
+                                labelled(walk, params->label));
         return;
     }
 
@@ -409,12 +470,17 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
     }
 
     case CLOSURE_MX_LAYER: {
-        // Two closures rather than parameters. `BsdfBuilder` layers by
-        // the order lobes arrive, so the top goes first -- which is
-        // what `BSDFBUILDER_PHYSICAL` then conserves energy across.
+        // Two closures rather than parameters, and the closure that
+        // *means* layering -- so this is where the attenuation is
+        // turned on. The top goes first, because `BsdfBuilder` layers
+        // by the order lobes arrive.
         const auto* params = component->as<MxLayerParams>();
+        const int outer = walk.behaviour;
+        walk.behaviour = outer | ispc::BSDFBUILDER_OVER_SUBSEQUENT;
         walk_closure(walk, params->top, weight);
+        walk.behaviour = outer | ispc::BSDFBUILDER_UNDER_PREVIOUS;
         walk_closure(walk, params->base, weight);
+        walk.behaviour = outer;
         return;
     }
 
@@ -425,8 +491,12 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
         // scales the top and the bottom goes in behind it, unscaled --
         // MoonRay reduces it itself.
         const auto* params = component->as<DlLayerParams>();
+        const int outer = walk.behaviour;
+        walk.behaviour = outer | ispc::BSDFBUILDER_OVER_SUBSEQUENT;
         walk_closure(walk, params->top, total * to_color(params->top_mask));
+        walk.behaviour = outer | ispc::BSDFBUILDER_UNDER_PREVIOUS;
         walk_closure(walk, params->bottom, total);
+        walk.behaviour = outer;
         return;
     }
 
@@ -437,7 +507,13 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
         // shaders have to a lobe label -- so it becomes one where the
         // vocabulary has a match, and is otherwise just passed through.
         const auto* params = component->as<DlOutputVariableParams>();
+        const int outer = walk.label;
+        const int named = aov_label(params->name);
+        if (named != 0) {
+            walk.label = named;
+        }
         walk_closure(walk, params->value, total);
+        walk.label = outer;
         return;
     }
 
@@ -704,7 +780,8 @@ Osl::shade(const scene_rdl2::rdl2::Material* self,
         return;
     }
 
-    Walk walk { bsdfBuilder, state.getN() };
+    Walk walk { bsdfBuilder, ispc::BSDFBUILDER_ADDITIVE, 0,
+                state.getN() };
     walk_closure(walk,
                  execute(me->mGroup, me->mXform.get(), me->mAttributes,
                          state),

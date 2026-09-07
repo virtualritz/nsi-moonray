@@ -2620,15 +2620,36 @@ fn result(
             }
         }
 
-        ("shader", Some(name)) => {
-            unmapped(
-                flushed,
-                &format!(
-                    "shader output {name:?} -- MoonRay's material AOVs name                      lobe properties, not OSL output closures, so this is                      not a rename"
-                ),
-            );
-            object
-        }
+        // A shader output: the radiance of one part of the surface.
+        //
+        // MoonRay spells that as a *light* AOV -- a light-path
+        // expression -- rather than a material AOV, which names a
+        // lobe's properties (its albedo, its roughness) rather than
+        // what it contributed. `C<..'diffuse'>L` is every path that
+        // scattered off a lobe labelled `diffuse`, by any event, and
+        // reached a light.
+        //
+        // **The label is bare, with no material name in front of it.**
+        // MoonRay registers a lobe label as `<material label>.<lobe>`
+        // when the material carries a label and as the lobe alone when
+        // it does not -- measured -- so leaving the material unlabelled
+        // is what lets one output layer name a lobe across every shader
+        // in the scene, which is what a shader AOV means.
+        ("shader", Some(name)) => match lobe_label(name) {
+            Some(label) => object
+                .set("result", Value::String("light aov".into()))
+                .set("lpe", Value::String(format!("C<..'{label}'>L"))),
+            None => {
+                unmapped(
+                    flushed,
+                    &format!(
+                        "shader output {name:?} -- it is not one of the \
+                         lobe labels the `Osl` material can name"
+                    ),
+                );
+                object
+            }
+        },
 
         _ => {
             unmapped(
@@ -2638,6 +2659,38 @@ fn result(
             object
         }
     }
+}
+
+/// One shader-AOV name, as the lobe label the `Osl` material sets.
+///
+/// **This table and `aov_label` in `dso/osl/Osl.cc` are one contract.**
+/// The flush writes a light-path expression naming a label; the
+/// material is what puts that label on the lobe. They are in different
+/// languages and cannot share the table, so they have to be changed
+/// together -- and a disagreement renders the AOV black rather than
+/// failing.
+///
+/// The left column is 3Delight's `outputvariable` vocabulary, read off
+/// the shaders it ships. The right is MoonRay's, from `labels[]` in
+/// `dso/osl/attributes.cc`. A name already in the right column is taken
+/// as itself, since the interface does not mandate 3Delight's spelling.
+const SHADER_AOVS: [(&str, &str); 8] = [
+    ("diffuse", "diffuse"),
+    ("reflection", "specular"),
+    ("refraction", "transmission"),
+    ("subsurface", "subsurface"),
+    ("sheen", "sheen"),
+    ("coating", "coat"),
+    ("incandescence", "emission"),
+    ("hair", "hair"),
+];
+
+fn lobe_label(name: &str) -> Option<&'static str> {
+    SHADER_AOVS
+        .iter()
+        .find(|(aov, _)| *aov == name)
+        .or_else(|| SHADER_AOVS.iter().find(|(_, label)| *label == name))
+        .map(|(_, label)| *label)
 }
 
 /// One ɴsɪ built-in variable, as MoonRay's `state_variable` enum.
@@ -3168,6 +3221,62 @@ mod tests {
             "{:?}",
             flushed.limitations
         );
+    }
+
+    /// A shader AOV becomes a light-path expression naming the lobe.
+    ///
+    /// Not a *material* AOV: those name a lobe's properties -- its
+    /// albedo, its roughness -- rather than what it contributed, and
+    /// what an output layer with `variablesource "shader"` asks for is
+    /// the contribution.
+    #[test]
+    fn a_shader_output_layer_becomes_a_light_path_expression() {
+        let mut scene = triangle();
+        output_layer(
+            &mut scene,
+            "spec",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"shader".to_vec()]),
+                ),
+                // 3Delight's name for it. MoonRay's lobe label is
+                // `specular`, and the two have to be reconciled or the
+                // AOV renders black.
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"reflection".to_vec()]),
+                ),
+            ],
+        );
+
+        let spec = output(&flush(&scene).to_rdla(), "spec");
+
+        assert!(spec.contains("[\"result\"] = \"light aov\""), "{spec}");
+        assert!(spec.contains("[\"lpe\"] = \"C<..'specular'>L\""), "{spec}");
+    }
+
+    /// `Ci` is the beauty, which is `RenderOutput`'s own default -- so
+    /// the commonest layer of all sets nothing.
+    #[test]
+    fn a_ci_output_layer_is_the_beauty() {
+        let mut scene = triangle();
+        output_layer(
+            &mut scene,
+            "beauty",
+            vec![arg(
+                "variablename",
+                Type::String,
+                OwnedData::String(vec![b"Ci".to_vec()]),
+            )],
+        );
+
+        let beauty = output(&flush(&scene).to_rdla(), "beauty");
+
+        assert!(!beauty.contains("result"), "{beauty}");
+        assert!(!beauty.contains("lpe"), "{beauty}");
     }
 
     fn triangle() -> Scene {

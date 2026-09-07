@@ -2557,3 +2557,194 @@ fn a_3delight_shader_renders() {
         );
     }
 }
+
+/// **A lobe label reaches a named AOV, end to end.**
+///
+/// The longest chain in this backend, and every link is one that fails
+/// silently:
+///
+/// `diffuse(N, "label", "diffuse")` in an OSL shader → the `"label"`
+/// keyword parameter, which the *renderer* registers rather than OSL →
+/// `label_index` against the vocabulary `attributes.cc` declares as the
+/// scene class's `labels` → MoonRay reading that array back at render
+/// prep and matching it against the AOV schema → an output layer whose
+/// light-path expression names the label → a channel in the file.
+///
+/// The shader emits two labelled lobes and the AOVs ask for one each,
+/// so a chain that labelled nothing gives two black channels and one
+/// that labelled everything the same gives two identical ones. The
+/// assertion is that the diffuse channel is green and the specular one
+/// is not.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn a_lobe_label_reaches_a_named_aov() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-label");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let image = directory.join("labels.exr");
+    let _ = std::fs::remove_file(&image);
+
+    let source = directory.join("labelled.osl");
+    std::fs::write(
+        &source,
+        "surface labelled()\n\
+         {\n\
+         \x20   Ci = color(0.05, 0.8, 0.1) * diffuse(N, \"label\", \"diffuse\")\n\
+         \x20      + color(0.8, 0.05, 0.05)\n\
+         \x20        * microfacet(\"ggx\", N, vector(0), 0.2, 0.2, 1.5, 0,\n\
+         \x20                     \"label\", \"specular\");\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("labelled.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64i32, 48i32);
+    let mut nsi = scene(width, height);
+    nsi.set_attribute(
+        "driver",
+        vec![OwnedArgument::new(
+            "imagefilename",
+            Type::String,
+            1,
+            0,
+            OwnedData::String(vec![
+                image.to_string_lossy().as_bytes().to_vec(),
+            ]),
+        )],
+    )
+    .unwrap();
+
+    nsi.create("attr", "attributes").unwrap();
+    nsi.create("labelled", "shader").unwrap();
+    nsi.set_attribute(
+        "labelled",
+        vec![arg(
+            "shaderfilename",
+            Type::String,
+            OwnedData::String(vec![
+                directory
+                    .join("labelled.oso")
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_bytes(),
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.connect("attr", None, "quad", "geometryattributes")
+        .unwrap();
+    nsi.connect("labelled", None, "attr", "surfaceshader")
+        .unwrap();
+
+    // One layer a lobe. `reflection` is 3Delight's name for the
+    // specular one, so this also exercises the vocabulary reconciliation
+    // rather than only the pass-through name.
+    for (handle, variable) in [("diff", "diffuse"), ("spec", "reflection")] {
+        nsi.create(handle, "outputlayer").unwrap();
+        nsi.set_attribute(
+            handle,
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"shader".to_vec()]),
+                ),
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![variable.as_bytes().to_vec()]),
+                ),
+                arg(
+                    "layername",
+                    Type::String,
+                    OwnedData::String(vec![handle.as_bytes().to_vec()]),
+                ),
+            ],
+        )
+        .unwrap();
+        nsi.connect(handle, None, "screen", "outputlayers").unwrap();
+        nsi.connect("driver", None, handle, "outputdrivers")
+            .unwrap();
+    }
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    drop(session);
+
+    assert!(image.exists(), "no image at {}", image.display());
+
+    use exr::prelude::{ReadChannels, ReadLayers};
+    let read = exr::prelude::read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .all_channels()
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(&image)
+        .expect("the written image reads back");
+
+    let layer = &read.layer_data;
+    let names: Vec<String> = layer
+        .channel_data
+        .list
+        .iter()
+        .map(|channel| channel.name.to_string())
+        .collect();
+
+    let brightest = |channel: &str| {
+        let found = layer
+            .channel_data
+            .list
+            .iter()
+            .find(|c| c.name.to_string() == channel)
+            .unwrap_or_else(|| panic!("no {channel} channel; found {names:?}"));
+        (0..layer.size.width() * layer.size.height())
+            .map(|i| found.sample_data.value_by_flat_index(i).to_f32())
+            .fold(0.0f32, f32::max)
+    };
+
+    // Green in the diffuse layer, red in the specular one -- which is
+    // how the shader coloured them, and the only way to tell "the
+    // labels were carried" from "both layers got the beauty".
+    let (diffuse_green, diffuse_red) =
+        (brightest("diff.G"), brightest("diff.R"));
+    let (specular_red, specular_green) =
+        (brightest("spec.R"), brightest("spec.G"));
+
+    assert!(
+        diffuse_green > 0.05,
+        "the diffuse layer is black, so the label never reached the AOV: \
+         channels are {names:?}"
+    );
+    assert!(
+        diffuse_green > diffuse_red * 5.0,
+        "the diffuse layer should be the green lobe alone: {diffuse_red} \
+         red against {diffuse_green} green"
+    );
+    assert!(
+        specular_red > specular_green * 3.0,
+        "the specular layer should be the red lobe alone: {specular_red} \
+         red against {specular_green} green"
+    );
+}

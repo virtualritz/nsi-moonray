@@ -202,6 +202,21 @@ inventing a mapping.
 `st` and `N` do not come this way: they have dedicated rdl2 attributes,
 `uv_list` and `normal_list`, and reach OSL as `u`, `v` and `N`.
 
+## `+` is a sum, layering is layering
+
+OSL's `Ci = a + b` says the two closures **add**. MoonRay's
+`BsdfBuilder` layers by the order lobes arrive, and its
+`BSDFBUILDER_PHYSICAL` flag makes the first attenuate the second — so
+adding every lobe that way lost whichever term came second.
+
+Measured, on `color(g) * diffuse(...) + color(r) * microfacet(...)`:
+the specular AOV was black, and swapping the two terms in the *shader*
+swapped which lobe vanished. An `add` node therefore walks its children
+`BSDFBUILDER_ADDITIVE`, and attenuation is turned on only by the
+closures that mean layering — MaterialX's `layer(top, base)` and
+3Delight's `layer_closures(top, bottom, mask)`. The flags compose, so a
+layer inside a layer still layers.
+
 ## Labels
 
 MoonRay's material AOVs and LPEs key off an integer per lobe, indexing
@@ -210,6 +225,20 @@ a static array declared on the scene class. OSL's side is a string —
 the language. `attributes.cc` declares the vocabulary; a label outside
 it leaves the lobe unnamed rather than renaming it, because an LPE
 naming a label that never registered renders black.
+
+3Delight's shaders label nothing directly: they wrap each part of the
+surface in `outputvariable("reflection", …)`, which is the same intent
+one level up, so the wrapper sets the label for the closures inside it
+— `reflection` becoming `specular`, `incandescence` becoming
+`emission`, and so on.
+
+**The material carries no rdl2 `label` of its own, deliberately.**
+MoonRay registers a lobe label as `<material label>.<lobe>` when the
+material has one and as the bare lobe name when it does not — measured
+— and the bare form is what lets one output layer name a lobe across
+every shader in the scene. So an output layer asking for `reflection`
+becomes the light-path expression `C<..'specular'>L`, and it holds for
+the whole scene.
 
 ## What it said
 
