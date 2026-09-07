@@ -331,6 +331,53 @@ Two things the build needed that no document says: `llvm-18-dev` and
 so OSL's `FindLLVM` silently falls back to the static clang components
 and the link fails on `clang::SourceMgrAdapter`.
 
+### O8: An OSL shader renders through MoonRay
+
+`dso/osl/` is the `Osl` material, and it works.
+
+```
+Osl("/mat") {
+    ["group_spec"] = "param color Cs 0.1 0.8 0.2 ; param float roughness 0.25 ; shader red layer1 ;",
+    ["search_path"] = "...",
+}
+```
+
+```
+$ moonray -in osl.rdla -out osl.exr -exec_mode scalar -dso_path dso/osl/build:$MOONRAY_ROOT/rdl2dso
+$ oiiotool -stats osl.exr | grep 'Stats Max'
+    Stats Max: 0.101849 0.814795 0.203699 1.000000 (float)
+```
+
+Exactly `Cs`, scaled by the environment light -- and changing only the
+string in the `.rdla` changes the render, which is the whole chain:
+rdl2 attribute, OSL group, closure tree, `BsdfBuilder`, pixels. Run
+again with `0.9 0.1 0.1` it comes back `0.916644 0.101849 0.101849`,
+the same ratio.
+
+Nine closures are mapped (`diffuse`, `oren_nayar`, `translucent`,
+`reflection`, `refraction`, `microfacet` both ways, `emission`), and
+two are counted and reported rather than approximated: `transparent`,
+which MoonRay expresses as *presence* and evaluates on its own
+function before shading, and `background`, which is an environment
+rather than a surface.
+
+The one mapping decision worth stating is the **grey/coloured split**.
+MoonRay's `BsdfBuilder::add*` take a *scalar* weight, and OSL closure
+weights are colours. A lobe that carries no colour of its own --
+`MirrorBRDF`, `MicrofacetIsotropicBRDF` in its dielectric form -- has
+nowhere to put one, and folding it into a luminance renders a grey
+metal. So a grey weight goes to the dielectric constructor as the
+scalar weight, and a coloured one goes to the conductor constructor as
+reflectivity and edge tint. That is what `UsdPreviewSurface` does with
+`metallic` too, and it is exact for the case that matters.
+
+Still standing between this and ɴsɪ: **the flush emits
+`UsdPreviewSurface`**. Turning an ɴsɪ shader network into a group spec
+is the remaining work, and by O6 it is a text transformation --
+testable against strings, with `oslc` and `oslinfo` available to check
+that what is written parses and names parameters the shader really
+has.
+
 ## Settled
 
 - **Texturing is OSL's, not MoonRay's.** OSL takes an OIIO
