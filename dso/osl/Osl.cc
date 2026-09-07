@@ -394,11 +394,10 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
 
     case CLOSURE_MX_TRANSPARENT:
     case CLOSURE_TRANSPARENT:
-        // Straight-through transmission. MoonRay expresses this as
-        // presence rather than as a lobe, and presence is evaluated on
-        // its own function before shading -- so a `transparent()`
-        // closure has nowhere to land here and is counted.
-        ++walk.unmapped;
+        // Straight-through transmission, which MoonRay takes as
+        // *presence* rather than as a lobe -- on its own function,
+        // evaluated before shading. `transparency` is the walk that
+        // reads it, so there is nothing to do here and nothing lost.
         return;
 
     case CLOSURE_BACKGROUND:
@@ -411,6 +410,41 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
     default:
         ++walk.unmapped;
         return;
+    }
+}
+
+/// What a closure tree asks to pass straight through.
+///
+/// Its own walk rather than a field on `Walk`: presence is evaluated
+/// on MoonRay's own function, with no `BsdfBuilder` in hand, so the
+/// lobe-building walk cannot be reused. This one visits the same tree
+/// and sums only `transparent()`.
+scene_rdl2::math::Color
+transparency(const OSL::ClosureColor* closure,
+             const scene_rdl2::math::Color& weight)
+{
+    if (closure == nullptr) {
+        return scene_rdl2::math::sBlack;
+    }
+
+    switch (closure->id) {
+    case OSL::ClosureColor::MUL: {
+        const auto* mul = closure->as_mul();
+        return transparency(mul->closure, weight * to_color(mul->weight));
+    }
+    case OSL::ClosureColor::ADD: {
+        const auto* add = closure->as_add();
+        return transparency(add->closureA, weight)
+             + transparency(add->closureB, weight);
+    }
+    default: {
+        const auto* component = closure->as_comp();
+        if (component->id == CLOSURE_TRANSPARENT
+            || component->id == CLOSURE_MX_TRANSPARENT) {
+            return weight * to_color(component->w);
+        }
+        return scene_rdl2::math::sBlack;
+    }
     }
 }
 
@@ -428,6 +462,10 @@ public:
                       moonray::shading::TLState* tls,
                       const State& state,
                       BsdfBuilder& bsdfBuilder);
+
+    static float presence(const scene_rdl2::rdl2::Material* self,
+                          moonray::shading::TLState* tls,
+                          const State& state);
 
 private:
     OSL::ShaderGroupRef mGroup;
@@ -485,19 +523,52 @@ Osl::update()
         return;
     }
     shading.ShaderGroupEnd(*mGroup);
-}
 
-void
-Osl::shade(const scene_rdl2::rdl2::Material* self,
-           moonray::shading::TLState* /*tls*/,
-           const State& state,
-           BsdfBuilder& bsdfBuilder)
-{
-    const Osl* me = static_cast<const Osl*>(self);
-    if (!me->mGroup) {
+    // **Presence costs a second run of the network**, so it is only
+    // installed for a group that can actually produce one. OSL knows:
+    // `closures_needed` is what the optimizer found the group may
+    // emit, and `unknown_closures_needed` is its own admission that it
+    // could not tell -- in which case the material pays, rather than
+    // rendering an opaque surface a shader asked to see through.
+    mPresenceFunc = scene_rdl2::rdl2::Material::defaultPresence;
+    shading.optimize_group(mGroup.get(), nullptr, true);
+
+    int unknown = 0;
+    shading.getattribute(mGroup.get(), "unknown_closures_needed",
+                         OSL::TypeDesc::INT, &unknown);
+    if (unknown) {
+        mPresenceFunc = Osl::presence;
         return;
     }
 
+    int count = 0;
+    OSL::ustring* needed = nullptr;
+    if (shading.getattribute(mGroup.get(), "num_closures_needed",
+                             OSL::TypeDesc::INT, &count)
+        && shading.getattribute(mGroup.get(), "closures_needed",
+                                OSL::TypeDesc::PTR, &needed)
+        && needed != nullptr) {
+        for (int i = 0; i < count; ++i) {
+            if (needed[i] == "transparent"
+                || needed[i] == "transparent_bsdf") {
+                mPresenceFunc = Osl::presence;
+                return;
+            }
+        }
+    }
+}
+
+/// Run the group at one shading point, and hand back its `Ci`.
+///
+/// Shared by shading and presence, which are two evaluations of the
+/// same network -- MoonRay asks for presence on its own function,
+/// before shading, so there is nowhere to answer both at once.
+namespace {
+
+const OSL::ClosureColor*
+execute(const OSL::ShaderGroupRef& group, const Xform* xform,
+        const State& state)
+{
     OSL::ShadingSystem& shading = shading_system();
 
     // One context per thread, kept for the life of the thread: getting
@@ -536,7 +607,7 @@ Osl::shade(const scene_rdl2::rdl2::Material* self,
     // needed: the `Xform` carries the scene's spaces, and the `State`
     // is what resolves *object* space, which for an instanced
     // prototype is per shading point rather than per material.
-    const ShadingPoint point { me->mXform.get(), &state };
+    const ShadingPoint point { xform, &state };
     globals.renderstate = const_cast<ShadingPoint*>(&point);
     // OSL reaches object and shader space through these, and both
     // land on the same resolution as the named spaces.
@@ -545,12 +616,52 @@ Osl::shade(const scene_rdl2::rdl2::Material* self,
     globals.shader2common =
         reinterpret_cast<OSL::TransformationPtr>(&point);
 
-    shading.execute(context, *me->mGroup, globals);
+    shading.execute(context, *group, globals);
+    return globals.Ci;
+}
+
+} // namespace
+
+void
+Osl::shade(const scene_rdl2::rdl2::Material* self,
+           moonray::shading::TLState* /*tls*/,
+           const State& state,
+           BsdfBuilder& bsdfBuilder)
+{
+    const Osl* me = static_cast<const Osl*>(self);
+    if (!me->mGroup) {
+        return;
+    }
 
     Walk walk { bsdfBuilder };
-    walk_closure(walk, globals.Ci, scene_rdl2::math::sWhite);
+    walk_closure(walk, execute(me->mGroup, me->mXform.get(), state),
+                 scene_rdl2::math::sWhite);
 
     if (!isBlack(walk.emission)) {
         bsdfBuilder.addEmission(walk.emission);
     }
+}
+
+float
+Osl::presence(const scene_rdl2::rdl2::Material* self,
+              moonray::shading::TLState* /*tls*/,
+              const State& state)
+{
+    const Osl* me = static_cast<const Osl*>(self);
+    if (!me->mGroup) {
+        return 1.0f;
+    }
+
+    // A second run of the whole network, which is why this is
+    // installed only for a group OSL says may emit `transparent` --
+    // see `update`.
+    const scene_rdl2::math::Color through =
+        transparency(execute(me->mGroup, me->mXform.get(), state),
+                     scene_rdl2::math::sWhite);
+
+    // `transparent()` is the fraction that passes straight through, so
+    // presence is what is left. A coloured transparency has nowhere to
+    // go -- presence is one number -- and collapses to its luminance.
+    return scene_rdl2::math::clamp(
+        1.0f - scene_rdl2::math::luminance(through), 0.0f, 1.0f);
 }

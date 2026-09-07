@@ -1961,3 +1961,100 @@ fn an_osl_displacement_displaces() {
          column is optional."
     );
 }
+
+/// **`transparent()` becomes presence.**
+///
+/// OSL's straight-through transmission has no MoonRay lobe: MoonRay
+/// expresses it as *presence*, a scalar on its own function evaluated
+/// before shading. So the material runs the network a second time for
+/// it -- and only for a group OSL's optimizer says may emit the
+/// closure, which is what keeps every other shader from paying.
+///
+/// Alpha is what is asserted, because presence is coverage: the quad's
+/// colour also drops, but that would drop just as well if the shader
+/// simply shaded darker.
+///
+/// Needs the crate built with `$OSL_ROOT`.
+#[cfg(osl)]
+#[test]
+fn transparent_becomes_presence() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = std::env::temp_dir().join("nsi-moonray-osl-presence");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("see.osl");
+    std::fs::write(
+        &source,
+        "surface see(float amount = 0)\n\
+         {\n    Ci = amount * transparent() + (1 - amount) * diffuse(N);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("see.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    let alpha = |amount: f32| {
+        let mut nsi = scene(width as i32, height as i32);
+        nsi.create("attr", "attributes").unwrap();
+        nsi.create("see", "shader").unwrap();
+        nsi.set_attribute(
+            "see",
+            vec![
+                arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![
+                        directory
+                            .join("see.oso")
+                            .to_string_lossy()
+                            .into_owned()
+                            .into_bytes(),
+                    ]),
+                ),
+                arg("amount", Type::F32, OwnedData::F32(vec![amount])),
+            ],
+        )
+        .unwrap();
+        nsi.connect("attr", None, "quad", "geometryattributes")
+            .unwrap();
+        nsi.connect("see", None, "attr", "surfaceshader").unwrap();
+
+        let mut session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+        pixels.chunks_exact(4).map(|pixel| pixel[3]).sum::<f32>()
+    };
+
+    let opaque = alpha(0.0);
+    let half = alpha(0.5);
+
+    assert!(opaque > 0.0, "the opaque quad is not in frame at all");
+    // Half the coverage, within what a stochastic presence and the
+    // quad's antialiased edge leave: the two are 2:1, not equal.
+    assert!(
+        half < opaque * 0.6 && half > opaque * 0.4,
+        "half a unit of `transparent()` should have halved the \
+         coverage: {opaque} became {half}. Unchanged means the closure \
+         never reached presence -- the material renders the same \
+         picture either way, only more of it."
+    );
+}

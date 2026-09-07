@@ -75,7 +75,8 @@ which is what makes the two compatible at all.
 | `microfacet(…, refract 0)` | `MicrofacetIsotropicBRDF`, same grey/coloured split |
 | `microfacet(…, refract 1)` | `MicrofacetIsotropicBTDF` |
 | `emission` | `BsdfBuilder::addEmission` |
-| `transparent`, `background` | counted and reported — see below |
+| `transparent` | presence — see below |
+| `background` | counted and reported — see below |
 
 MaterialX's parallel vocabulary lands on the same lobes:
 `oren_nayar_diffuse_bsdf` and `burley_diffuse_bsdf` on `OrenNayarBRDF`,
@@ -98,11 +99,30 @@ render a grey metal. A coloured specular is a conductor, and MoonRay's
 artist-friendly constructor takes reflectivity and edge tint — which
 is how `UsdPreviewSurface` spells metal too.
 
-`transparent` is straight-through transmission, which MoonRay
-expresses as *presence* — evaluated by its own function before
-shading, so a closure has nowhere to land. `background` is an
-environment, and reaches MoonRay as an `EnvLight` from the ɴsɪ
-`environment` node rather than through a material.
+`background` is an environment, and reaches MoonRay as an `EnvLight`
+from the ɴsɪ `environment` node rather than through a material.
+
+## Presence
+
+`transparent()` is straight-through transmission, which MoonRay
+expresses as **presence** — one scalar, on its own function, evaluated
+before shading. There is nowhere in a `BsdfBuilder` for it to land, so
+the material installs `mPresenceFunc` and runs the network a *second*
+time, walking only for `transparent`. Presence is `1 - luminance` of
+what passed through; a coloured transparency has nowhere to go, since
+presence is one number.
+
+A second run is not free, so it is installed only for a group that can
+produce one. OSL knows which: `closures_needed` is what its optimizer
+found the group may emit, and `unknown_closures_needed` is its own
+admission that it could not tell — in which case the material pays,
+rather than rendering opaque a surface the shader asked to see through.
+
+Measured, at `amount` 0, 0.5 and 0.9 of `transparent()`:
+
+```
+alpha 0.592 → 0.296 → 0.059
+```
 
 ## Displacement
 
