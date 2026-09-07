@@ -1,3 +1,13 @@
+// **rdl2's headers first, and it matters.**
+// `scene_rdl2/render/util/AtomicFloat.h` *specialises*
+// `std::atomic<float>`, and OIIO -- which OSL's headers pull in --
+// instantiates it. Whichever comes second loses, with
+// "specialization of 'std::atomic<float>' after instantiation" and a
+// backtrace that points at neither library's own code.
+#include <moonray/rendering/shading/State.h>
+#include <moonray/rendering/shading/Xform.h>
+#include <moonray/rendering/shading/ispc/Xform_ispc_stubs.h>
+
 #include "shading_system.h"
 
 #include <OSL/genclosure.h>
@@ -35,32 +45,119 @@ public:
     {
     }
 
-    // Identity for now: an ɴsɪ scene's transforms are resolved
-    // upstream and baked into geometry before MoonRay sees them, so a
-    // shader asking for `object` or `world` space gets render space
-    // and the two coincide. A shader that depends on the difference
-    // will be wrong, quietly, which is why this is a known gap rather
-    // than a finished implementation.
-    bool get_matrix(OSL::ShaderGlobals*, OSL::Matrix44& result,
+    /// A named space, as the matrix that takes it to OSL's *common*
+    /// space -- which is MoonRay's render space.
+    ///
+    /// Built from basis vectors rather than read out of MoonRay's
+    /// matrices, and deliberately: `Xform`'s render-to-object entry
+    /// resolves through a function pointer per shading point, because
+    /// an instanced prototype's object transform is not the material's.
+    /// Reading the struct would be right for a plain mesh and silently
+    /// wrong for a crowd. Four calls through the documented interface
+    /// are exact for every affine transform, which all of these are.
+    bool get_matrix(OSL::ShaderGlobals* globals, OSL::Matrix44& result,
+                    OSL::ustringhash from, float) override
+    {
+        int space = 0;
+        if (!space_of(from, space)) {
+            return false;
+        }
+        return basis(globals, space, result);
+    }
+
+    bool get_inverse_matrix(OSL::ShaderGlobals* globals,
+                            OSL::Matrix44& result, OSL::ustringhash to,
+                            float) override
+    {
+        OSL::Matrix44 forward;
+        if (!get_matrix(globals, forward, to, 0.0f)) {
+            return false;
+        }
+        result = forward.inverse();
+        return true;
+    }
+
+    /// The `TransformationPtr` form, which OSL uses for
+    /// `sg->object2common` and `sg->shader2common`.
+    ///
+    /// Those are set to the `ShadingPoint`, so both resolve through
+    /// the same path as the named spaces -- object space either way,
+    /// since an ɴsɪ shader has no transform of its own to make
+    /// "shader space" mean anything else.
+    bool get_matrix(OSL::ShaderGlobals* globals, OSL::Matrix44& result,
                     OSL::TransformationPtr, float) override
     {
-        result.makeIdentity();
+        return basis(globals, ispc::SHADING_SPACE_OBJECT, result);
+    }
+
+private:
+    /// OSL's space names, as MoonRay's enum.
+    ///
+    /// `common` is render space and needs no transform. A name neither
+    /// side knows returns false, which is how OSL reports an unknown
+    /// space to the shader rather than handing it an identity.
+    static bool space_of(OSL::ustringhash name, int& space)
+    {
+        static const OSL::ustring object("object");
+        static const OSL::ustring world("world");
+        static const OSL::ustring camera("camera");
+        static const OSL::ustring screen("screen");
+        static const OSL::ustring shader("shader");
+        static const OSL::ustring common("common");
+
+        if (name == OSL::ustringhash(object)
+            || name == OSL::ustringhash(shader)) {
+            space = ispc::SHADING_SPACE_OBJECT;
+        } else if (name == OSL::ustringhash(world)) {
+            space = ispc::SHADING_SPACE_WORLD;
+        } else if (name == OSL::ustringhash(camera)) {
+            space = ispc::SHADING_SPACE_CAMERA;
+        } else if (name == OSL::ustringhash(screen)) {
+            space = ispc::SHADING_SPACE_SCREEN;
+        } else if (name == OSL::ustringhash(common)) {
+            space = ispc::SHADING_SPACE_RENDER;
+        } else {
+            return false;
+        }
         return true;
     }
 
-    bool get_matrix(OSL::ShaderGlobals*, OSL::Matrix44& result,
-                    OSL::ustringhash, float) override
+    /// One space's matrix, from where its origin and axes land.
+    ///
+    /// Imath's `Matrix44` multiplies a *row* vector on the left, so the
+    /// first three rows are the mapped axes and the fourth is the
+    /// mapped origin.
+    static bool basis(OSL::ShaderGlobals* globals, int space,
+                      OSL::Matrix44& result)
     {
-        result.makeIdentity();
+        const auto* point =
+            static_cast<const ShadingPoint*>(globals->renderstate);
+        if (point == nullptr || point->xform == nullptr
+            || point->state == nullptr) {
+            return false;
+        }
+
+        const int render = ispc::SHADING_SPACE_RENDER;
+        const auto origin = point->xform->transformPoint(
+            space, render, *point->state,
+            scene_rdl2::math::Vec3f(0.0f, 0.0f, 0.0f));
+
+        scene_rdl2::math::Vec3f axes[3];
+        for (int i = 0; i < 3; ++i) {
+            scene_rdl2::math::Vec3f unit(0.0f, 0.0f, 0.0f);
+            unit[i] = 1.0f;
+            axes[i] = point->xform->transformVector(space, render,
+                                                    *point->state, unit);
+        }
+
+        result = OSL::Matrix44(axes[0].x, axes[0].y, axes[0].z, 0.0f,
+                               axes[1].x, axes[1].y, axes[1].z, 0.0f,
+                               axes[2].x, axes[2].y, axes[2].z, 0.0f,
+                               origin.x, origin.y, origin.z, 1.0f);
         return true;
     }
 
-    bool get_inverse_matrix(OSL::ShaderGlobals*, OSL::Matrix44& result,
-                            OSL::ustringhash, float) override
-    {
-        result.makeIdentity();
-        return true;
-    }
+public:
 };
 
 /// Everything the shared system owns, so its lifetime is one object's.

@@ -13,7 +13,31 @@
 
 #include <string>
 
+namespace moonray {
+namespace shading {
+class State;
+class Xform;
+} // namespace shading
+} // namespace moonray
+
 namespace nsi_moonray {
+
+/// What the renderer knows about the point being shaded, for OSL to
+/// ask back.
+///
+/// Reached through `ShaderGlobals::renderstate`, which is the `void*`
+/// OSL sets aside for exactly this. Without it every `transform()` in
+/// a shader is an identity, which is not an error anywhere -- it
+/// renders a plausible picture of the wrong coordinate system.
+struct ShadingPoint {
+    /// MoonRay's transforms for this shader, built once in `update()`.
+    const moonray::shading::Xform* xform;
+    /// The point, which is what resolves *object* space: an instanced
+    /// prototype's object transform is per shading point, not per
+    /// material.
+    const moonray::shading::State* state;
+};
+
 
 /// The closures this material understands.
 ///

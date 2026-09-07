@@ -388,6 +388,50 @@ has.
   work spent making a system interoperate with its own successor.
   Decided by the author of the ɴsɪ side, not inferred here.
 
+### O9: Render space follows the camera, and it hid a broken test
+
+`RendererServices::get_matrix` is how a shader's `transform("object",
+P)` is answered, and returning identity is **not an error anywhere**:
+OSL asks, gets a matrix, and shades. The result is a plausible picture
+of the wrong coordinate system.
+
+MoonRay has the transforms -- `shading::Xform` gives render, world,
+camera, screen and object with a `State` -- and the material now holds
+one, built in `update()` as `Xform`'s own documentation asks, reached
+from `RendererServices` through `ShaderGlobals::renderstate`. Both the
+`State` and the `Xform` have to travel, because an instanced
+prototype's object transform is per shading *point*, not per material.
+
+The matrices are built from basis vectors -- the origin and three
+axes, transformed -- rather than read out of `ispc::Xform`'s fields.
+That struct exposes `mR2O` and its inverse directly, and reading them
+would be right for a plain mesh and silently wrong for a crowd, since
+its render-to-object entry resolves through a function pointer per
+shading point. Four calls through the documented interface are exact
+for every affine transform, which all of these are.
+
+**The test for this was wrong twice, and the second failure is the one
+worth recording.** It moved an object and the camera together and
+compared the two renders, reasoning that object space follows the
+object while render space does not. It passed with `get_matrix` stubbed
+to identity.
+
+The reason is that **MoonRay's render space follows the camera**. Move
+both and render-space `P` does not change either, so the two spaces
+agree and nothing can tell them apart. Translation cannot test this.
+
+Rotation can. The quad is rotated 90° about z, so its *image footprint
+is unchanged* -- only the shading can differ -- and object `(0.8, 0)`
+maps to render `(0, 0.8)`, the top of the frame. A shader colouring by
+`abs(P.x)` in object space is bright at the top of the quad and dark at
+its centre; in render space it is dark at both. Stubbed to identity the
+test now reads `0.0480` against `0.0480` and fails; with the real
+matrix it passes.
+
+The general lesson is the one this repository keeps relearning: a test
+that cannot fail is worse than no test, and the only way to know is to
+break the thing it tests and watch.
+
 ## Open questions
 
 - **Displacement.** ɴsɪ has `displacementshader`; MoonRay has a

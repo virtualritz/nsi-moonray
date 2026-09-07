@@ -26,6 +26,7 @@
 #include <moonray/rendering/shading/MaterialApi.h>
 
 #include <cstdlib>
+#include <memory>
 #include <string>
 
 using namespace moonray::shading;
@@ -278,6 +279,12 @@ public:
 
 private:
     OSL::ShaderGroupRef mGroup;
+    /// MoonRay's transforms for this shader.
+    ///
+    /// Built in `update()` as `Xform`'s own documentation asks, and
+    /// held: it is what makes `transform("object", P)` in a shader
+    /// mean what it says instead of quietly being an identity.
+    std::unique_ptr<Xform> mXform;
 
 RDL2_DSO_CLASS_END(Osl)
 
@@ -295,6 +302,10 @@ void
 Osl::update()
 {
     mGroup.reset();
+    // Default spaces: the shading point's own object, the scene's
+    // active camera, the scene's aspect ratio. An ɴsɪ shader has no
+    // transform of its own, so there is nothing to override them with.
+    mXform = std::make_unique<Xform>(this);
 
     const std::string& spec = get(attrGroupSpec);
     if (spec.empty()) {
@@ -368,6 +379,19 @@ Osl::shade(const scene_rdl2::rdl2::Material* self,
     globals.backfacing = state.isEntering() ? 0 : 1;
     globals.flipHandedness = 0;
     globals.raytype = 1;
+
+    // What `RendererServices` asks back through. Both handles are
+    // needed: the `Xform` carries the scene's spaces, and the `State`
+    // is what resolves *object* space, which for an instanced
+    // prototype is per shading point rather than per material.
+    const ShadingPoint point { me->mXform.get(), &state };
+    globals.renderstate = const_cast<ShadingPoint*>(&point);
+    // OSL reaches object and shader space through these, and both
+    // land on the same resolution as the named spaces.
+    globals.object2common =
+        reinterpret_cast<OSL::TransformationPtr>(&point);
+    globals.shader2common =
+        reinterpret_cast<OSL::TransformationPtr>(&point);
 
     shading.execute(context, *me->mGroup, globals);
 
