@@ -4,26 +4,56 @@ An [ɴsɪ](https://nsi.readthedocs.io/) backend on
 [MoonRay](https://github.com/OpenMoonRay/moonray), DreamWorks
 Animation's production renderer.
 
-**Status: it emits scenes, it does not render them yet.** A recorded
-ɴsɪ scene flushes into `.rdla`, MoonRay's ASCII scene format — mesh
-geometry with its world transform, a camera, a `Layer`, a
-`GeometrySet` and render outputs. Every byte of that format was
-captured from `scene_rdl2`'s own `AsciiWriter` rather than inferred,
-and rdl2 reads back what is written; see
+**Status: it renders, in process.** A recorded ɴsɪ scene is built
+straight into a live `scene_rdl2` `SceneContext` and rendered by a
+`RenderContext` in the calling process — no scene file, no spawned
+binary. Pixels come back as they converge, rectangle by rectangle, to
+the closures an ɴsɪ application hands its output driver; a scene can be
+edited between frames and only what the edit touched is re-sent.
+
+`.rdla`, MoonRay's ASCII scene format, is still written on request —
+`mnry cat`, a bug report, an oracle diff — but it is a **dump**, not the
+transport. Every byte of that format was captured from `scene_rdl2`'s
+own `AsciiWriter` rather than inferred, and rdl2 reads back what is
+written; see
 [`specs/001-moonray-backend/oracle/`](specs/001-moonray-backend/oracle/).
 
-Materials are substituted rather than translated: MoonRay runs no OSL,
-so every ɴsɪ shader becomes a `UsdPreviewSurface` — stock MoonRay's PBR
-surface — at its defaults, and the flush reports the substitution.
+What crosses: polygon meshes and subdivision surfaces with creases and
+corners, instancing (native on both sides, nested, and blurred),
+transform and deformation motion blur on one scene-wide shutter,
+cameras, render outputs, and lights — which in ɴsɪ are geometry wearing
+an emissive shader rather than nodes of their own.
 
-A flushed scene renders: MoonRay built from source on a four-core
-container, and a triangle came out of it. **Building** MoonRay is
-heavy; **running** it is not, and the two are not the same problem:
+Materials are substituted rather than translated, because MoonRay runs
+no OSL: every ɴsɪ shader becomes a `UsdPreviewSurface`, MoonRay's stock
+PBR surface, carrying whatever parameters that shader is known to have.
+The known shaders are a table read off 3Delight's own compiled `.oso`
+files rather than guessed at; anything else is reported by name.
+
+## `mnry`
 
 ```bash
-mrr scene.rdla -o image.exr     # runs `moonray -in … -out …`
-mrr scene.rdla --print          # the command, without running it
+mnry render scene.nsi                 # in process, if built with `rdl2`
+mnry render 'shot.@4.nsi' -f 1-48     # a frame sequence
+mnry cat scene.nsi -l                 # what MoonRay would be given
+mnry watch /spool -r                  # render what lands there
 ```
+
+Modelled on [`rdl`](https://github.com/virtualritz/delight-helpers), the
+`renderdl` replacement, so the two commands take the same shape — same
+subcommands, same frame-sequence syntax. What differs is underneath:
+`rdl` drives 3Delight through the ɴsɪ C API, and this parses the same
+streams into `nsi-intermediate` and builds MoonRay's scene from them
+directly.
+
+`--dso-path`, or `$NSI_MOONRAY_DSO`, has to name MoonRay's `rdl2dso`
+directory. Without it no scene class resolves and the render comes out
+empty rather than failing.
+
+Built without the `rdl2` feature — the default, since linking
+`scene_rdl2` needs it installed — `mnry render` writes the scene out and
+runs the `moonray` binary instead. Same image, later, and `-v` says
+which path it took.
 
 ## The Demo
 
@@ -55,11 +85,12 @@ nsi_ffi_wrap::define_nsi_renderer! {
 }
 ```
 
-`NSIRenderControl "start"` writes the scene and runs MoonRay's binary.
-It is a batch render, so a display driver gets a file rather than
-pixels, and `NSIEvaluate` needs the `.nsi` parser that does not exist
-yet. `$NSI_MOONRAY_SCENE` names where the `.rdla` is written, which is
-how you look at what a render was made from.
+`NSIRenderControl "start"` builds the scene into a live renderer and
+starts a frame; with `"interactive"` it stays up, and `"synchronize"`
+re-sends only what the edits since the last call touched. The output
+driver's callbacks are called as the frame converges, with the
+rectangles that changed. `$NSI_MOONRAY_SCENE` names where a `.rdla`
+dump is written, which is how you look at what a render was made from.
 
 ## Building
 
@@ -70,6 +101,16 @@ it is unpublished:
 git clone https://github.com/virtualritz/nsi.git      # ../nsi
 git clone https://github.com/virtualritz/nsi-moonray.git
 cd nsi-moonray && cargo test
+```
+
+With a renderer, point at it and turn the feature on:
+
+```bash
+export SCENE_RDL2_ROOT=/path/to/install
+export MOONRAY_ROOT=/path/to/install
+export NSI_MOONRAY_DSO=$MOONRAY_ROOT/rdl2dso
+cargo build --features rdl2 --lib   # first: `tests/dropin.rs` dlopens it
+cargo test  --features rdl2
 ```
 
 ## Why MoonRay
@@ -88,10 +129,10 @@ closely than the alternatives:
 
 And it does things the Mitsuba backend cannot:
 
-- **Motion blur, both kinds.** `node_xform` takes blur samples;
-  `RdlMeshGeometry` has `vertex_list_1` for deformation and a velocity
-  path. Mitsuba 3 dropped `AnimatedTransform` and cannot blur at all.
-  Two samples, though: rdl2 has exactly two timesteps.
+- **Motion blur, both kinds.** `node_xform` takes blur samples and
+  `RdlMeshGeometry` has `vertex_list_1` for deformation. Mitsuba 3
+  dropped `AnimatedTransform` and cannot blur at all. Two samples,
+  though: rdl2 has exactly two timesteps.
 - **Analytic primitives stay analytic.** Spheres, boxes and nine native
   curve types go to Embree without tessellation. Polygon meshes are
   tessellated *only* when displacement is assigned.

@@ -115,9 +115,11 @@ a consumer's fetch, is what would actually settle it. `T0.7`.
 
 Two shapes, and neither asks this repository to build MoonRay:
 
-- **`mrr`** hands a `.rdla` to MoonRay's own binary. It exists.
-  Whoever renders needs `moonray` installed; nothing here needs it to
-  write or check a scene.
+- **`mnry`** is the command. `render`, `cat`, `watch`, modelled on
+  `rdl` from `virtualritz/delight-helpers` so the two take the same
+  shape. Built with `rdl2` it renders in process; without it — or for
+  an `.rdla`, which only rdl2's own reader parses — it writes the
+  scene out and runs the `moonray` binary. `-v` says which.
 - **`libnsi_moonray.so`** is a drop-in ɴsɪ renderer, and it exists:
   `src/capi.rs`. `nsi-ffi-wrap` `dlopen`s a library and resolves its
   whole symbol table up front, so all twelve have to be there —
@@ -168,8 +170,8 @@ because this backend *spawns* MoonRay, and a batch process has no
 `RenderContext` to snapshot. That is the whole reason, and linking
 `libmoonray` (`002` `R1`–`R3`) is the whole fix. `T5.3`.
 
-Taking `.nsi` *files* works: `mrr scene.nsi` parses, flushes and
-renders. The parser is upstream's `nsi-parse`, which drives
+Taking `.nsi` *files* works: `mnry render scene.nsi` parses it and
+builds MoonRay's scene from it. The parser is upstream's `nsi-parse`, which drives
 `nsi_trait::Nsi` rather than producing a scene type of its own, so it
 feeds the same `Recorder` the C entry points do. Which kind of file it
 is comes from the content rather than the name.

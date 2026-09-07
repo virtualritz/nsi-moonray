@@ -43,7 +43,7 @@ interactive work; `TN.1`.
 | Emitter matches the oracle byte for byte | no | **yes** |
 | rdl2 reads back what the emitter writes | no | **yes** |
 | A scene flushes from `nsi_intermediate::Scene` | no | **yes**, over a sibling-checkout overlay |
-| `mrr` hands a scene to MoonRay's binary | no | **yes**, unrendered |
+| `mnry` renders a scene | no | **yes**, in process; the spawned binary is the fallback |
 | Full MoonRay builds somewhere | **yes** | **yes**, from source on four cores |
 | A triangle renders | **yes** | **yes** |
 | Two materials, two shapes, correct | **yes** | no |

@@ -9,7 +9,7 @@ use nsi_core as nsi;
 use polyhedron_ops::Polyhedron;
 
 fn main() {
-    // `mrr-poly [crease hardness] [image]`. The hardness is what
+    // `[crease hardness] [image]`. The hardness is what
     // `polyhedron-ops` puts on every edge: 10 is its default and reads
     // as a hard-edged polyhedron, and lower values let the Catmull-Clark
     // limit surface round the edges off.

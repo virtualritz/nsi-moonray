@@ -26,12 +26,24 @@ include = [
 crate-type = ["rlib", "cdylib"]
 
 [features]
+default = ["cli"]
 # Link `scene_rdl2` -- and, with it, build the scene in memory rather
 # than writing a file. Off by default because it needs `scene_rdl2`
 # installed and `$SCENE_RDL2_ROOT` pointing at it, while everything
 # else here -- the emitter, the oracle, the flush -- is checked without
 # a renderer and must stay that way.
 rdl2 = []
+# The `mnry` command. On by default so `cargo install nsi-moonray`
+# gives you the renderer's front end; a library consumer that wants the
+# flush and nothing else takes `default-features = false` and none of
+# the argument parsing comes with it.
+cli = [
+    "dep:anyhow",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:frame-sequence",
+    "dep:notify",
+]
 
 [build-dependencies]
 # Builds `shim/src/scene.cc` when the `rdl2` feature is on. Not
@@ -41,7 +53,31 @@ rdl2 = []
 # dependency.
 cc = "1"
 
+[[bin]]
+name = "mnry"
+required-features = ["cli"]
+
 [dependencies]
+# `mnry` only. Errors that carry their cause up to `main` without a
+# hand-written enum per failure mode.
+anyhow = { version = "1", optional = true }
+# `mnry` only. The subcommand shape is modelled on `rdl`, the `renderdl`
+# replacement in `virtualritz/delight-helpers`, so someone who knows one
+# knows the other.
+clap = { version = "4", features = [
+    "derive",
+    "color",
+    "env",
+    "suggestions",
+    "unicode",
+    "wrap_help",
+], optional = true }
+clap_complete = { version = "4", optional = true }
+# `mnry render --frames 10-20@2`. The same crate `rdl` uses, so the
+# sequence syntax is identical down to the binary-splitting form.
+frame-sequence = { version = "0.2", optional = true }
+# `mnry watch`.
+notify = { version = "8", optional = true }
 # The intermediate representation this backend flushes, overlaid from a
 # sibling checkout of https://github.com/virtualritz/nsi.
 #
@@ -69,7 +105,7 @@ ndspy-sys = "0.2"
 # come from `snapshotDelta` and never reach a file. See
 # `specs/002-interactive-updates`.
 exr = "1"
-# Reads a `.nsi` stream, so `mrr` takes ɴsɪ as well as `.rdla`. It
+# Reads a `.nsi` stream, so `mnry` takes ɴsɪ as well as `.rdla`. It
 # drives `nsi_trait::Nsi`, which `nsi_intermediate::Recorder`
 # implements, so the parser feeds this backend with nothing to write
 # here but the wiring. `gzip` because 3Delight writes compressed

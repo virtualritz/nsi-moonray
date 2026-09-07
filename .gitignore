@@ -1,1 +1,7 @@
 /target
+
+# Test renders. `tests/render.rs` names its own output and
+# `SceneVariables` writes `scene.exr` beside whatever ran a render, so
+# both land here and neither is worth keeping.
+/scene.exr
+/unused.exr

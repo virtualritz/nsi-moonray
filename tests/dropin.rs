@@ -29,7 +29,7 @@ struct Param {
 /// The test binary lives in `target/<profile>/deps`, so the library is
 /// one directory up.
 fn library() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_mrr"));
+    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_mnry"));
     path.pop();
     path.join(if cfg!(target_os = "macos") {
         "libnsi_moonray.dylib"

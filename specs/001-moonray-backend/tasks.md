@@ -62,9 +62,33 @@ How a consumer actually gets a MoonRay render out of an ɴsɪ scene.
 Neither of these needs *this* repository to build MoonRay -- they need
 whoever renders to have it installed.
 
-- [x] T4.1 `mrr`, a CLI that hands a scene to MoonRay's own binary:
-      `moonray -in scene.rdla -out image.exr`. Flags read from
-      `RenderOptions.cc`.
+- [x] T4.1 **`mnry`, the command.** Modelled on
+      [`rdl`](https://github.com/virtualritz/delight-helpers), the
+      `renderdl` replacement, so the two take the same shape: `render`,
+      `cat`, `watch` and `generate-completions`, the same
+      frame-sequence syntax down to the binary-splitting form, and the
+      same short options where they mean the same thing. `rdl`'s
+      `--collective` and `--cloud` are not carried, because MoonRay has
+      neither and an option accepted and ignored is worse than one that
+      is not there.
+
+      `render` renders **in process** through a `Session` when the
+      crate is built with `rdl2`, and falls back to writing the scene
+      out and running the `moonray` binary otherwise -- or for an
+      `.rdla` input, which only rdl2's own reader parses. `-v` says
+      which path it took, because the two have different capabilities
+      and someone wondering why their viewport does not update should
+      be able to find out. `--output` redirects by editing every ɴsɪ
+      `outputdriver`'s `imagefilename`, which is the attribute a host
+      would have set, so the two paths cannot disagree about where the
+      image went. `cat` answers "what did my ɴsɪ scene become?" without
+      rendering it, which is the question every translation bug starts
+      as.
+
+      Behind a default-on `cli` feature: a library consumer that wants
+      the flush and nothing else takes `default-features = false` and
+      none of the argument parsing comes with it.
+      `tests/nsi_input.rs` drives the command.
 - [x] T4.2 **`libnsi_moonray.so`: a drop-in ɴsɪ renderer.**
       `src/capi.rs` exports all twelve symbols, records into
       `nsi_intermediate::Scene`, and renders **in process** through a
@@ -90,9 +114,10 @@ whoever renders to have it installed.
       resolves. `DspyRegisterDriver` counts as a twelfth: `nsi-ffi-wrap`
       resolves the whole symbol table up front, so a consumer built
       with the `output` feature cannot load a library missing it.
-- [x] T4.3 `.nsi` stream input. `mrr` takes an ɴsɪ stream, flushes it
-      to `.rdla` beside itself, and renders that -- which is also what
-      someone debugging the translation wants to look at. The parser is
+- [x] T4.3 `.nsi` stream input. `mnry` takes an ɴsɪ stream and builds
+      MoonRay's scene straight from it; `mnry cat` writes the `.rdla`
+      that would have been built, which is what someone debugging the
+      translation wants to look at. The parser is
       upstream's (`nsi-parse`) and drives `nsi_trait::Nsi`, which
       `Recorder` implements, so an ɴsɪ file feeds the same `Scene` the
       C entry points record into and there was nothing to write here
@@ -433,8 +458,8 @@ says so in its own doc. This backend calls none of it.
       becomes nine attribute writes on an object MoonRay already has,
       an accelerator rebuild rather than a re-tessellation -- and waste
       where nothing will: a tessellation and a place in the accelerator
-      for something never drawn. `mrr` and the spawned path ask for
-      `Batch`; a `Session` is `Interactive` by construction.
+      for something never drawn. `mnry cat` and the spawned path ask
+      for `Batch`; a `Session` is `Interactive` by construction.
       `flush::tests::a_batch_flush_omits_a_detached_shape`.
 
 ## Not Now

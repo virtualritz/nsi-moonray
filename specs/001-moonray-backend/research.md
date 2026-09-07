@@ -535,3 +535,90 @@ the recognition rule -- the thing the task was actually blocked on --
 is tested end to end either way; `SphereLight`, `SpotLight` and
 `DistantLight` have no such dependency. The `MeshLight` mapping itself
 is asserted as a document, which is where the two rules above live.
+
+### F13: How MoonRay uses OpenSubdiv, and what replacing it would take
+
+Asked because `subdiv-kernels` exists and a C API could be added to it.
+The answer is that MoonRay's use is narrow but *deep*: one file, one
+OpenSubdiv layer, and four load-bearing capabilities.
+
+#### The surface actually used
+
+All of it is in `geom/prim/OpenSubdivMesh.cc`. Three other files only
+`#include` its header. Nothing uses `Osd::` -- there is no GPU
+subdivision and no OpenSubdiv drawing anywhere in MoonRay. The whole
+dependency is `Sdc` (options) and `Far` (CPU refinement and patches):
+
+| Called | For |
+| --- | --- |
+| `Far::TopologyRefinerFactory<TopologyDescriptor>::Create` | the cage, with per-edge crease and per-vertex corner sharpness and the face-varying channels |
+| `Sdc::Options` -- `VtxBoundaryInterpolation`, `FVarLinearInterpolation` | rdl2's boundary and face-varying rules, mapped one for one |
+| `TopologyRefiner::RefineAdaptive(AdaptiveOptions)` | Catmull-Clark. `maxDepth` and `secondaryLevel` come from the **camera**: `log2(maxEdgeResolution) + 1`, with creases forcing depth 6 |
+| `TopologyRefiner::RefineUniform(UniformOptions(1))` | bilinear and Loop, plus a documented OpenSubdiv-3.1 face-varying workaround |
+| `Far::PatchTableFactory::Create` with `ENDCAP_GREGORY_BASIS` | one patch per limit-surface region, irregular ones included |
+| `Far::PrimvarRefiner::{Interpolate, InterpolateVarying, InterpolateFaceVarying}` | patch control points, per level, per motion sample |
+| `PatchTable::ComputeLocalPointValues{,Varying,FaceVarying}` | the end-cap patches' own extra points |
+| `Far::PatchMap::FindPatch(faceId, u, v)` | the inner loop: which patch covers this sample |
+| `PatchTable::EvaluateBasis{,Varying,FaceVarying}` | weights **and first derivatives** at that `(u, v)` |
+
+The last two are what the renderer is really buying: **arbitrary
+`(u, v)` on the limit surface**, returning position, `dPdu`, `dPdv`,
+normal, `st` and every primitive attribute, uniformly for regular and
+irregular patches alike. Tessellation is view-adaptive, so the sample
+pattern is decided per edge from the camera and then evaluated exactly
+-- which is `F2` and `F4` in this document, and the reason this backend
+does not tessellate anything itself.
+
+#### Where `subdiv-kernels` already lines up
+
+More than one might expect. It has Catmull-Clark with the same crease
+and corner inputs (`Mesh::edge_creases`, `Mesh::vertex_corners`),
+face-varying channels with the interpolation modes, stencil tables and
+a composed cage-to-final table, limit stencils with tangents, a
+`PatchTable` of regular bicubic B-spline patches with an explicit
+exactness contract, and a `LimitEvaluator` that answers arbitrary
+`(u, v)` **with derivatives** on any quad -- feature quads by recursive
+local isolation rather than an eigenbasis. It also has three schemes
+OpenSubdiv does not (Loop it shares; √3 and Doo-Sabin it does not),
+sparse-edit queries (`affected_outputs`), and a wgpu path.
+
+#### What is missing, and it is not the C API
+
+1. **Feature-adaptive refinement.** The request type is
+   `UniformRefine`. MoonRay's depth is per-edge and camera-derived,
+   and uniform refinement to the depth a crease forces (6) is a very
+   different memory profile on a production cage.
+2. **No Gregory end caps.** `subdiv-kernels` classifies irregular
+   quads as `QuadClass::Feature` and sends them to `LimitEvaluator`;
+   MoonRay expects every patch to answer the same `EvaluateBasis`
+   call. The capability is there, the *shape* is not, and the cost
+   model differs -- a recursion per sample against a table lookup.
+3. **No patch map.** `FindPatch(faceId, u, v)` is MoonRay's inner
+   loop; `subdiv-kernels` indexes by refined quad.
+4. **Ptex face numbering.** `generateSubdQuadTopology` deliberately
+   mirrors `Far::PtexIndices::initializePtexIndices` so MoonRay's own
+   quad ids agree with the patch table's face ids. A replacement has
+   to agree on that numbering or the entire tessellated index buffer
+   points at the wrong faces -- and renders something plausible.
+
+So a C API is necessary and nowhere near sufficient.
+
+#### Two honest routes, and neither is a swap
+
+- **Emulate `Far`.** Implement the nine entry points above behind
+  `extern "C"`, including adaptive refinement, Gregory end caps, a
+  patch map and ptex numbering. That is most of what OpenSubdiv's
+  `Far` *is*, and the exactness bar is a renderer's.
+- **Rewrite `OpenSubdivMesh.cc` to the shape `subdiv-kernels` offers**
+  -- stencils plus `LimitEvaluator`, isolating only where samples
+  land. Arguably the better architecture, since the isolation is
+  demand-driven where the adaptive refinement is speculative. But it
+  is a change to MoonRay, not a library swap, and it lands in the file
+  that decides what every subdivision surface looks like.
+
+Neither is on this backend's path. Nothing here tessellates: ɴsɪ
+subdivision crosses as `is_subd` plus creases and corners (`T3.1`), and
+MoonRay decides the rest. A third option -- subdividing on this side
+and handing MoonRay a polygon mesh -- would work today and is exactly
+what `F4` says not to do, because it throws away the view-adaptive
+tessellation that made MoonRay worth linking.

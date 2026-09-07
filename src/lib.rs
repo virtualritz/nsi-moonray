@@ -30,7 +30,8 @@
 //! - [`flush`] — turning a [`nsi_intermediate::Scene`] into one of those
 //!   documents.
 //! - [`render`] — handing the result to MoonRay's own renderer binary,
-//!   which is what the `mrr` command does.
+//!   which is the fallback path of the `mnry` command and what a build
+//!   without the `rdl2` feature has.
 //! - [`display`] — pixels back out, through ɴsɪ's display-driver ABI.
 //!   MoonRay has none, so this calls the driver rather than being
 //!   called by one.
