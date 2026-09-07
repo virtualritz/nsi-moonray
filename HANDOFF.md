@@ -195,32 +195,44 @@ have the fast path still gets its render.
 
 ## Where To Start
 
-**`I5`, the cost assertion.** Everything else in the interactive path
-works and is checked; this is the one thing that would show it is
-doing what it claims. `002` `research.md` F8 has what was tried. It is
-worth chasing MoonRay's stats gating, because without it "incremental"
-is an assumption rather than a measurement.
+**Almost everything actionable is done.** What is left splits three
+ways.
 
-Then, in rough order of value:
+**Waiting on upstream, with the reports written and ready to file in
+[`upstream/`](upstream/):**
 
-- **`I2`, geometry off through visibility.** `research.md` F3 says
-  MoonRay's visibility attributes are `FLAGS_GEOM_RELOAD_BVH_ONLY` —
-  one cost tier cheaper than editing the `Layer` or deleting the
-  object, for the same image. This is the case where getting the
-  *mapping* right is the whole job.
-- **`T5.4`, writing a file from the linked renderer.** A batch render
-  with no callbacks currently converges and then says nothing was
-  saved. That is honest but useless for a farm.
-- **`T0.6`, the authoring twin of `RdlMeshGeometry`.** Its DSO lives
-  in `moonray`, so nothing on a host without the renderer can read
-  back a scene that uses it. But
-  `moonray/dso/geometry/RdlMesh/attributes.cc` needs only `scene_rdl2`
-  headers: build it with a stub implementation and `oracle verify`
-  starts covering real mesh scenes.
-- **`T6.6`, rendering an instanced scene.** The mapping is asserted as
-  text; what it looks like is not, and `T6.2` — whether
-  `use_reference_xforms` double-applies or drops the prototype's own
-  transform — can only be settled by looking.
+- The **empty-camera crash** (`002` F5). Worked around here by
+  emitting a default camera, so nothing is blocked on it.
+- The **ignored `FLAGS_GEOM_RELOAD_BVH_ONLY`** (`002` F9). This one
+  *does* block something: hiding a shape re-tessellates it, when
+  MoonRay's own comment says it should cost a BVH rebuild. Two lines
+  in `scene_rdl2`, and the evidence that they are safe is in the
+  report.
+
+**Waiting on knowledge this repository does not have.** Each is a name
+or a rule that a guess would get plausibly wrong, which is the failure
+the oracle discipline exists to prevent:
+
+- `T1.3a`, which ɴsɪ shader parameter means `roughness`.
+- `T2.4`, which ɴsɪ attribute carries velocity. MoonRay's side is
+  fully mapped; only the name is missing.
+- `T1.7a`, how to recognise an area light, which in ɴsɪ is geometry
+  wearing an emissive shader.
+- `T1.6`, whether ɴsɪ's `fov` is vertical. Read as vertical from how
+  `nsi-toolbelt` uses it; unconfirmed against a 3Delight render.
+
+**Still worth doing here:**
+
+- **`T0.6`, the authoring twin of `RdlMeshGeometry`.** Less valuable
+  than it was — `tests/apply.rs` now checks against real rdl2 — but it
+  is what would let a host with no MoonRay check a mesh scene.
+- **`T5.2`, the `dlopen` route for callbacks.** Deprioritised
+  deliberately: the closures work where the application and this
+  backend share one `nsi-ffi-wrap`, which is the case that was asked
+  for.
+- **`TN.2`, OSL.** MoonRay has none. Its own spec, and its own
+  project; `BsdfBuilder` is closure-shaped and is the plausible
+  landing site.
 
 Materials are substituted, not translated: every ɴsɪ shader becomes a
 `UsdPreviewSurface` at its defaults. Carrying its *parameters* across
@@ -256,7 +268,7 @@ Through a **linked** MoonRay, with no file and no process:
   while the render shows the old one, and reading the scene back would
   pass on exactly that.
 
-## Six Things Found By Running It
+## Eight Things Found By Running It
 
 Each cost real time, none is inferable from a header, and every one is
 a crash or a silent wrong answer rather than an error:
@@ -279,8 +291,17 @@ a crash or a silent wrong answer rather than an error:
   shader parameter both reach the render without it. Two tests
   asserted otherwise and both failed. It is still called; nothing
   claims more than that.
-- **MoonRay's cost counters do not move** (`002` F8), which is why
-  `I5` is still open — see below.
+- **MoonRay's cost counters read zero unless read before
+  `stopFrame`** (`002` F8), which resets them. Three wrong hypotheses
+  were eliminated before that one.
+- **A `sourcemodels` edge need not point at geometry.** ɴsɪ connects
+  the model *root*, usually a transform. `references` named it, the
+  attribute failed to set, and an instanced scene rendered **nothing**
+  from a perfectly valid description.
+- **A planar cage subdivides to itself.** The first limit-surface test
+  used a flat grid and both renders covered exactly 3598 pixels. The
+  subject has to be closed and non-planar for the limit surface to
+  differ at the silhouette.
 - **The `cdylib` goes stale under `cargo test`** (`002` F7).
   `tests/dropin.rs` `dlopen`s it by path, so Cargo does not know the
   test depends on it. This cost two debugging sessions and both times
@@ -289,15 +310,25 @@ a crash or a silent wrong answer rather than an error:
 
 ## What Would Bite You
 
-**The incremental path is unproven as *incremental*.** It renders the
-right image — a shader edit and a transform each cross in one
-synchronise, asserted on pixels — but nothing shows MoonRay
-re-tessellated nothing. A synchronise that rebuilt the whole scene
-would pass every test here. `Render::cost` reads the counters that
-would settle it and they do not move (`002` F8); the control test is
-committed and `#[ignore]`d rather than an assertion being built on top
-of it. **`I5` is the last thing between "renders correctly" and
-"is actually interactive".**
+**The incremental path is measured now, and the measurement says
+"not yet".** A shader edit, a transform, a deformation and a hide each
+cross in one synchronise and are asserted on pixels — but
+`Session::last_cost` says every one of them re-tessellates. Two
+different reasons, and only one is ours to fix:
+
+- A **material** change re-tessellates *by design*. `Layer.cc:497`
+  marks the geometry changed because MoonRay does not know which
+  primitive attributes the new material wants until after the update.
+  Conservative, upstream's, and nothing a backend can map around.
+- A **visibility** change should not, and does. `scene_rdl2`'s
+  `Geometry::requiresGeometryUpdate` never consults
+  `FLAGS_GEOM_RELOAD_BVH_ONLY`, so the cheap tier `F3` promises is
+  unreachable from any path. Two lines, written up in `upstream/`.
+
+The counters had to be read **before `stopFrame`**, which resets them,
+and on a scene heavy enough that tessellating it costs milliseconds
+rather than microseconds. Both of those made them look like they were
+never wired up at all.
 
 
 **Two ways a perfectly correct scene renders black**, both found by

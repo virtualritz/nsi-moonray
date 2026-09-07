@@ -153,7 +153,16 @@ What is left is consuming them.
       `Affected { nodes, shaders, outputs, everything }`, walking down
       the transform tree and through `attributes` bindings — the
       inverse of the climb resolution already does.
-- [ ] U5 **Consume them.** `Affected` separates `shaders` from `nodes`
-      because a shader edit costs no geometry work — which is exactly
-      MoonRay's own distinction (`research.md` F3). The two models line
-      up; this backend has to be told to use them.
+- [x] U5 **Consume them.** `apply_affected` takes upstream's `Changes`
+      and `Affected` and re-applies only the objects they name -- plus
+      only the *attributes* whose values differ, since rdl2 tracks that
+      an attribute was set rather than that it changed, so re-sending a
+      mesh's `vertex_list_0` regenerates its geometry either way.
+      **The premise this task was written on is wrong, though.**
+      `Affected` separates `shaders` from `nodes` because a shader edit
+      *should* cost no geometry work, and this task assumed MoonRay
+      agreed. It does not: `Layer.cc:497` marks a material's geometry
+      changed on any edit, deliberately, because the new material's
+      primitive-attribute requests are not known until after the
+      update. The two models line up on everything except the case the
+      split exists for (`research.md` F8).
