@@ -1,7 +1,8 @@
 <!--
 Ready to file at https://github.com/OpenMoonRay/moonray/issues/new
 
-Title: MeshLight with any map_shader segfaults in render prep
+Title: MeshLight with a map_shader segfaults when its geometry is in no
+       GeometrySet
 
 Not filed from here: this session's GitHub access is scoped to
 `virtualritz`, and the MoonRay repository is on another tier.
@@ -9,13 +10,13 @@ Not filed from here: this session's GitHub access is scoped to
 Read from the source at `eef67ae` and reproduced by running it.
 -->
 
-# `MeshLight` with any `map_shader` segfaults
+# `MeshLight` + `map_shader` segfaults on geometry in no `GeometrySet`
 
 ## Summary
 
-Giving a `MeshLight` a `map_shader` — the documented way to make its
-radiance vary over its surface — segfaults during render prep, before
-the first pixel:
+A `MeshLight` whose reference geometry belongs to no `GeometrySet`
+renders fine on its own, but segfaults during render prep as soon as it
+is given a `map_shader`:
 
 ```
 SIGSEGV(segfault) callstack
@@ -32,7 +33,15 @@ SIGSEGV(segfault) callstack
            RenderContext::renderPrep(bool, bool)
 ```
 
-The same light **without** a `map_shader` renders correctly.
+Two one-line changes each avoid it, which is what pins the cause:
+
+- remove the `map_shader`, or
+- add the light's geometry to a `GeometrySet`.
+
+The second is the fix a scene wants, and the combination is the trap:
+**without a map shader, geometry in no `GeometrySet` works**, so a
+scene can be built that way, light correctly, and then crash the moment
+a map shader is added to vary its emission.
 
 ## Reproducer
 
@@ -60,6 +69,8 @@ MeshLight("/lamp_l") {
     ["color"] = Rgb(1,0.9,0.7), ["intensity"] = 20, ["normalized"] = false,
 }
 
+-- The light's own geometry is deliberately absent here. Adding
+-- `RdlMeshGeometry("/lamp")` to this set is one of the two fixes.
 GeometrySet("/set") { RdlMeshGeometry("/floor") }
 LightSet("/lights") { MeshLight("/lamp_l") }
 Layer("/layer") { { RdlMeshGeometry("/floor"), "", UsdPreviewSurface("/mat"), LightSet("/lights") } }
@@ -72,7 +83,8 @@ around before this bug is even reachable on a `moonray`-only build.
 
 ## What was ruled out
 
-Each of these was tried on its own and the crash is unchanged:
+Each of these was tried on its own, with the geometry still in no
+`GeometrySet`, and the crash is unchanged:
 
 - **The map.** First found with a third-party `Map`; reproduces
   identically with MoonRay's own `CheckerboardMap`.
@@ -115,9 +127,20 @@ meshLight->setAttributeTable(table);
 `MeshLight::sampleMapShader` passes it straight into
 `Intersection::initMapEvaluation` at `MeshLight.cc:1877`.
 
+A geometry reached only through a `MeshLight` is generated for the mesh
+light layer, and appears to arrive at `setMesh` without the `Attributes`
+the same geometry gets when it is a member of a `GeometrySet`. Either
+that generation should build them, or the two `getST` call sites should
+tolerate their absence — a mesh light computing per-face energies has
+no use for texture coordinates the mesh does not have.
+
 ## Why it matters
 
 `map_shader` is the only way a mesh light's emission can vary across
 its own surface. Without it a mesh light is one colour times one
 intensity, which rules out every emissive material whose brightness is
 textured or procedural — exactly the case the attribute exists for.
+
+The failure mode is the expensive part: a crash with no diagnostic,
+triggered by adding a shader, whose actual cause is a set membership
+somewhere else in the scene that was working a moment ago.
