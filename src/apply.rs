@@ -22,7 +22,7 @@ use crate::{
     rdl2::{Context, Error, Object, Timestep},
     value::{Reference, Value},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// `SceneVariables` has no name, and rdl2 reaches it by class alone.
 const SCENE_VARIABLES: &str = "SceneVariables";
@@ -56,6 +56,7 @@ const SCENE_VARIABLES: &str = "SceneVariables";
 /// Both are reported, because a full rebuild that renders correctly
 /// and slowly is invisible in the image and shows up only as time.
 pub fn apply_affected(
+    scene: &nsi_intermediate::Scene,
     document: &Document,
     previous: Option<&Document>,
     context: &Context,
@@ -86,13 +87,23 @@ pub fn apply_affected(
     // The narrow path: only the objects whose handles upstream named.
     // `Object::name` is the ɴsɪ handle, which is what makes this a
     // filter rather than a second mapping.
+    //
+    // `Affected::roots` names *roots* rather than enumerating what is
+    // under them -- upstream will not walk a production scene to list
+    // every geometry beneath one moved transform. So the expansion
+    // happens here, once, with `Scene::descendants`, which is the call
+    // upstream documents a root as standing for.
+    let mut names: HashSet<&str> = HashSet::new();
+    for root in &affected.roots {
+        names.extend(scene.descendants(root));
+    }
+    names.extend(affected.shaders.iter().copied());
+
     let touched = |described: &Described| {
-        described.name.as_ref().is_some_and(|name| {
-            // `Affected` borrows from the scene now rather than
-            // owning copies of every handle, so these are `&str`.
-            affected.nodes.contains(name.as_str())
-                || affected.shaders.contains(name.as_str())
-        })
+        described
+            .name
+            .as_ref()
+            .is_some_and(|name| names.contains(name.as_str()))
     };
 
     let narrowed = Document {

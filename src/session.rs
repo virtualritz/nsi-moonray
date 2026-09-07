@@ -174,6 +174,7 @@ impl Session {
         };
 
         let (report, rebuilt) = apply_affected(
+            &self.scene,
             &flushed.document,
             Some(&self.applied),
             &live,

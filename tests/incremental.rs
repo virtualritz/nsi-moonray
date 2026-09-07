@@ -230,19 +230,33 @@ fn one_transform_edit_moves_the_shape_and_nothing_else_is_re_applied() {
     let changes = nsi.take_changes();
     let affected = nsi.affected(&changes);
 
+    // Upstream names *roots* rather than enumerating what hangs below
+    // them -- listing every geometry under one moved transform is
+    // O(scene) for the cheapest edit there is. The root stands for its
+    // descendants, and `Scene::descendants` is what expands it.
+    let reached: Vec<&str> = affected
+        .roots
+        .iter()
+        .flat_map(|root| nsi.descendants(root))
+        .collect();
     assert!(
-        affected.nodes.contains("quad"),
-        "upstream must name the quad as affected by its parent \
-         transform moving, or a backend has to re-derive ɴsɪ's scoping \
-         rules: {affected:?}"
+        reached.contains(&"quad"),
+        "upstream must reach the quad from the transform that moved, or \
+         a backend has to re-derive ɴsɪ's scoping rules: {affected:?}"
     );
     assert!(
         !affected.everything,
         "a transform edit is not a global change: {affected:?}"
     );
 
-    let (report, rebuilt) =
-        apply_affected(&flush(&nsi).document, None, &live, &changes, &affected);
+    let (report, rebuilt) = apply_affected(
+        &nsi,
+        &flush(&nsi).document,
+        None,
+        &live,
+        &changes,
+        &affected,
+    );
     assert!(report.is_empty(), "{report:?}");
     assert!(
         !rebuilt,
@@ -335,7 +349,14 @@ fn a_shader_edit_reaches_the_image() {
         "upstream must name the shader: {affected:?}"
     );
 
-    apply_affected(&flush(&nsi).document, None, &live, &changes, &affected);
+    apply_affected(
+        &nsi,
+        &flush(&nsi).document,
+        None,
+        &live,
+        &changes,
+        &affected,
+    );
 
     // Deliberately no `scene_updated()` yet.
     let after = frame(&render);
@@ -403,8 +424,14 @@ fn a_created_node_falls_back_and_reports() {
 
     let changes = nsi.take_changes();
     let affected = nsi.affected(&changes);
-    let (report, rebuilt) =
-        apply_affected(&flush(&nsi).document, None, &live, &changes, &affected);
+    let (report, rebuilt) = apply_affected(
+        &nsi,
+        &flush(&nsi).document,
+        None,
+        &live,
+        &changes,
+        &affected,
+    );
 
     assert!(rebuilt, "a created node must force a full re-apply");
     assert!(
