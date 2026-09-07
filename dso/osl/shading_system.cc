@@ -446,6 +446,164 @@ shading_system()
 
 namespace {
 
+scene_rdl2::math::Color
+to_colour(const OSL::Color3& colour)
+{
+    return scene_rdl2::math::Color(colour.x, colour.y, colour.z);
+}
+
+/// One walk of a closure tree, summing whatever `keep` picks out.
+///
+/// The two questions that need a tree walk without a `BsdfBuilder` --
+/// what does this emit, and what does it let through -- differ only in
+/// which components count, so they share the descent. Weights fold
+/// down it the same way the lobe walk folds them.
+template <typename Keep>
+scene_rdl2::math::Color
+sum(const OSL::ClosureColor* closure, const scene_rdl2::math::Color& weight,
+    const Keep& keep)
+{
+    if (closure == nullptr) {
+        return scene_rdl2::math::sBlack;
+    }
+
+    switch (closure->id) {
+    case OSL::ClosureColor::MUL: {
+        const auto* mul = closure->as_mul();
+        return sum(mul->closure, weight * to_colour(mul->weight), keep);
+    }
+    case OSL::ClosureColor::ADD: {
+        const auto* add = closure->as_add();
+        return sum(add->closureA, weight, keep)
+             + sum(add->closureB, weight, keep);
+    }
+    default: {
+        const auto* component = closure->as_comp();
+        // The closures that carry other closures rather than
+        // scattering themselves. Descending through them is what makes
+        // a 3Delight shader's emission reachable at all: every part of
+        // its `Ci` is wrapped in an `outputvariable` and layered with
+        // `layer_closures`.
+        switch (component->id) {
+        case CLOSURE_MX_LAYER: {
+            const auto* params = component->as<MxLayerParams>();
+            return sum(params->top, weight, keep)
+                 + sum(params->base, weight, keep);
+        }
+        case CLOSURE_DL_LAYER: {
+            const auto* params = component->as<DlLayerParams>();
+            return sum(params->top, weight * to_colour(params->top_mask),
+                       keep)
+                 + sum(params->bottom, weight, keep);
+        }
+        case CLOSURE_DL_OUTPUT_VARIABLE: {
+            const auto* params = component->as<DlOutputVariableParams>();
+            return sum(params->value, weight, keep);
+        }
+        default:
+            return keep(component, weight * to_colour(component->w));
+        }
+    }
+    }
+}
+
+} // namespace
+
+const OSL::ClosureColor*
+execute(const OSL::ShaderGroupRef& group,
+        const moonray::shading::Xform* xform, const Attributes& attributes,
+        const moonray::shading::State& state)
+{
+    OSL::ShadingSystem& shading = shading_system();
+
+    // One context per thread, kept for the life of the thread: getting
+    // one is not free, and shading is the inner loop.
+    thread_local OSL::PerThreadInfo* threadInfo =
+        shading.create_thread_info();
+    thread_local OSL::ShadingContext* context =
+        shading.get_context(threadInfo);
+
+    const scene_rdl2::math::Vec3f& position = state.getP();
+    const scene_rdl2::math::Vec3f& normal = state.getN();
+    const scene_rdl2::math::Vec3f& geometric = state.getNg();
+    const scene_rdl2::math::Vec3f& outgoing = state.getWo();
+    const scene_rdl2::math::Vec2f& st = state.getSt();
+    const scene_rdl2::math::Vec3f& dPds = state.getdPds();
+    const scene_rdl2::math::Vec3f& dPdt = state.getdPdt();
+
+    OSL::ShaderGlobals globals = {};
+    globals.P = OSL::Vec3(position.x, position.y, position.z);
+    globals.N = OSL::Vec3(normal.x, normal.y, normal.z);
+    globals.Ng = OSL::Vec3(geometric.x, geometric.y, geometric.z);
+    // OSL's `I` is the direction the ray *travelled*, which is the
+    // opposite of MoonRay's `wo`, the direction back towards the
+    // viewer.
+    globals.I = OSL::Vec3(-outgoing.x, -outgoing.y, -outgoing.z);
+    globals.u = st.x;
+    globals.v = st.y;
+    globals.dPdu = OSL::Vec3(dPds.x, dPds.y, dPds.z);
+    globals.dPdv = OSL::Vec3(dPdt.x, dPdt.y, dPdt.z);
+    globals.surfacearea = 1.0f;
+    globals.backfacing = state.isEntering() ? 0 : 1;
+    globals.flipHandedness = 0;
+    globals.raytype = 1;
+
+    // What `RendererServices` asks back through. Both handles are
+    // needed: the `Xform` carries the scene's spaces, and the `State`
+    // is what resolves *object* space, which for an instanced
+    // prototype is per shading point rather than per material.
+    const ShadingPoint point { xform, &state, &attributes };
+    globals.renderstate = const_cast<ShadingPoint*>(&point);
+    // OSL reaches object and shader space through these, and both
+    // land on the same resolution as the named spaces.
+    globals.object2common =
+        reinterpret_cast<OSL::TransformationPtr>(&point);
+    globals.shader2common =
+        reinterpret_cast<OSL::TransformationPtr>(&point);
+
+    shading.execute(context, *group, globals);
+    return globals.Ci;
+}
+
+scene_rdl2::math::Color
+emission_of(const OSL::ClosureColor* closure,
+            const scene_rdl2::math::Color& weight)
+{
+    return sum(closure, weight,
+               [](const OSL::ClosureComponent* component,
+                  const scene_rdl2::math::Color& weight) {
+                   switch (component->id) {
+                   case CLOSURE_EMISSION:
+                       // `emission()` has no parameters: the weight it
+                       // was multiplied by *is* the radiance.
+                       return weight;
+                   case CLOSURE_MX_UNIFORM_EDF:
+                       return weight
+                              * to_colour(
+                                  component->as<MxUniformEdfParams>()
+                                      ->emittance);
+                   default:
+                       return scene_rdl2::math::sBlack;
+                   }
+               });
+}
+
+scene_rdl2::math::Color
+transparency(const OSL::ClosureColor* closure,
+             const scene_rdl2::math::Color& weight)
+{
+    return sum(closure, weight,
+               [](const OSL::ClosureComponent* component,
+                  const scene_rdl2::math::Color& weight) {
+                   return component->id == CLOSURE_TRANSPARENT
+                                  || component->id == CLOSURE_MX_TRANSPARENT
+                              ? weight
+                              : scene_rdl2::math::sBlack;
+               });
+}
+
+namespace {
+
 /// One OSL type, as the MoonRay primitive-attribute key for a name.
 ///
 /// -1 for a type MoonRay has no primitive attribute for. The list is

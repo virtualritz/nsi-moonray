@@ -11,6 +11,8 @@
 #include <OSL/oslclosure.h>
 #include <OSL/rendererservices.h>
 
+#include <scene_rdl2/common/math/Color.h>
+
 #include <string>
 #include <vector>
 
@@ -325,6 +327,36 @@ struct MxLayerParams {
 /// any one render, and a `ShadingSystem` destroyed while a
 /// `ShaderGroup` is alive is undefined.
 OSL::ShadingSystem& shading_system();
+
+/// Run one shader group at one shading point, and hand back its `Ci`.
+///
+/// Shared by everything that runs a surface network: the material's
+/// shading, its presence -- MoonRay asks for that on its own function,
+/// before shading, so there is nowhere to answer both at once -- and
+/// the `OslMap` a `MeshLight` samples.
+const OSL::ClosureColor* execute(const OSL::ShaderGroupRef& group,
+                                 const moonray::shading::Xform* xform,
+                                 const Attributes& attributes,
+                                 const moonray::shading::State& state);
+
+/// What a closure tree emits, weighted.
+///
+/// Its own walk rather than a step inside the lobe walk, because two
+/// things ask: the `Osl` material, which hands it to
+/// `BsdfBuilder::addEmission`, and `OslMap`, which is what a
+/// `MeshLight` samples to find the radiance of a point on its mesh.
+/// One implementation, so a light and the surface it is cannot
+/// disagree about how bright the surface is.
+scene_rdl2::math::Color emission_of(const OSL::ClosureColor* closure,
+                                    const scene_rdl2::math::Color& weight);
+
+/// What a closure tree asks to pass straight through.
+///
+/// `transparent()` has no MoonRay lobe -- straight-through
+/// transmission is *presence* there -- so it is summed on its own walk
+/// and read by `Osl::presence`.
+scene_rdl2::math::Color transparency(const OSL::ClosureColor* closure,
+                                     const scene_rdl2::math::Color& weight);
 
 /// Point the shared system at a place to find `.oso` files.
 ///

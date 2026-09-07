@@ -168,7 +168,47 @@ for a surface — a displacement moves vertices, and a stand-in that does
 not move them renders a different shape — so without OSL the binding is
 reported and dropped.
 
-## Emission is not a light
+## Emission is not a light, and `OslMap` is what makes it one
+
+`emission()` becomes `addEmission`, and that is **hit-only**: MoonRay's
+integrator does `radiance += pathThroughput * bsdf->getSelfEmission()`
+and nothing else — no next-event estimation, no shadow rays. An
+emissive shader therefore *looks* bright and lights nothing around it.
+
+What lights a scene in MoonRay is a `MeshLight`, which
+importance-samples a mesh's surface. Its radiance is one `color` times
+one `intensity` for the whole mesh — unless it is given a
+`map_shader`, which `MeshLight::sampleMapShader` calls per point with a
+full shading `State` built from a real intersection on the light's own
+mesh: position, normal, `uv`, and the primitive attributes the map
+asked for.
+
+`OslMap` is that map. It runs the same network the surface runs and
+walks the closure tree for **emission alone**, so an OSL light whose
+emission is a 3D noise in colour *and* intensity is a light that varies
+over its own surface and is sampled properly. `emission_of` is shared
+with the `Osl` material rather than reimplemented — a light and the
+surface it is must not disagree about how bright the surface is — and
+it descends through `layer_closures`, `layer` and `outputvariable`,
+without which a 3Delight shader's emission is unreachable at all.
+
+Three things a scene has to do, each measured rather than assumed:
+
+- **Duplicate the geometry.** `createMeshLightLayer` refuses a geometry
+  that is already in the render layer, citing circular shadow-link
+  dependencies and conflicting face-set tessellation. An object that is
+  both a shaded surface and a light needs two copies: one in the layer
+  wearing the `Osl` material, one outside it driving the light.
+- **Put the light's copy in a `GeometrySet`.** Geometry in no set is
+  never tessellated, and the light then reports "MeshLight contains no
+  faces" — which reads like a broken light rather than a missing set.
+- **Have a `DwaBaseMaterial`.** See `dso/meshlight/`: MoonRay hard-codes
+  a class it does not ship, so without a stand-in *no* scene containing
+  a mesh light renders at all.
+
+`specs/003-osl/research.md` O2 and O3.
+
+## The hit-only path, which is still right for the surface itself
 
 `emission()` becomes `addEmission`, and that is **hit-only**: MoonRay's
 integrator does `radiance += pathThroughput * bsdf->getSelfEmission()`

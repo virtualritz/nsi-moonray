@@ -3,6 +3,7 @@
 /tools/scalar-material/build
 /tools/osl-probe/build
 /dso/osl/build
+/dso/meshlight/build
 
 # Test renders. `tests/render.rs` names its own output and
 # `SceneVariables` writes `scene.exr` beside whatever ran a render, so

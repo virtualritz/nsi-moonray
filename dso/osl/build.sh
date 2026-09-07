@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the `Osl` material and `OslDisplacement` DSOs.
+# Build the `Osl` material, `OslDisplacement` and `OslMap` DSOs.
 #
 # Compiled directly rather than through MoonRay's `moonray_dso_simple`,
 # which lives in MoonRay's build tree and whose CMake config pulls in a
@@ -47,4 +47,19 @@ g++ $flags -DNSI_MOONRAY_OSL_ROOT=rdl2::Displacement \
     "$here/attributes.cc" -o "$out/OslDisplacement.so.proxy" \
     -L"$moonray/lib64" -L"$moonray/lib" -lscene_rdl2
 
-echo "built $out/Osl.so, $out/OslDisplacement.so and their proxies"
+# The emission of a network, for a `MeshLight` to sample. This is what
+# makes an OSL light light the scene rather than merely look bright.
+# shellcheck disable=SC2086
+g++ $flags "$here/OslMap.cc" "$here/shading_system.cc" \
+    -o "$out/OslMap.so" \
+    -L"$moonray/lib64" -L"$moonray/lib" -lscene_rdl2 -lrendering_shading \
+    -L"$osl/lib" -loslexec -lOpenImageIO -lOpenImageIO_Util \
+    -Wl,-rpath,"$osl/lib"
+
+# shellcheck disable=SC2086
+g++ $flags -DNSI_MOONRAY_OSL_ROOT=rdl2::Map \
+    "$here/attributes.cc" -o "$out/OslMap.so.proxy" \
+    -L"$moonray/lib64" -L"$moonray/lib" -lscene_rdl2
+
+echo "built $out/Osl.so, $out/OslDisplacement.so, $out/OslMap.so and \
+their proxies"

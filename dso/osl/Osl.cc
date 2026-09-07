@@ -150,7 +150,6 @@ struct Walk {
     /// own. `subsurface` is one: OSL declares no `N` formal for it, and
     /// a shader that passes none means "the surface's".
     scene_rdl2::math::Vec3f normal;
-    scene_rdl2::math::Color emission = scene_rdl2::math::sBlack;
     /// Closure ids seen that have no MoonRay lobe. Reported once per
     /// material rather than per shading point, which would be one line
     /// per pixel.
@@ -287,7 +286,7 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
         // shadow rays. An ɴsɪ emitter that is meant to light the scene
         // becomes a `MeshLight` in the flush instead
         // (`specs/003-osl/research.md` O2, O3).
-        walk.emission = walk.emission + total;
+        return;
         return;
 
     case CLOSURE_DIFFUSE: {
@@ -463,11 +462,9 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
         return;
     }
 
-    case CLOSURE_MX_UNIFORM_EDF: {
-        const auto* params = component->as<MxUniformEdfParams>();
-        walk.emission = walk.emission + total * to_color(params->emittance);
+    case CLOSURE_MX_UNIFORM_EDF:
+        // MaterialX's emission. See `CLOSURE_EMISSION`.
         return;
-    }
 
     case CLOSURE_MX_LAYER: {
         // Two closures rather than parameters, and the closure that
@@ -546,41 +543,6 @@ walk_closure(Walk& walk, const OSL::ClosureColor* closure,
     default:
         ++walk.unmapped;
         return;
-    }
-}
-
-/// What a closure tree asks to pass straight through.
-///
-/// Its own walk rather than a field on `Walk`: presence is evaluated
-/// on MoonRay's own function, with no `BsdfBuilder` in hand, so the
-/// lobe-building walk cannot be reused. This one visits the same tree
-/// and sums only `transparent()`.
-scene_rdl2::math::Color
-transparency(const OSL::ClosureColor* closure,
-             const scene_rdl2::math::Color& weight)
-{
-    if (closure == nullptr) {
-        return scene_rdl2::math::sBlack;
-    }
-
-    switch (closure->id) {
-    case OSL::ClosureColor::MUL: {
-        const auto* mul = closure->as_mul();
-        return transparency(mul->closure, weight * to_color(mul->weight));
-    }
-    case OSL::ClosureColor::ADD: {
-        const auto* add = closure->as_add();
-        return transparency(add->closureA, weight)
-             + transparency(add->closureB, weight);
-    }
-    default: {
-        const auto* component = closure->as_comp();
-        if (component->id == CLOSURE_TRANSPARENT
-            || component->id == CLOSURE_MX_TRANSPARENT) {
-            return weight * to_color(component->w);
-        }
-        return scene_rdl2::math::sBlack;
-    }
     }
 }
 
@@ -705,70 +667,6 @@ Osl::update()
     }
 }
 
-/// Run the group at one shading point, and hand back its `Ci`.
-///
-/// Shared by shading and presence, which are two evaluations of the
-/// same network -- MoonRay asks for presence on its own function,
-/// before shading, so there is nowhere to answer both at once.
-namespace {
-
-const OSL::ClosureColor*
-execute(const OSL::ShaderGroupRef& group, const Xform* xform,
-        const Attributes& attributes, const State& state)
-{
-    OSL::ShadingSystem& shading = shading_system();
-
-    // One context per thread, kept for the life of the thread: getting
-    // one is not free, and shading is the inner loop.
-    thread_local OSL::PerThreadInfo* threadInfo =
-        shading.create_thread_info();
-    thread_local OSL::ShadingContext* context =
-        shading.get_context(threadInfo);
-
-    const scene_rdl2::math::Vec3f& position = state.getP();
-    const scene_rdl2::math::Vec3f& normal = state.getN();
-    const scene_rdl2::math::Vec3f& geometric = state.getNg();
-    const scene_rdl2::math::Vec3f& outgoing = state.getWo();
-    const scene_rdl2::math::Vec2f& st = state.getSt();
-    const scene_rdl2::math::Vec3f& dPds = state.getdPds();
-    const scene_rdl2::math::Vec3f& dPdt = state.getdPdt();
-
-    OSL::ShaderGlobals globals = {};
-    globals.P = OSL::Vec3(position.x, position.y, position.z);
-    globals.N = OSL::Vec3(normal.x, normal.y, normal.z);
-    globals.Ng = OSL::Vec3(geometric.x, geometric.y, geometric.z);
-    // OSL's `I` is the direction the ray *travelled*, which is the
-    // opposite of MoonRay's `wo`, the direction back towards the
-    // viewer.
-    globals.I = OSL::Vec3(-outgoing.x, -outgoing.y, -outgoing.z);
-    globals.u = st.x;
-    globals.v = st.y;
-    globals.dPdu = OSL::Vec3(dPds.x, dPds.y, dPds.z);
-    globals.dPdv = OSL::Vec3(dPdt.x, dPdt.y, dPdt.z);
-    globals.surfacearea = 1.0f;
-    globals.backfacing = state.isEntering() ? 0 : 1;
-    globals.flipHandedness = 0;
-    globals.raytype = 1;
-
-    // What `RendererServices` asks back through. Both handles are
-    // needed: the `Xform` carries the scene's spaces, and the `State`
-    // is what resolves *object* space, which for an instanced
-    // prototype is per shading point rather than per material.
-    const ShadingPoint point { xform, &state, &attributes };
-    globals.renderstate = const_cast<ShadingPoint*>(&point);
-    // OSL reaches object and shader space through these, and both
-    // land on the same resolution as the named spaces.
-    globals.object2common =
-        reinterpret_cast<OSL::TransformationPtr>(&point);
-    globals.shader2common =
-        reinterpret_cast<OSL::TransformationPtr>(&point);
-
-    shading.execute(context, *group, globals);
-    return globals.Ci;
-}
-
-} // namespace
-
 void
 Osl::shade(const scene_rdl2::rdl2::Material* self,
            moonray::shading::TLState* /*tls*/,
@@ -780,15 +678,21 @@ Osl::shade(const scene_rdl2::rdl2::Material* self,
         return;
     }
 
+    const OSL::ClosureColor* closure =
+        execute(me->mGroup, me->mXform.get(), me->mAttributes, state);
+
     Walk walk { bsdfBuilder, ispc::BSDFBUILDER_ADDITIVE, 0,
                 state.getN() };
-    walk_closure(walk,
-                 execute(me->mGroup, me->mXform.get(), me->mAttributes,
-                         state),
-                 scene_rdl2::math::sWhite);
+    walk_closure(walk, closure, scene_rdl2::math::sWhite);
 
-    if (!isBlack(walk.emission)) {
-        bsdfBuilder.addEmission(walk.emission);
+    // Emission on its own walk rather than out of the lobe walk: a
+    // `MeshLight`'s `OslMap` asks the same question of the same
+    // network, and one implementation is what keeps a light and the
+    // surface it is from disagreeing about how bright it is.
+    const scene_rdl2::math::Color emission =
+        emission_of(closure, scene_rdl2::math::sWhite);
+    if (!isBlack(emission)) {
+        bsdfBuilder.addEmission(emission);
     }
 }
 
