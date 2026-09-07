@@ -469,14 +469,84 @@ Each case argues for the check differently:
 machine with no OSL may be rendered on one that has it, and the check
 costs no C++ toolchain either way.
 
+### O11: Displacement is a usage, not a second shading system
+
+ɴsɪ's `displacementshader` binding and MoonRay's `Displacement` root
+shader meet with less machinery than expected. OSL has **no
+displacement closure**: a displacement shader assigns to `P`, and the
+usage it was compiled into a group with -- `"displacement"` rather than
+`"surface"` -- is what permits that. So `OslDisplacement` is `Osl` with
+one string changed, and what MoonRay is handed back is `P` after minus
+`P` before.
+
+Two things were measured before writing any of it:
+
+- MoonRay displaces a plain `RdlMeshGeometry` at `mesh_resolution` 1.
+  Displacement was expected to need tessellation; it does not for a
+  uniform push, and the resolution only controls how finely a *varying*
+  displacement is sampled. Coverage went 0.592 → 0.800 with
+  `NormalDisplacement` at height 0.5, and `OslDisplacement` running
+  `P = P + 0.5 * normalize(N)` gives 0.800074 -- the same number.
+- **rdl2 names are unique across classes.** `Osl("/x")` beside
+  `OslDisplacement("/x")` is a hard error at scene load, not a
+  shadowing. So a shader node becomes exactly one object and its
+  binding decides the class.
+
+And one thing was found only by running it: the shim's
+`nmr_layer_assign` called `Layer::assign`'s four-argument overload,
+which has no displacement column. Every in-process render would have
+dropped the binding and rendered the undisplaced shape, silently.
+
+### O12: OSL knows what it needs, and MoonRay needs to be told
+
+Two of MoonRay's interfaces are pay-per-shader, and OSL's optimizer
+answers both without a guess.
+
+**Presence.** `transparent()` has no MoonRay lobe -- MoonRay expresses
+straight-through transmission as *presence*, one scalar on
+`mPresenceFunc`, evaluated before shading. Answering it means running
+the whole network a second time, which no shader should pay for
+without a `transparent()` in it. `closures_needed` is what the
+optimizer found the group may emit, and `unknown_closures_needed` is
+its own admission that it could not tell -- in which case the material
+pays rather than rendering opaque a surface a shader asked to see
+through. Measured on `amount * transparent() + (1 - amount) *
+diffuse(N)`: alpha 0.592, 0.296, 0.059 at 0, 0.5, 0.9.
+
+**Primitive attributes.** MoonRay attaches one to an intersection only
+if a shader asked for it, through `Shader::mOptionalAttributes`. OSL
+reports `attributes_needed`, `attribute_scopes` and `attribute_types`
+for every `getattribute()` in the group, so `update()` asks, resolves
+each name to a MoonRay `AttributeKey` once -- the lookup takes a lock
+and `getattribute()` is the inner loop -- and requests exactly those.
+
+Both attributes are only populated after optimization, so `update()`
+calls `optimize_group` rather than waiting for the first shading point.
+
+### O13: `uv_list` is honoured, and a test for it has to scale
+
+An ɴsɪ mesh's `st` becomes MoonRay's `uv_list`, per face-vertex, and
+reaches an OSL shader as `u` and `v`. Halving the UVs halves what the
+shader reads.
+
+**Without any `uv_list` MoonRay parametrises the face itself**, which
+for a quad is also 0..1. So a test asserting that `u` varies across the
+quad passes with `st` carried nowhere at all -- which is what the first
+draft of that test did. It scales instead.
+
 ## Open questions
 
-- **Displacement.** ɴsɪ has `displacementshader`; MoonRay has a
-  `Displacement` root shader with the same shape as `Material`. The
-  same DSO trick should apply, with `displacement()` closures.
-- **Volumes.** OSL volume closures against MoonRay's `VolumeShader`.
-  Later.
+- **Volumes.** OSL's `anisotropic_vdf` and `medium_vdf` against
+  MoonRay's `VolumeShader`, whose interface is four separate virtuals
+  -- extinction, albedo, emission, anisotropy -- against OSL's one
+  execution. And ɴsɪ volume geometry, which this backend does not carry
+  at all yet.
 - **AOVs and LPEs.** MoonRay's lobe labels are how light-path
-  expressions work, and OSL closures carry their own AOV names. These
-  are two naming systems for the same thing and they have to be
-  reconciled or one of them silently wins.
+  expressions work, and OSL closures carry their own AOV names. The
+  material declares the vocabulary and sets the index per lobe --
+  `RenderContext.cc` reads `labels` off the scene class and matches it
+  against the AOV schema, which is the mechanism -- but nothing in this
+  backend yet turns an ɴsɪ `outputlayer` into a material AOV, so the
+  plumbing is untested end to end.
+- **Scoped `getattribute`.** Answered for the unscoped form only. OSL's
+  scoped form names a renderer concept ɴsɪ has no vocabulary for.
