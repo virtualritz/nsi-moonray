@@ -65,6 +65,22 @@ const CAMERAS: [(&str, &str); 4] = [
     ("sphericalcamera", "SphericalCamera"),
 ];
 
+/// Whether a node type is one of the interface's cameras.
+///
+/// The specification is explicit that "all camera nodes share a set of
+/// common attributes", `shutterrange` among them, so anything reading
+/// one has to accept every camera type rather than the perspective one
+/// -- an orthographic shot whose shutter is ignored still blurs, over
+/// whatever interval the scene's motion happens to span.
+///
+/// `cylindricalcamera` counts here even though [`CAMERAS`] has no class
+/// for it. The shutter is a property of the scene, and it stays right
+/// when the projection is the thing MoonRay cannot do.
+fn is_camera(node_type: &str) -> bool {
+    node_type == "cylindricalcamera"
+        || CAMERAS.iter().any(|(nsi, _)| *nsi == node_type)
+}
+
 /// The MoonRay class one camera node becomes.
 fn camera_class(scene: &Scene, handle: &str) -> &'static str {
     scene
@@ -1111,7 +1127,7 @@ fn velocity(
 /// `None` when nothing moves, which is the ordinary case.
 fn shutter(scene: &Scene) -> Option<[f64; 2]> {
     for (handle, node) in scene.nodes() {
-        if node.node_type() != "perspectivecamera" {
+        if !is_camera(node.node_type()) {
             continue;
         }
         if let Some(OwnedData::F64(values)) =
@@ -4786,6 +4802,69 @@ mod tests {
             "the transform must be interpolated to the shutter's \
              ends\n{rdla}"
         );
+    }
+
+    /// **Every camera node carries `shutterrange`, not just the
+    /// perspective one.**
+    ///
+    /// The specification says so in as many words: "All camera nodes
+    /// share a set of common attributes", and `shutterrange` is the
+    /// second of them. Reading it off `perspectivecamera` alone leaves
+    /// an orthographic shot falling back to the union of every motion
+    /// time in the scene -- which is a *plausible* blur over the wrong
+    /// interval, with nothing said anywhere.
+    #[test]
+    fn any_camera_node_carries_the_shutter_range() {
+        for node_type in
+            ["orthographiccamera", "fisheyecamera", "sphericalcamera"]
+        {
+            let mut scene = triangle();
+            // `triangle` brings a perspective camera; this replaces the
+            // one the screen is connected to.
+            scene.delete("cam").expect("a recordable edit");
+            scene.create("cam", node_type).expect("a recordable edit");
+            scene.connect("cam", None, ".root", "objects").unwrap();
+            scene.connect("screen", None, "cam", "screens").unwrap();
+            scene
+                .set_attribute(
+                    "cam",
+                    vec![arg(
+                        "shutterrange",
+                        Type::F64,
+                        OwnedData::F64(vec![0.25, 0.75]),
+                    )],
+                )
+                .expect("a recordable edit");
+
+            scene.create("xf", "transform").expect("a recordable edit");
+            scene.connect("xf", None, ".root", "objects").unwrap();
+            for (time, x) in [(0.0, 0.0), (1.0, 4.0)] {
+                scene
+                    .set_attribute_at_time("xf", time, vec![translation(x)])
+                    .expect("a recordable edit");
+            }
+            scene.create("m", "mesh").expect("a recordable edit");
+            scene.connect("m", None, "xf", "objects").unwrap();
+
+            let rdla = flush(&scene).to_rdla();
+
+            assert!(
+                rdla.contains("[\"motion_steps\"] = { 0.25, 0.75}"),
+                "a {node_type} shutter decides the interval\n{rdla}"
+            );
+            // A quarter and three quarters of the way along a 0->4
+            // move. Without the camera's range the union 0->1 is used,
+            // and these become 0 and 4.
+            assert!(
+                rdla.contains(
+                    "Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1)"
+                ) && rdla.contains(
+                    "Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1)"
+                ),
+                "a {node_type} shutter interpolates the transform to its \
+                 ends\n{rdla}"
+            );
+        }
     }
 
     /// **`T2.3`.** `P` sampled over time becomes two vertex lists.
