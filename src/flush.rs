@@ -2539,6 +2539,12 @@ fn camera(
             Some(degrees) => {
                 object = object
                     .set("focal", Value::Float(focal(degrees, resolution)));
+                report_perspective_window(
+                    screen_window(scene, resolution),
+                    resolution,
+                    handle,
+                    flushed,
+                );
             }
             None => flushed.limitations.push(format!(
                 "camera {handle:?} has no \"fov\"; MoonRay's default focal \
@@ -3003,6 +3009,46 @@ fn screen_window(scene: &Scene, resolution: (i32, i32)) -> [f64; 4] {
 
     let aspect = f64::from(resolution.0) / f64::from(resolution.1.max(1));
     [-aspect, -1.0, aspect, 1.0]
+}
+
+/// Say when a perspective camera's screen window is not the one its
+/// `fov` describes.
+///
+/// The interface's two settings work together: `fov` gives the angle
+/// and `screenwindow` the rectangle it covers. MoonRay has only the
+/// first -- `focal`, against a fixed film back -- so a scene that
+/// narrows or shifts the window gets a frame `fov` alone decides.
+///
+/// **Reported rather than approximated.** A window scaled uniformly
+/// could be folded into the focal length, but one that is not, or one
+/// that is off centre, could not, and a rule that silently handles
+/// some framings and not others is worse than one that handles none
+/// and says which.
+fn report_perspective_window(
+    window: [f64; 4],
+    resolution: (i32, i32),
+    handle: &str,
+    flushed: &mut Flushed,
+) {
+    let aspect = f64::from(resolution.0) / f64::from(resolution.1.max(1));
+    let default = [-aspect, -1.0, aspect, 1.0];
+
+    // Generous, because the default is computed from integers and a
+    // scene that writes it out by hand should not be reported.
+    let differs = window
+        .iter()
+        .zip(default.iter())
+        .any(|(had, want)| (had - want).abs() > 1e-6 * want.abs().max(1.0));
+
+    if differs {
+        let [left, bottom, right, top] = window;
+        flushed.limitations.push(format!(
+            "camera {handle:?} sets a screen window \
+             [{left}, {bottom}, {right}, {top}] rather than the \
+             default for its frame; MoonRay has no screen window and \
+             the framing follows \"fov\" alone"
+        ));
+    }
 }
 
 /// An orthographic camera's extent, which is the screen window and
@@ -5014,6 +5060,65 @@ mod tests {
             ),
             "the transform must be interpolated to the shutter's \
              ends\n{rdla}"
+        );
+    }
+
+    /// A perspective camera's screen window is not carried, and the
+    /// scene is told rather than left with a frame it did not ask for.
+    #[test]
+    fn a_perspective_screen_window_is_reported() {
+        let mut scene = triangle();
+        scene
+            .set_attribute(
+                "screen",
+                vec![arg(
+                    "screenwindow",
+                    Type::F64,
+                    OwnedData::F64(vec![-0.5, -0.5, 0.5, 0.5]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("\"cam\"")
+                    && line.contains("screen window")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// The default window is not a change, and is not reported. The
+    /// specification computes it from the frame aspect ratio, so a
+    /// scene that writes it out explicitly says nothing new.
+    #[test]
+    fn the_default_perspective_screen_window_is_not_reported() {
+        let mut scene = triangle();
+        // 320x240, so f = 4/3.
+        scene
+            .set_attribute(
+                "screen",
+                vec![arg(
+                    "screenwindow",
+                    Type::F64,
+                    OwnedData::F64(vec![-4.0 / 3.0, -1.0, 4.0 / 3.0, 1.0]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+
+        assert!(
+            !flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("screen window")),
+            "{:?}",
+            flushed.limitations
         );
     }
 
