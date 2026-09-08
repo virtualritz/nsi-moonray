@@ -123,8 +123,9 @@ impl Render {
 /// Find MoonRay's renderer binary.
 ///
 /// `$MOONRAY` names it outright; `$MOONRAY_ROOT` and `$REZ_MOONRAY_ROOT`
-/// name an install whose `bin/` holds it; otherwise it has to be on
-/// `PATH`.
+/// name an install whose `bin/` holds it; then `PATH`; and finally the
+/// same places [`crate::dso`] looks for scene classes, since the
+/// renderer and its classes come out of one install.
 pub fn binary() -> Result<PathBuf, Error> {
     if let Some(path) = env::var_os("MOONRAY") {
         let path = PathBuf::from(path);
@@ -146,6 +147,21 @@ pub fn binary() -> Result<PathBuf, Error> {
     if let Some(paths) = env::var_os("PATH") {
         for directory in env::split_paths(&paths) {
             let path = directory.join(MOONRAY);
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
+    }
+
+    // **The same install the scene classes come from.** `crate::dso`
+    // finds `rdl2dso` beside the running binary and in the platform's
+    // own locations; the renderer sits in `bin/` of the same prefix.
+    // Searching only one of the two is how you get a `mnry` that
+    // resolves every class and then reports no renderer -- which is
+    // exactly what an install from `just setup` did.
+    for classes in crate::dso::searched() {
+        if let Some(prefix) = classes.parent() {
+            let path = prefix.join("bin").join(MOONRAY);
             if path.is_file() {
                 return Ok(path);
             }

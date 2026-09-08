@@ -285,7 +285,20 @@ if [ ! -d "$VENDOR/$OIDN" ]; then
     tar xzf "$VENDOR/$OIDN.tar.gz" -C "$VENDOR"
 fi
 cp -a "$VENDOR/$OIDN/include/." "$PREFIX/include/"
-cp -a "$VENDOR/$OIDN/lib/." "$PREFIX/lib/"
+# **Only OpenImageDenoise's own libraries.** Its binary release bundles
+# a TBB, a SYCL runtime and a Level Zero loader, and copying the lot
+# puts an older `libtbb.so.12` in the prefix where it shadows the one
+# everything else was built against. That surfaces much later, as
+#
+#     libopenvdb.so.13.0: undefined symbol:
+#     ...get_thread_reference_vertex...
+#
+# when the renderer loads -- a symbol in a library nobody chose,
+# naming neither OIDN nor the copy that put it there.
+for library in "$VENDOR/$OIDN"/lib/libOpenImageDenoise*; do
+    [ -e "$library" ] && cp -a "$library" "$PREFIX/lib/"
+done
+cp -a "$VENDOR/$OIDN/lib/cmake" "$PREFIX/lib/" 2>/dev/null || true
 
 step "mcrt_denoise"
 CMAKE_MODULES_ROOT="$MODULES" cmake -S "$VENDOR/mcrt_denoise" -B "$VENDOR/build-denoise" \
