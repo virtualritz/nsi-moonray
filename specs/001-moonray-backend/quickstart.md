@@ -48,7 +48,7 @@ Roughly 15 minutes on four cores.
 ISPC_HEADER_DIRECTORY /${relBinDir}
 ```
 
-— a leading slash. With `-G Ninja` the generated header is declared as
+-- a leading slash. With `-G Ninja` the generated header is declared as
 an output at `/lib/common/math/ispc/…` (absolute, at the filesystem
 root) while every consumer depends on `lib/common/math/ispc/…`
 (relative to the build tree), and the build dies with
