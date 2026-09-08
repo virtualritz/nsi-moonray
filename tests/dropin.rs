@@ -112,7 +112,8 @@ fn a_scene_recorded_through_the_library_is_written_out() {
     );
     type RenderControl = unsafe extern "C" fn(c_int, c_int, *const Param);
 
-    let scene_file = std::env::temp_dir().join("nsi-moonray-dropin.rdla");
+    let scene_file = std::env::temp_dir()
+        .join(format!("nsi-moonray-dropin-{}.rdla", std::process::id()));
     let _ = std::fs::remove_file(&scene_file);
     // SAFETY: single-threaded test setup, before any thread reads it.
     unsafe { std::env::set_var("NSI_MOONRAY_SCENE", &scene_file) };

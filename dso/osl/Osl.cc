@@ -43,13 +43,14 @@ namespace {
 /// outside the vocabulary becomes zero -- the lobe still shades, it
 /// just cannot be named by a material AOV or an LPE.
 int
-label_index(const OSL::ustring& label)
+label_index(const OSL::ustringhash& label_hash)
 {
     static const char* const known[] = {
         "diffuse", "specular", "transmission", "subsurface",
         "sheen",   "coat",     "emission",     "hair",
     };
 
+    const OIIO::ustring label = text(label_hash);
     if (label.empty()) {
         return 0;
     }
@@ -72,7 +73,7 @@ label_index(const OSL::ustring& label)
 /// A name with no lobe behind it -- `"albedo"`, which is data rather
 /// than scattering -- leaves the label alone.
 int
-aov_label(const OSL::ustring& name)
+aov_label(const OSL::ustringhash& name_hash)
 {
     static const struct {
         const char* aov;
@@ -85,9 +86,10 @@ aov_label(const OSL::ustring& name)
         { "hair", "hair" },
     };
 
+    const OIIO::ustring name = text(name_hash);
     for (const auto& entry : known) {
         if (name == entry.aov) {
-            return label_index(OSL::ustring(entry.label));
+            return label_index(OSL::ustringhash(entry.label));
         }
     }
     return 0;
@@ -116,10 +118,11 @@ is_grey(const scene_rdl2::math::Color& weight)
 /// GGX unless the shader said Beckmann. OSL names the distribution as
 /// a string; MoonRay as an enum, and it has exactly these two.
 ispc::MicrofacetDistribution
-distribution(const OSL::ustring& name)
+distribution(const OSL::ustringhash& name_hash)
 {
-    return name == "beckmann" ? ispc::MICROFACET_DISTRIBUTION_BECKMANN
-                              : ispc::MICROFACET_DISTRIBUTION_GGX;
+    return text(name_hash) == "beckmann"
+               ? ispc::MICROFACET_DISTRIBUTION_BECKMANN
+               : ispc::MICROFACET_DISTRIBUTION_GGX;
 }
 
 /// What one walk of a closure tree accumulates.
@@ -158,7 +161,7 @@ struct Walk {
 
 /// The label for one lobe: its own if it has one, the walk's otherwise.
 int
-labelled(const Walk& walk, const OSL::ustring& label)
+labelled(const Walk& walk, const OSL::ustringhash& label)
 {
     const int own = label_index(label);
     return own != 0 ? own : walk.label;

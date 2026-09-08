@@ -125,10 +125,23 @@ fn viewing(scene: &mut Scene, width: i32, height: i32) {
         .expect("known attribute");
 }
 
+/// A scratch directory of this test binary's own.
+///
+/// **Per process, not per suite.** `just ci` and `just test-rdl2` both
+/// run `tests/render.rs`, and with a renderer installed both actually
+/// render -- into the same path, at the same time, if the name is
+/// fixed. That is a test failure nobody can reproduce afterwards,
+/// because the loser's file is gone by the time anyone looks.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let path =
+        std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&path).expect("a writable temporary directory");
+    path
+}
+
 /// Render a scene and read the image back as RGB rows.
 fn render(name: &str, scene: &Scene, size: (usize, usize)) -> Image {
-    let directory = std::env::temp_dir().join("nsi-moonray-render");
-    fs::create_dir_all(&directory).expect("a writable temporary directory");
+    let directory = scratch("nsi-moonray-render");
     let scene_file = directory.join(format!("{name}.rdla"));
     let image = directory.join(format!("{name}.exr"));
     let _ = fs::remove_file(&image);
@@ -224,8 +237,7 @@ fn moonray_renders_what_the_flush_writes() {
         return;
     };
 
-    let directory = std::env::temp_dir().join("nsi-moonray-render");
-    fs::create_dir_all(&directory).expect("a writable temporary directory");
+    let directory = scratch("nsi-moonray-render");
     let scene_file = directory.join("triangle.rdla");
     let image: PathBuf = directory.join("triangle.exr");
     let _ = fs::remove_file(&image);
@@ -501,8 +513,7 @@ fn an_applications_callback_receives_the_rendered_pixels() {
     );
 
     let (width, height) = (32usize, 24usize);
-    let directory = std::env::temp_dir().join("nsi-moonray-render");
-    fs::create_dir_all(&directory).expect("a writable temporary directory");
+    let directory = scratch("nsi-moonray-render");
     let image = directory.join("callback.exr");
     let _ = fs::remove_file(&image);
 

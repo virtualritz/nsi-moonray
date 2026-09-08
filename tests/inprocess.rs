@@ -88,6 +88,20 @@ impl Canvas {
 /// `None`.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// A scratch directory of this test binary's own.
+///
+/// **Per process, not per suite.** `just ci` and `just test-rdl2` both
+/// run `tests/render.rs`, and with a renderer installed both actually
+/// render -- into the same path, at the same time, if the name is
+/// fixed. That is a test failure nobody can reproduce afterwards,
+/// because the loser's file is gone by the time anyone looks.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let path =
+        std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&path).expect("a writable temporary directory");
+    path
+}
+
 fn renderer(dso: &str) -> (std::sync::MutexGuard<'static, ()>, Render) {
     // A poisoned lock means an earlier test panicked; the renderer it
     // held is dropped either way, so carrying on is right.
@@ -551,7 +565,7 @@ fn a_batch_render_writes_the_image_it_was_asked_for() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let directory = std::env::temp_dir().join("nsi-moonray-inprocess");
+    let directory = scratch("nsi-moonray-inprocess");
     std::fs::create_dir_all(&directory).expect("a writable directory");
     let image = directory.join("batch.exr");
     let _ = std::fs::remove_file(&image);
@@ -875,7 +889,7 @@ fn an_nsi_osl_shader_renders() {
     // A shader compiled here rather than shipped: what is being tested
     // is that an arbitrary OSL shader crosses, so it has to be one
     // this crate has never seen.
-    let directory = std::env::temp_dir().join("nsi-moonray-osl-render");
+    let directory = scratch("nsi-moonray-osl-render");
     std::fs::create_dir_all(&directory).expect("a writable directory");
     let source = directory.join("teal.osl");
     std::fs::write(
@@ -987,7 +1001,7 @@ fn a_transform_in_a_shader_transforms() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let directory = std::env::temp_dir().join("nsi-moonray-osl-xform");
+    let directory = scratch("nsi-moonray-osl-xform");
     std::fs::create_dir_all(&directory).expect("a writable directory");
     let source = directory.join("where.osl");
     std::fs::write(
@@ -1785,7 +1799,7 @@ fn a_materialx_closure_renders() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let directory = std::env::temp_dir().join("nsi-moonray-osl-materialx");
+    let directory = scratch("nsi-moonray-osl-materialx");
     std::fs::create_dir_all(&directory).expect("a writable directory");
     let source = directory.join("mx.osl");
     // No `* tint` and no `diffuse()`: the closure is the whole shader,
@@ -1896,7 +1910,7 @@ fn an_osl_displacement_displaces() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let directory = std::env::temp_dir().join("nsi-moonray-osl-displace");
+    let directory = scratch("nsi-moonray-osl-displace");
     std::fs::create_dir_all(&directory).expect("a writable directory");
     let source = directory.join("push.osl");
     std::fs::write(
@@ -2000,7 +2014,7 @@ fn transparent_becomes_presence() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let directory = std::env::temp_dir().join("nsi-moonray-osl-presence");
+    let directory = scratch("nsi-moonray-osl-presence");
     std::fs::create_dir_all(&directory).expect("a writable directory");
     let source = directory.join("see.osl");
     std::fs::write(
@@ -2098,7 +2112,7 @@ fn an_nsi_st_reaches_osl() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let directory = std::env::temp_dir().join("nsi-moonray-osl-st");
+    let directory = scratch("nsi-moonray-osl-st");
     std::fs::create_dir_all(&directory).expect("a writable directory");
     let source = directory.join("uvshow.osl");
     std::fs::write(
@@ -2211,7 +2225,7 @@ fn an_nsi_primitive_variable_reaches_osl() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let directory = std::env::temp_dir().join("nsi-moonray-osl-primvar");
+    let directory = scratch("nsi-moonray-osl-primvar");
     std::fs::create_dir_all(&directory).expect("a writable directory");
     let source = directory.join("attrshow.osl");
     std::fs::write(
@@ -2313,7 +2327,7 @@ fn a_depth_output_layer_is_written() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let directory = std::env::temp_dir().join("nsi-moonray-inprocess");
+    let directory = scratch("nsi-moonray-inprocess");
     std::fs::create_dir_all(&directory).expect("a writable directory");
     let image = directory.join("depth.exr");
     let _ = std::fs::remove_file(&image);
@@ -2603,7 +2617,7 @@ fn a_lobe_label_reaches_a_named_aov() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let directory = std::env::temp_dir().join("nsi-moonray-osl-label");
+    let directory = scratch("nsi-moonray-osl-label");
     std::fs::create_dir_all(&directory).expect("a writable directory");
     let image = directory.join("labels.exr");
     let _ = std::fs::remove_file(&image);

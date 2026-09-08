@@ -76,7 +76,7 @@ public:
 
 private:
     struct Entry {
-        OSL::ustring name;
+        OSL::ustringhash name;
         OSL::TypeDesc type;
         int key;
     };
@@ -134,25 +134,25 @@ struct EmptyParams {};
 
 struct DiffuseParams {
     OSL::Vec3 N;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 struct OrenNayarParams {
     OSL::Vec3 N;
     float sigma;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 struct ReflectionParams {
     OSL::Vec3 N;
     float eta;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 struct RefractionParams {
     OSL::Vec3 N;
     float eta;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 /// `microfacet(string distribution, normal N, vector U, float xalpha,
@@ -168,8 +168,29 @@ struct RefractionParams {
 /// refraction -- which is exactly what MoonRay's conductor constructor
 /// takes. Without them a 3Delight metal reaches the walk as a plain
 /// coloured specular and renders as the wrong metal.
+/// **A closure's string parameter is a hash, not a pointer.**
+///
+/// OSL 1.15 stores `ustringhash` in the parameter block a closure
+/// registration describes -- eight bytes of hash where a `ustring`
+/// would have held eight bytes of pointer into OpenImageIO's intern
+/// table. Declaring the field as `ustring` and reading it is a
+/// dereference of `0x5da35be1c5d8d973`, which is a `SIGBUS` inside
+/// whatever touched it first.
+///
+/// It is worse where it does *not* crash. Comparing two such
+/// pointer-shaped hashes succeeds as a comparison and fails as an
+/// answer, so `microfacet("beckmann", ...)` quietly rendered as GGX.
+///
+/// Every string field in the structs below is therefore a
+/// `ustringhash`, and this is how one is read.
+inline OIIO::ustring
+text(const OSL::ustringhash& hash)
+{
+    return OIIO::ustring::from_hash(hash.hash());
+}
+
 struct MicrofacetParams {
-    OSL::ustring dist;
+    OSL::ustringhash dist;
     OSL::Vec3 N;
     OSL::Vec3 U;
     float xalpha;
@@ -178,7 +199,7 @@ struct MicrofacetParams {
     int refract;
     OSL::Color3 realeta;
     OSL::Color3 complexeta;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 /// `subsurface(float eta, float g, color mfp, color albedo)`.
@@ -199,7 +220,7 @@ struct SubsurfaceParams {
     /// zeroes the parameter block for a closure with no prepare
     /// function, so zero is "unset" and the shading normal stands in.
     OSL::Vec3 N;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 /// 3Delight's `layer_closures(closure top, closure bottom, color
@@ -219,13 +240,13 @@ struct DlLayerParams {
 /// An AOV wrapper: the closure inside is what shades, and the name is
 /// what an ɴsɪ output layer with `variablesource "shader"` asks for.
 struct DlOutputVariableParams {
-    OSL::ustring name;
+    OSL::ustringhash name;
     OSL::ClosureColor* value;
 };
 
 /// 3Delight's `outputconstant(string name)` and `occlusion(normal N)`.
 struct DlOutputConstantParams {
-    OSL::ustring name;
+    OSL::ustringhash name;
 };
 
 struct DlOcclusionParams {
@@ -238,7 +259,7 @@ struct MxDiffuseParams {
     OSL::Vec3 N;
     OSL::Color3 albedo;
     float roughness;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 /// What every MaterialX microfacet closure starts with. The order is
@@ -252,10 +273,10 @@ struct MxDielectricParams {
     float roughness_x;
     float roughness_y;
     float ior;
-    OSL::ustring distribution;
+    OSL::ustringhash distribution;
     float thinfilm_thickness;
     float thinfilm_ior;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 struct MxConductorParams {
@@ -265,10 +286,10 @@ struct MxConductorParams {
     float roughness_y;
     OSL::Color3 ior;
     OSL::Color3 extinction;
-    OSL::ustring distribution;
+    OSL::ustringhash distribution;
     float thinfilm_thickness;
     float thinfilm_ior;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 struct MxGeneralizedSchlickParams {
@@ -281,16 +302,16 @@ struct MxGeneralizedSchlickParams {
     OSL::Color3 f0;
     OSL::Color3 f90;
     float exponent;
-    OSL::ustring distribution;
+    OSL::ustringhash distribution;
     float thinfilm_thickness;
     float thinfilm_ior;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 struct MxTranslucentParams {
     OSL::Vec3 N;
     OSL::Color3 albedo;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 struct MxSubsurfaceParams {
@@ -299,19 +320,19 @@ struct MxSubsurfaceParams {
     float transmission_depth;
     OSL::Color3 transmission_color;
     float anisotropy;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 struct MxSheenParams {
     OSL::Vec3 N;
     OSL::Color3 albedo;
     float roughness;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 struct MxUniformEdfParams {
     OSL::Color3 emittance;
-    OSL::ustring label;
+    OSL::ustringhash label;
 };
 
 /// `layer(top, base)`: two closures rather than parameters, which is
