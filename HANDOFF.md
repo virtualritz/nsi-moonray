@@ -31,7 +31,7 @@ transport. The oracle tests still check it, and still earn their place:
 they check the *values* this backend computes without needing a
 renderer, which is what let the transport change underneath them.
 
-A hundred and eleven tests without a renderer, and forty-three more
+A hundred and twenty-three tests without a renderer, and forty-three more
 integration tests behind one. `just test` needs no renderer, no
 `scene_rdl2` and no network -- but it does need a sibling `../nsi`
 checkout, for the reason below. The `rdl2` feature is what asks for a
@@ -257,6 +257,21 @@ plausible name:
 The substitution those two tables drive is now the *fallback*. Shading
 runs OSL -- see `specs/003-osl/` -- and the tables are what a build
 without `$OSL_ROOT` gets.
+
+**An install finds itself now.** `src/dso.rs` searches for MoonRay's
+`rdl2dso` -- beside the running binary first, so a bundle works
+wherever it was unpacked, then where each platform puts an install --
+and `--dso-path` is an override rather than a requirement.
+`packaging/bundle.sh` assembles the tree and `cargo packager` wraps it.
+`specs/005-packaging/` has the layout contract, the reason there is no
+Windows renderer, and what is still missing: a release workflow, which
+is blocked on `T0.7` like all CI here, and code signing.
+
+Building a `.deb` was what found the defect in it: the packager
+installs resources under `/usr/lib/<binary>/`, which the bundle layout
+missed entirely, so an installed package would have resolved no
+classes. That is the same shape as everything else in this file, and it
+was found the same way.
 
 **Still worth doing here**, and the first two are the ones with real
 weight:
