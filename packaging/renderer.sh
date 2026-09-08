@@ -171,7 +171,6 @@ fetch cmake_modules https://github.com/OpenMoonRay/cmake_modules.git "$CMAKE_MOD
 fetch scene_rdl2    https://github.com/OpenMoonRay/scene_rdl2.git    "$SCENE_RDL2_REF"
 fetch mcrt_denoise  https://github.com/OpenMoonRay/mcrt_denoise.git  "$MCRT_DENOISE_REF"
 fetch moonray       https://github.com/OpenMoonRay/moonray.git       "$MOONRAY_REF"
-fetch OpenSubdiv    https://github.com/PixarAnimationStudios/OpenSubdiv.git "$OPENSUBDIV_REF"
 
 MODULES="$PWD/$VENDOR/cmake_modules"
 
@@ -234,18 +233,35 @@ CMAKE_MODULES_ROOT="$MODULES" cmake -S "$VENDOR/scene_rdl2" -B "$VENDOR/build-rd
 cmake --build "$VENDOR/build-rdl2" -j"$JOBS"
 cmake --install "$VENDOR/build-rdl2"
 
-step "OpenSubdiv"
+# **Use the environment's OpenSubdiv when it has one, and do not build
+# a second.** The pixi environment ships 3.7 and puts its headers on
+# `CMAKE_PREFIX_PATH`, so a source build of 3.5 beside it gets compiled
+# against 3.7 headers and linked against the 3.5 library. That fails at
+# the very end, linking `moonray`, with an undefined reference naming a
+# symbol in an `OpenSubdiv::v3_7_0` namespace -- an hour in, and it
+# reads as a MoonRay bug rather than as two versions.
+if [ -n "$PIXI_ENV" ] && [ -d "$PIXI_ENV/include/opensubdiv" ] \
+   && [ -f "$PIXI_ENV/lib/libosdCPU.$SHLIB" ]; then
+    OSD_INCLUDE="$PIXI_ENV/include/opensubdiv"
+    OSD_LIBRARY="$PIXI_ENV/lib/libosdCPU.$SHLIB"
+    step "OpenSubdiv (from the environment: $(basename "$OSD_LIBRARY"))"
+else
+    OSD_INCLUDE="$PREFIX/include/opensubdiv"
+    OSD_LIBRARY="$PREFIX/lib/libosdCPU.$SHLIB"
+    step "OpenSubdiv (from source)"
+    fetch OpenSubdiv https://github.com/PixarAnimationStudios/OpenSubdiv.git "$OPENSUBDIV_REF"
 # **`-DNO_TBB=1`.** OpenSubdiv 3.5's TBB evaluator includes
 # `tbb/task_scheduler_init.h`, removed in oneTBB 2021. MoonRay uses the
 # CPU `Far`/`Vtr` side, which does not need it.
-cmake -S "$VENDOR/OpenSubdiv" -B "$VENDOR/build-osd" \
+    cmake -S "$VENDOR/OpenSubdiv" -B "$VENDOR/build-osd" \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_BUILD_TYPE=Release \
     -DNO_TBB=1 -DNO_PTEX=1 -DNO_OPENGL=1 -DNO_CUDA=1 -DNO_OPENCL=1 \
     -DNO_DX=1 -DNO_METAL=1 -DNO_OMP=1 -DNO_TESTS=1 -DNO_GLTESTS=1 \
     -DNO_EXAMPLES=1 -DNO_TUTORIALS=1 -DNO_REGRESSION=1 -DNO_DOC=1 \
-    -DBUILD_SHARED_LIBS=ON
-cmake --build "$VENDOR/build-osd" -j"$JOBS"
-cmake --install "$VENDOR/build-osd"
+        -DBUILD_SHARED_LIBS=ON
+    cmake --build "$VENDOR/build-osd" -j"$JOBS"
+    cmake --install "$VENDOR/build-osd"
+fi
 
 step "OpenImageDenoise (binary release)"
 OIDN="oidn-$OIDN_VERSION.$OIDN_PLATFORM"
@@ -274,9 +290,9 @@ CMAKE_MODULES_ROOT="$MODULES" cmake -S "$VENDOR/moonray" -B "$VENDOR/build-moonr
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_MODULE_PATH="$MODULES/cmake" \
     -DMOONRAY_USE_OPTIX=NO -DMOONRAY_BUILD_TESTING=NO \
-    -DOpenSubDiv_INCLUDE_DIR="$PREFIX/include/opensubdiv" \
-    -DOpenSubDiv_CPU_LIBRARY="$PREFIX/lib/libosdCPU.$SHLIB" \
-    -DOpenSubDiv_GPU_LIBRARY="$PREFIX/lib/libosdCPU.$SHLIB"
+    -DOpenSubDiv_INCLUDE_DIR="$OSD_INCLUDE" \
+    -DOpenSubDiv_CPU_LIBRARY="$OSD_LIBRARY" \
+    -DOpenSubDiv_GPU_LIBRARY="$OSD_LIBRARY"
 # **`MOONRAY_BUILD_TESTING=NO` does not stop the test binaries being
 # configured**, and two of them fail to link. Naming the target builds
 # the renderer without them.
