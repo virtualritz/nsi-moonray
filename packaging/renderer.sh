@@ -184,6 +184,22 @@ if [ -f "$HEADER" ] && ! grep -q "#include <functional>" "$HEADER"; then
     sed -i.bak '1a #include <functional>' "$HEADER"
 fi
 
+# **The Python bindings are built unconditionally and are not wanted.**
+# `mod/python/py_scene_rdl2` needs Boost.Python and a matching Python,
+# which means dragging both into the environment for a module nothing
+# here loads -- and pinning Boost against the version OpenImageIO and
+# OSL were built with, which is the coupling worth avoiding. There is
+# no CMake option, so the subdirectory is commented out.
+#
+# Unlike the `<functional>` patch above this is **not a bug**: it is an
+# optional component being skipped, and a build that wants it should
+# drop this and add `libboost-python-devel`.
+MOD="$VENDOR/scene_rdl2/mod/CMakeLists.txt"
+if [ -f "$MOD" ] && grep -q "^add_subdirectory(python)" "$MOD"; then
+    step "skipping scene_rdl2's Python bindings"
+    sed -i.bak 's|^add_subdirectory(python)|# skipped by packaging/renderer.sh: needs Boost.Python\n# add_subdirectory(python)|' "$MOD"
+fi
+
 step "scene_rdl2"
 # **The Makefile generator, not Ninja.** `ISPC_HEADER_DIRECTORY` is set
 # with a leading slash, so under Ninja the generated header is declared
