@@ -154,17 +154,36 @@ and 11.7 s with -- 29 % off both the scene and the document, and 2.8×
 faster to record. `default-features = false` turns it, and `mnry`,
 off.
 
-With a renderer, point at it and turn the feature on:
+### With a renderer
 
 ```bash
-export SCENE_RDL2_ROOT=/path/to/install
-export MOONRAY_ROOT=/path/to/install
-export NSI_MOONRAY_DSO=$MOONRAY_ROOT/rdl2dso
-just test-rdl2
+just setup       # the system packages, then MoonRay into vendor/install
+just test-rdl2   # the tests that link it and render
 ```
 
-`just env` says which of those the recipes can see, which is worth
-running first when one of them does something surprising.
+Roughly an hour, nearly all of it MoonRay. `just deps-list` prints the
+thirty system packages without installing any; `just renderer-check`
+verifies the tools and headers before anything is cloned, which beats
+learning an hour in that ISPC is missing. Both halves are re-runnable
+and the build picks up where a failure stopped.
+
+Every renderer recipe uses `$SCENE_RDL2_ROOT` when it is set and
+`vendor/install` otherwise, so an install you already have needs only
+`SCENE_RDL2_ROOT=/path/to/install just test-rdl2`. `just env` says what
+the recipes can see.
+
+**MoonRay is cloned, not a submodule.** Four repositories and several
+hundred megabytes, every one of them useless to somebody who wants the
+emitter and the flush -- which is the common case, and the reason
+`rdl2` is off by default. `packaging/renderer.sh` pins each ref, which
+buys the same reproducibility only when asked for.
+
+Two things are not packaged on Ubuntu and the script handles both:
+OpenSubdiv is built from source and OpenImageDenoise is downloaded.
+A third is not handled: **Open Shading Language has to be built
+separately** and `$OSL_ROOT` pointed at it. Ubuntu's `libosl-dev` is a
+Shogi library. Without OSL every shader becomes a `UsdPreviewSurface`
+and the flush says so.
 
 ## Why MoonRay
 

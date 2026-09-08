@@ -14,3 +14,8 @@
 # Assembled bundles and the installers made from them (`just bundle`,
 # `just package`).
 /dist/
+
+# MoonRay, fetched and built by `just renderer`. Not a submodule: four
+# repositories and several hundred megabytes, useless to anyone who
+# wants the emitter and the flush.
+/vendor/

@@ -15,6 +15,12 @@
 # rationale for a recipe sits in a block separated by a blank line and
 # the line touching the recipe is its summary.
 
+# The MoonRay install every renderer recipe uses: `$SCENE_RDL2_ROOT`
+# when it is set, otherwise `vendor/install`, which is where
+# `just renderer` puts one. So `just setup && just test-rdl2` works with
+# nothing exported.
+prefix := env('SCENE_RDL2_ROOT', justfile_directory() / 'vendor' / 'install')
+
 # Default recipe: show available commands.
 default:
     @just --list
@@ -75,12 +81,32 @@ test: build-lib
 test-single TEST: build-lib
     cargo nextest run {{TEST}}
 
-# Needs `$SCENE_RDL2_ROOT`, and `$MOONRAY_ROOT` for anything past
-# building a scene. `just env` says what is missing.
+# Everything needed to render, from nothing. Roughly an hour: the
+# packages are quick and MoonRay is not. Both halves are re-runnable,
+# and `just renderer` picks up where a failed build stopped.
+
+# Install the system packages, then fetch and build MoonRay.
+setup: deps renderer
+
+# Install the system packages MoonRay needs. Asks for sudo.
+deps:
+    packaging/deps.sh
+
+# Print those packages without installing anything.
+deps-list:
+    @packaging/deps.sh --list
+
+# Fetch and build MoonRay into `vendor/install`.
+renderer:
+    packaging/renderer.sh --prefix "{{prefix}}"
+
+# Check the tools and headers a renderer build needs, building nothing.
+renderer-check:
+    packaging/renderer.sh --prefix "{{prefix}}" --check
 
 # Type-check the renderer half.
 check-rdl2: require-rdl2
-    cargo check --all-targets --features rdl2
+    SCENE_RDL2_ROOT="{{prefix}}" cargo check --all-targets --features rdl2
 
 # **`cargo test`, not `nextest`, and that is the whole point of this
 # being a separate recipe.** MoonRay's driver state is process-global:
@@ -94,8 +120,12 @@ check-rdl2: require-rdl2
 
 # Run the tests that link MoonRay and render.
 test-rdl2: require-rdl2
-    cargo build --features rdl2 --lib
-    cargo test --features rdl2
+    SCENE_RDL2_ROOT="{{prefix}}" MOONRAY_ROOT="{{prefix}}" \
+        NSI_MOONRAY_DSO="{{prefix}}/rdl2dso" \
+        cargo build --features rdl2 --lib
+    SCENE_RDL2_ROOT="{{prefix}}" MOONRAY_ROOT="{{prefix}}" \
+        NSI_MOONRAY_DSO="{{prefix}}/rdl2dso" \
+        cargo test --features rdl2
 
 # Run this first when a renderer recipe does something surprising. A
 # half-set environment is the usual cause, and the `cfg`s it selects
@@ -113,10 +143,10 @@ env:
 [private]
 require-rdl2:
     #!/usr/bin/env sh
-    if [ -z "${SCENE_RDL2_ROOT:-}" ]; then
-        echo "\$SCENE_RDL2_ROOT is unset, and the rdl2 feature needs it." >&2
-        echo "specs/001-moonray-backend/quickstart.md builds the prefix." >&2
-        echo "Then: export SCENE_RDL2_ROOT=\$PREFIX MOONRAY_ROOT=\$PREFIX" >&2
+    if [ ! -d "{{prefix}}/rdl2dso" ]; then
+        echo "No MoonRay install at {{prefix}}." >&2
+        echo "  just setup                 installs and builds one there" >&2
+        echo "  SCENE_RDL2_ROOT=... just ...  uses one you already have" >&2
         exit 1
     fi
 
@@ -132,11 +162,12 @@ build:
 # `patchelf` is what makes the result relocatable on Linux; without it
 # the bundle works only where it was built, and the script says so.
 
-# Assemble a bundle from a MoonRay install at PREFIX.
-bundle PREFIX: require-rdl2
-    cargo build --release --features rdl2
+# Assemble a bundle from a MoonRay install (default: vendor/install).
+bundle PREFIX=prefix: require-rdl2
+    SCENE_RDL2_ROOT="{{PREFIX}}" MOONRAY_ROOT="{{PREFIX}}" \
+        cargo build --release --features rdl2
     rm -rf dist/bundle
-    packaging/bundle.sh --prefix {{PREFIX}} --out dist/bundle
+    packaging/bundle.sh --prefix "{{PREFIX}}" --out dist/bundle
 
 # Wrap `dist/bundle` in the platform's own installer. Linux gets a DEB
 # and an AppImage, macOS a DMG. There is no Windows target: MoonRay's
