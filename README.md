@@ -113,6 +113,27 @@ driver's callbacks are called as the frame converges, with the
 rectangles that changed. `$NSI_MOONRAY_SCENE` names where a `.rdla`
 dump is written, which is how you look at what a render was made from.
 
+## Installing
+
+An install carries MoonRay with it and finds its own scene classes, so
+nothing has to be set:
+
+```bash
+just bundle /path/to/moonray-install   # a relocatable tree in dist/bundle
+just package                           # .deb and AppImage, or .dmg
+```
+
+The tree is `bin/mnry` beside `lib/rdl2dso`, which is the first place
+the resolver looks. `patchelf` is what makes it relocatable on Linux;
+without it the bundle works only where it was built, and says so.
+
+**Windows gets no renderer.** MoonRay does not build there -- its
+CMake handles Unix and Darwin and has no MSVC path -- so a Windows
+package would carry the emitter and nothing to render with. That is a
+different product and is not shipped as this one.
+[`specs/005-packaging/`](specs/005-packaging/) has the reasoning and
+what is still missing, code signing included.
+
 ## Building
 
 `nsi-intermediate` is overlaid from a sibling checkout for now, since

@@ -124,6 +124,42 @@ require-rdl2:
 build:
     cargo build --release
 
+# Assemble a relocatable tree from a MoonRay install: this backend, the
+# renderer, its scene classes and every shared library the two need.
+# `packaging/bundle.sh --help` has the layout, and `tests/bundle.rs`
+# holds that layout against the code that reads it.
+#
+# `patchelf` is what makes the result relocatable on Linux; without it
+# the bundle works only where it was built, and the script says so.
+
+# Assemble a bundle from a MoonRay install at PREFIX.
+bundle PREFIX: require-rdl2
+    cargo build --release --features rdl2
+    rm -rf dist/bundle
+    packaging/bundle.sh --prefix {{PREFIX}} --out dist/bundle
+
+# Wrap `dist/bundle` in the platform's own installer. Linux gets a DEB
+# and an AppImage, macOS a DMG. There is no Windows target: MoonRay's
+# build handles Unix and Darwin and has no MSVC path, so a Windows
+# package would carry the emitter and no renderer -- see
+# `specs/005-packaging/spec.md`.
+#
+# Needs `cargo binstall cargo-packager` once.
+
+# Build the installers for this platform from `dist/bundle`.
+package:
+    #!/usr/bin/env sh
+    set -eu
+    if [ ! -d dist/bundle ]; then
+        echo "dist/bundle does not exist; run \`just bundle PREFIX\` first." >&2
+        echo "Packaging without it ships an installer with no renderer." >&2
+        exit 1
+    fi
+    case "$(uname -s)" in
+        Darwin) cargo packager --release --formats dmg ;;
+        *)      cargo packager --release --formats deb,appimage ;;
+    esac
+
 # Build documentation.
 doc:
     cargo doc --no-deps

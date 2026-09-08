@@ -74,13 +74,50 @@ pub fn searched() -> Vec<PathBuf> {
     candidates()
 }
 
+/// Where a bundle keeps its scene classes, relative to the binary that
+/// is running.
+///
+/// **These are contracts, not guesses.** Each is a layout something in
+/// this repository actually produces, and `tests/bundle.rs` builds the
+/// tree and holds it against this list -- because the failure when
+/// they disagree is a renderer that resolves no classes and returns a
+/// black frame, with nothing said anywhere.
+///
+/// 1. `../lib/rdl2dso` -- what `packaging/bundle.sh` assembles, and
+///    what a tarball unpacks to.
+/// 2. `./rdl2dso` -- the flat form, a zip unpacked in place.
+/// 3. `../lib/<name>/lib/rdl2dso` -- **cargo-packager's own layout**,
+///    read off a built `.deb` rather than assumed: the binary installs
+///    to `/usr/bin/mnry` and every resource to `/usr/lib/mnry/`, so
+///    the first two candidates miss an installed package entirely.
+/// 4. `../Resources/lib/rdl2dso` -- the same idea inside a macOS
+///    `.app`, where the executable sits in `Contents/MacOS`.
+pub fn beside(exe: &Path) -> Vec<PathBuf> {
+    let Some(dir) = exe.parent() else {
+        return Vec::new();
+    };
+
+    let mut paths = Vec::new();
+    if let Some(prefix) = dir.parent() {
+        paths.push(prefix.join("lib").join(RDL2DSO));
+    }
+    paths.push(dir.join(RDL2DSO));
+
+    if let (Some(prefix), Some(name)) =
+        (dir.parent(), exe.file_stem().and_then(|name| name.to_str()))
+    {
+        paths.push(prefix.join("lib").join(name).join("lib").join(RDL2DSO));
+        paths.push(prefix.join("Resources").join("lib").join(RDL2DSO));
+    }
+
+    paths
+}
+
 /// The candidates, from the real environment.
 fn candidates() -> Vec<PathBuf> {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let exe = std::env::current_exe().ok();
 
-    candidates_from(|name: &str| std::env::var_os(name), exe_dir.as_deref())
+    candidates_from(|name: &str| std::env::var_os(name), exe.as_deref())
 }
 
 /// The candidates, from an environment given rather than read.
@@ -89,7 +126,7 @@ fn candidates() -> Vec<PathBuf> {
 /// in this edition and races every other test in the process, which is
 /// exactly the shape of thing that makes a suite flaky under one
 /// runner and fine under another.
-fn candidates_from<F>(var: F, exe_dir: Option<&Path>) -> Vec<PathBuf>
+fn candidates_from<F>(var: F, exe: Option<&Path>) -> Vec<PathBuf>
 where
     F: Fn(&str) -> Option<OsString>,
 {
@@ -104,14 +141,8 @@ where
     }
 
     // 2. Beside the executable, so a bundle needs no environment.
-    //    `../lib/rdl2dso` is the installed layout -- `bin/mnry` beside
-    //    `lib/rdl2dso` -- and `./rdl2dso` is the flat one a zip gets
-    //    unpacked into.
-    if let Some(dir) = exe_dir {
-        if let Some(prefix) = dir.parent() {
-            paths.push(prefix.join("lib").join(RDL2DSO));
-        }
-        paths.push(dir.join(RDL2DSO));
+    if let Some(exe) = exe {
+        paths.extend(beside(exe));
     }
 
     // 3. The platform's own places.
@@ -219,7 +250,7 @@ mod tests {
                 ("MOONRAY_ROOT", "/scratch/install"),
                 ("HOME", "/home/someone"),
             ]),
-            Some(Path::new("/opt/bundle/bin")),
+            Some(Path::new("/opt/bundle/bin/mnry")),
         );
 
         assert_eq!(paths[0], PathBuf::from("/scratch/dso"));
@@ -233,8 +264,10 @@ mod tests {
     /// point of shipping one.
     #[test]
     fn a_bundle_is_found_beside_its_own_binary() {
-        let paths =
-            candidates_from(env(&[]), Some(Path::new("/opt/moonray-1.0/bin")));
+        let paths = candidates_from(
+            env(&[]),
+            Some(Path::new("/opt/moonray-1.0/bin/mnry")),
+        );
 
         assert_eq!(paths[0], PathBuf::from("/opt/moonray-1.0/lib/rdl2dso"));
         assert_eq!(paths[1], PathBuf::from("/opt/moonray-1.0/bin/rdl2dso"));
@@ -246,7 +279,7 @@ mod tests {
     fn the_bundle_beats_the_system() {
         let paths = candidates_from(
             env(&[("HOME", "/home/someone")]),
-            Some(Path::new("/media/stick/moonray/bin")),
+            Some(Path::new("/media/stick/moonray/bin/mnry")),
         );
 
         let bundle = paths

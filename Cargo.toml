@@ -20,6 +20,44 @@ include = [
     "/README.md",
 ]
 
+# The installers. `cargo packager` wraps a tree that
+# `packaging/bundle.sh` has already assembled, so what ships is what
+# `just bundle` produced and was tested -- not a second, parallel
+# description of the same layout.
+#
+# **`just bundle` runs first.** `resources` names `dist/bundle/...`,
+# which does not exist until it has: packaging a stale or absent bundle
+# is how an installer ships without the renderer it exists to carry.
+[package.metadata.packager]
+product-name = "nsi-moonray"
+identifier = "com.virtualritz.nsi-moonray"
+publisher = "Moritz Moeller"
+description = "An ɴsɪ backend on MoonRay, DreamWorks Animation's production renderer"
+homepage = "https://github.com/virtualritz/nsi-moonray"
+binaries = [{ path = "mnry", main = true }]
+# Plain directories, not globs: cargo-packager 0.11.8 copies a
+# directory recursively, and a `**` glob also matches the
+# subdirectories and then fails on them. `lib/rdl2dso` is nested, so
+# the glob form cannot work here.
+resources = [
+    { src = "dist/bundle/lib", target = "lib" },
+    { src = "dist/bundle/share", target = "share" },
+]
+
+[package.metadata.packager.deb]
+section = "graphics"
+
+[package.metadata.packager.dmg]
+
+# **No `wix` section, and that is the finding rather than an
+# omission.** MoonRay does not build on Windows: its CMake handles Unix
+# and Darwin and has no MSVC path, and `scene_rdl2` is compiled with
+# `PLATFORM_UNIX`/`PLATFORM_LINUX`. A Windows package could carry this
+# crate's emitter -- `mnry cat`, `.nsi` to `.rdla` -- and no renderer at
+# all, which is a different product and should be named as one rather
+# than shipped as a bundle that turns out to be empty.
+# `specs/005-packaging/spec.md` has the reasoning.
+
 [lib]
 # `cdylib` so this can be `dlopen`ed as an ɴsɪ renderer -- see
 # `src/capi.rs`; `rlib` so the flush stays usable as a Rust library.

@@ -10,3 +10,7 @@
 # both land here and neither is worth keeping.
 /scene.exr
 /unused.exr
+
+# Assembled bundles and the installers made from them (`just bundle`,
+# `just package`).
+/dist/
