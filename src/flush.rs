@@ -455,6 +455,7 @@ pub fn flush_with(
                 // interchangeable: MoonRay reads the volume through the
                 // sixth and would render nothing from the third.
                 bindings.push((VOLUME, handle, None, None));
+                report_volume_shader(scene, handle, &mut flushed);
                 volumes.push(handle);
             }
 
@@ -1940,12 +1941,47 @@ fn displacement(
 
     if shading != Shading::Osl || !crate::osl::is_runnable(scene, &shader) {
         flushed.limitations.push(format!(
-            "{handle:?} has displacement shader {shader:?} bound, which              needs OSL; the geometry is not displaced"
+            "{handle:?} has displacement shader {shader:?} bound, which \
+             needs OSL; the geometry is not displaced"
         ));
         return None;
     }
 
     Some(Reference::new(OSL_DISPLACEMENT, shader))
+}
+
+/// Say that a bound `volumeshader` is not the one being run.
+///
+/// The interface binds a volume shader through the `attributes` node
+/// the way it binds a surface or a displacement, and upstream resolves
+/// it. Nothing here can run it: MoonRay reads a volume through a
+/// `VolumeShader` root, whose interface is four separate virtuals --
+/// `extinct`, `albedo`, `emission` and `anisotropy`, each asked
+/// independently and at its own time -- against OSL's one execution
+/// producing one closure tree. There is no `OslVolume` to bind, so
+/// every volume renders with the stock `VdbVolume`.
+///
+/// **Reported rather than dropped, because the volume still appears.**
+/// A missing surface shader shows up as an untextured shape; a missing
+/// *volume* shader shows up as a perfectly plausible puff of the
+/// density grid, with none of the shader's extinction, colour or
+/// emission, and nothing about the image says so.
+fn report_volume_shader(scene: &Scene, handle: &str, flushed: &mut Flushed) {
+    let Some(shader) = scene
+        .geometry_binding(handle)
+        .ok()
+        .flatten()
+        .and_then(|binding| binding.volume_shader)
+    else {
+        return;
+    };
+
+    flushed.limitations.push(format!(
+        "{handle:?} has volume shader {shader:?} bound; MoonRay reads a \
+         volume through a `VolumeShader` root and this backend has no OSL \
+         one, so the volume renders with the stock `{VOLUME_SHADER}` and \
+         the shader's extinction, albedo, emission and anisotropy are lost"
+    ));
 }
 
 /// The parameters carried from an ɴsɪ shader into the substitute
@@ -3540,6 +3576,73 @@ mod tests {
 
         assert!(!beauty.contains("result"), "{beauty}");
         assert!(!beauty.contains("lpe"), "{beauty}");
+    }
+
+    /// **A bound `volumeshader` does not cross, and says so.**
+    ///
+    /// The interface binds one through the `attributes` node the way it
+    /// binds a surface or a displacement, and every volume here is
+    /// rendered with MoonRay's stock `VdbVolume` instead. Silence would
+    /// be the wrong answer twice over: the volume *appears*, so nothing
+    /// looks broken, and what it looks like is the density grid with
+    /// none of the shader's extinction, albedo, emission or
+    /// anisotropy -- a plausible puff of smoke that is not the one the
+    /// scene describes.
+    #[test]
+    fn a_bound_volume_shader_is_reported() {
+        let mut scene = Scene::default();
+        scene.create("smoke", "volume").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "smoke",
+                vec![arg(
+                    "vdbfilename",
+                    Type::String,
+                    OwnedData::String(vec![b"/tmp/explosion.vdb".to_vec()]),
+                )],
+            )
+            .expect("a recordable edit");
+        scene.connect("smoke", None, ".root", "objects").unwrap();
+
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("vol", "shader").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "vol",
+                vec![arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![
+                        b"/opt/3delight/osl/dlAtmosphere.oso".to_vec(),
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("attr", None, "smoke", "geometryattributes")
+            .unwrap();
+        scene.connect("vol", None, "attr", "volumeshader").unwrap();
+
+        // With OSL running, because the point is that even then there
+        // is no `VolumeShader` root to run it in.
+        let flushed = flush_with(&scene, Purpose::default(), Shading::Osl);
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("vol") && line.contains("volume")),
+            "a bound volume shader must be reported\n{:?}",
+            flushed.limitations
+        );
+        // And the volume still renders, through the stock shader.
+        assert!(
+            flushed.to_rdla().contains("VdbVolume("),
+            "{}",
+            flushed.to_rdla()
+        );
     }
 
     /// **A `volume` node becomes a `VdbGeometry`.**

@@ -640,11 +640,55 @@ shader's own default in place.
 - **An OSL volume shader.** The geometry crosses now -- the interface's
   `volume` node is OpenVDB and nothing else, and `VdbGeometry` reads
   exactly that -- but it is rendered with MoonRay's stock `VdbVolume`
-  rather than the OSL network bound through `volumeshader`. OSL's
-  `anisotropic_vdf` and `medium_vdf` against MoonRay's `VolumeShader`,
-  whose interface is four separate virtuals -- extinction, albedo,
-  emission, anisotropy -- against OSL's one execution, is the piece
-  that is missing.
+  rather than the OSL network bound through `volumeshader`. Upstream
+  resolves that binding and the flush now **reports** it rather than
+  ignoring it, which is the honest half: a volume with no shader still
+  appears, as a plausible puff of the density grid, so silence here
+  reads as success.
+
+  The interface is read off
+  `scene_rdl2/lib/scene/rdl2/VolumeShader.h` rather than guessed, and
+  it is worse than "four virtuals" made it sound:
+
+  ```
+  Color extinct  (tls, state, density, rayVolumeDepth)
+  Color albedo   (tls, state, density, rayVolumeDepth)
+  Color emission (tls, state, density)
+  float anisotropy(tls, state)
+  unsigned getProperties() const
+  bool hasExtinctionMapBinding() const
+  bool updateBakeRequired() const
+  ```
+
+  Three things follow, and each is a decision rather than a detail:
+
+  - **Four independent questions, one execution.** Each virtual is
+    asked on its own, and two of them take a `rayVolumeDepth` the
+    others do not. One OSL run has to answer all four, so the closure
+    tree has to be executed once per `(state, density)` and cached
+    across the four calls -- keyed on the shading state, not memoised
+    globally, because the volume is heterogeneous by construction.
+  - **`getProperties()` is answered before anything shades.** It is a
+    bitmask -- `IS_EXTINCTIVE`, `IS_SCATTERING`, `IS_EMISSIVE`, and a
+    `HOMOGENOUS_*` for each -- and MoonRay uses it to decide what to
+    sample at all. OSL cannot answer it without running. The only
+    correct answer is the conservative superset: all three set, none
+    homogeneous. That is right and slow, and saying so is better than
+    a guess that silently stops sampling emission.
+  - **`isHomogenous()` and the bake attributes** (`bake_resolution_mode`,
+    `bake_divisions`, `bake_voxel_size`) come from the base class, so
+    an `OslVolume` gets them for free and should leave them at their
+    defaults until something measures otherwise.
+
+  On OSL's side the closures are `anisotropic_vdf` and `medium_vdf`.
+  The mapping is not the clean one `O4` found for surfaces: a `vdf`
+  carries albedo and extinction together, and `anisotropy` is a
+  parameter of the closure rather than a separate quantity, so the
+  decomposition into MoonRay's four is this backend's to define.
+
+  The DSO itself is not written. `dso/osl/OslDisplacement.cc` is the
+  shape to copy -- `NSI_MOONRAY_OSL_ROOT`, `attributes.cc`,
+  `shading_system.h` -- with `rdl2::VolumeShader` as the root.
 
   Two things measured on the way: a volume is shaded through the
   `Layer`'s **sixth** column and a row with a material in the third

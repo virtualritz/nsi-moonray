@@ -67,7 +67,8 @@ pub fn apply_affected(
     if affected.everything {
         let mut report = apply(document, context);
         report.push(
-            "an attribute on `.root` or `.global` changed, so the whole              scene was re-applied"
+            "an attribute on `.root` or `.global` changed, so the whole \
+             scene was re-applied"
                 .to_string(),
         );
         return (report, true);
