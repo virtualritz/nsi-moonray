@@ -6,13 +6,13 @@ Animation's production renderer.
 
 **Status: it renders, in process.** A recorded ɴsɪ scene is built
 straight into a live `scene_rdl2` `SceneContext` and rendered by a
-`RenderContext` in the calling process — no scene file, no spawned
+`RenderContext` in the calling process -- no scene file, no spawned
 binary. Pixels come back as they converge, rectangle by rectangle, to
 the closures an ɴsɪ application hands its output driver; a scene can be
 edited between frames and only what the edit touched is re-sent.
 
-`.rdla`, MoonRay's ASCII scene format, is still written on request —
-`mnry cat`, a bug report, an oracle diff — but it is a **dump**, not the
+`.rdla`, MoonRay's ASCII scene format, is still written on request --
+`mnry cat`, a bug report, an oracle diff -- but it is a **dump**, not the
 transport. Every byte of that format was captured from `scene_rdl2`'s
 own `AsciiWriter` rather than inferred, and rdl2 reads back what is
 written; see
@@ -21,15 +21,15 @@ written; see
 What crosses: polygon meshes and subdivision surfaces with creases and
 corners, instancing (native on both sides, nested, and blurred),
 transform and deformation motion blur on one scene-wide shutter,
-cameras — perspective, orthographic, fisheye and spherical — render
+cameras -- perspective, orthographic, fisheye and spherical -- render
 outputs, including built-in, primitive-variable and per-lobe AOVs,
 OpenVDB volumes, `st`, `N` and arbitrary primitive variables in
 any of ɴsɪ's interpolations,
-and lights — which in ɴsɪ are geometry wearing an emissive shader
+and lights -- which in ɴsɪ are geometry wearing an emissive shader
 rather than nodes of their own.
 
-Shading runs OSL. ɴsɪ *is* OSL — a `shader` node names a compiled
-`.oso` — so the network crosses as an OSL group specification and
+Shading runs OSL. ɴsɪ *is* OSL -- a `shader` node names a compiled
+`.oso` -- so the network crosses as an OSL group specification and
 MoonRay executes it, through the `Osl` and `OslDisplacement` root
 shaders in [`dso/osl/`](dso/osl/). That needs OSL at build time:
 set `$OSL_ROOT`.
@@ -51,7 +51,7 @@ mnry watch /spool -r                  # render what lands there
 ```
 
 Modelled on [`rdl`](https://github.com/virtualritz/delight-helpers), the
-`renderdl` replacement, so the two commands take the same shape — same
+`renderdl` replacement, so the two commands take the same shape -- same
 subcommands, same frame-sequence syntax. What differs is underneath:
 `rdl` drives 3Delight through the ɴsɪ C API, and this parses the same
 streams into `nsi-intermediate` and builds MoonRay's scene from them
@@ -61,8 +61,8 @@ directly.
 directory. Without it no scene class resolves and the render comes out
 empty rather than failing.
 
-Built without the `rdl2` feature — the default, since linking
-`scene_rdl2` needs it installed — `mnry render` writes the scene out and
+Built without the `rdl2` feature -- the default, since linking
+`scene_rdl2` needs it installed -- `mnry render` writes the scene out and
 runs the `moonray` binary instead. Same image, later, and `-v` says
 which path it took.
 
@@ -78,9 +78,9 @@ whole trick.
 ## As A Drop-In Renderer
 
 The crate also builds as `libnsi_moonray.so`, exporting the ɴsɪ C entry
-points. `nsi-ffi-wrap` reaches a renderer by `dlopen` — the library name
+points. `nsi-ffi-wrap` reaches a renderer by `dlopen` -- the library name
 and the environment variable that finds it are parameters of its
-`define_nsi_renderer!` macro, not constants — so an ɴsɪ application can
+`define_nsi_renderer!` macro, not constants -- so an ɴsɪ application can
 load MoonRay exactly where it loads 3Delight:
 
 ```rust
@@ -111,14 +111,18 @@ it is unpublished:
 ```bash
 git clone https://github.com/virtualritz/nsi.git      # ../nsi
 git clone https://github.com/virtualritz/nsi-moonray.git
-cd nsi-moonray && cargo test
+cd nsi-moonray && just ci
 ```
+
+`just --list` has the rest. Keep `../nsi` current: it is a path
+dependency, so an out-of-date one has no version to disagree about and
+surfaces as a missing method in *this* crate's source instead.
 
 Handles are interned by default (`interned_handles`: upstream's
 `ustr_handles`, plus this crate's `Name` for class names, handles and
 attribute names). `tools/footprint` measures a 100 001-node scene
 recorded and flushed at 244.8 MB and 32.6 s without it, and 174.3 MB
-and 11.7 s with — 29 % off both the scene and the document, and 2.8×
+and 11.7 s with -- 29 % off both the scene and the document, and 2.8×
 faster to record. `default-features = false` turns it, and `mnry`,
 off.
 
@@ -128,9 +132,11 @@ With a renderer, point at it and turn the feature on:
 export SCENE_RDL2_ROOT=/path/to/install
 export MOONRAY_ROOT=/path/to/install
 export NSI_MOONRAY_DSO=$MOONRAY_ROOT/rdl2dso
-cargo build --features rdl2 --lib   # first: `tests/dropin.rs` dlopens it
-cargo test  --features rdl2
+just test-rdl2
 ```
+
+`just env` says which of those the recipes can see, which is worth
+running first when one of them does something surprising.
 
 ## Why MoonRay
 
@@ -172,8 +178,9 @@ classification and graph resolution happen upstream in
 [`nsi-mitsuba`](https://github.com/virtualritz/nsi-mitsuba).
 
 ```
-ɴsɪ calls → nsi-intermediate → nsi-moonray → scene_rdl2 → MoonRay
-                            ↘ nsi-mitsuba → Properties → Mitsuba 3
+ɴsɪ calls -> nsi-intermediate -> nsi-moonray -> scene_rdl2 -> MoonRay
+                             \
+                              -> nsi-mitsuba -> Properties -> Mitsuba 3
 ```
 
 Consumers may alias the dependency:
@@ -185,7 +192,7 @@ use nsi_intermediate as nsi_ir;
 ## Documentation
 
 Spec-driven; see [`specs/`](specs/). Shared standards come from
-`.blueprints`, a private submodule — a plain `git clone` works, and only
+`.blueprints`, a private submodule -- a plain `git clone` works, and only
 `--recurse-submodules` fails, on that one path.
 
 ## Licence

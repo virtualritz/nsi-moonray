@@ -21,12 +21,34 @@ Project-specific specs live in `specs/`. Shared rules and templates live in
 
 ## Status
 
-The crate emits `.rdla`. The binding strategy is settled — generate
-`.rdla` now, an `extern "C"` shim over `scene_rdl2` later for
-progressive rendering. See `specs/001-moonray-backend/research.md`.
+**It renders, in process.** A recorded ɴsɪ scene is built straight into
+a live `scene_rdl2` `SceneContext` and rendered by a `RenderContext` in
+the calling process, progressively, with no file written and no binary
+spawned. Editing the scene and calling `synchronize` re-sends only what
+changed. Shading runs OSL through the root shaders in `dso/osl/`.
 
-Nothing renders yet, and the flush from `nsi_intermediate::Scene` is
-blocked on being able to depend on that crate (`T0.7`).
+`.rdla` is still emitted, and is still checked byte for byte against
+the captured oracle -- but it is a **dump**, not the transport. See
+`HANDOFF.md` for what that cost to learn, and `specs/README.md` for
+which feature owns what.
+
+`T0.7` is the one structural workaround left: `nsi-intermediate` is
+overlaid from a sibling `../nsi` checkout, because it is not on
+crates.io yet. **Keep that checkout current.** It is a path dependency,
+so an out-of-date sibling does not fail as a version conflict -- it
+fails as a missing method in this crate's own source, which reads like
+a bug here.
+
+## Before Committing
+
+```bash
+just ci     # fmt-check, check, lint-check, test -- all renderer-free
+```
+
+The justfile is where the two traps live, with the reasoning at the
+recipe: tests build the `cdylib` first, and the renderer tests need a
+single-process runner. Read them before reaching for a bare `cargo`
+invocation.
 
 ## This Repository
 
@@ -47,6 +69,6 @@ use nsi_intermediate as nsi_ir;
 real `scene_rdl2` and its own `AsciiWriter`; the captured output is in
 `specs/001-moonray-backend/oracle/` and `tests/oracle.rs` asserts this
 crate reproduces it byte for byte. A new construct means capturing it
-first and then emitting it — four assumptions a reasonable person would
+first and then emitting it -- four assumptions a reasonable person would
 have made about `.rdla` are wrong, and they are listed in `research.md`
 F8.

@@ -7,8 +7,10 @@ Feature specs live here. The active feature directory is
 
 | # | Surface | Status |
 | --- | --- | --- |
-| [001](001-moonray-backend/) | MoonRay backend | Scenes flush and render through MoonRay; `.rdla` emitter checked against a captured format oracle |
-| [002](002-interactive-updates/) | Interactive updates | Specified. MoonRay applies edits without rebuilding; nothing here drives it yet, and `nsi-intermediate` cannot say what changed |
+| [001](001-moonray-backend/) | MoonRay backend | Delivered. Scenes flush and render through MoonRay; the `.rdla` emitter is checked against a captured format oracle |
+| [002](002-interactive-updates/) | Interactive updates | Delivered. MoonRay is linked, not spawned; edits cross in one `synchronize` and are asserted on pixels. The cost is measured, and the cheap tier for a visibility change is unreachable until `scene_rdl2` consults its own flag -- written up in [`upstream/`](../upstream/) |
+| [003](003-osl/) | OSL under MoonRay | Delivered. Shading, displacement and lights run OSL through the root shaders in [`dso/osl/`](../dso/osl/); the substitution table is the fallback for a build without `$OSL_ROOT`. Open questions are at the end of its `research.md` |
+| [004](004-osl-intermediate/) | `osl-intermediate` | A sketch, for someone else to start from. Proposes the crate the 003 work kept wanting; nothing in this repository depends on it |
 
 ## Scope Of This Repository
 

@@ -1,6 +1,6 @@
 # Handoff
 
-Updated 2026-09-06. Read `specs/README.md`, then this.
+Updated 2026-09-08. Read `specs/README.md`, then this.
 
 ## What Exists
 
@@ -11,7 +11,7 @@ and calling `synchronize` re-sends only what changed. No file is
 written on the render path and no process is started.
 
 That is the whole of `001`'s delivery question and most of `002`. What
-is *not* done is proving the incremental path is incremental — see
+is *not* done is proving the incremental path is incremental -- see
 "What Would Bite You".
 
 ```
@@ -31,13 +31,22 @@ transport. The oracle tests still check it, and still earn their place:
 they check the *values* this backend computes without needing a
 renderer, which is what let the transport change underneath them.
 
-Sixty-six tests with the renderer, fifty-six without. `cargo test`
-needs no renderer, no `scene_rdl2` and no network — but it does need a
-sibling `../nsi` checkout, for the reason below. The `rdl2` feature is
-what asks for a renderer, and it is off by default so that this crate
-stays workable from a machine that cannot build MoonRay.
+A hundred and eleven tests without a renderer, and forty-three more
+integration tests behind one. `just test` needs no renderer, no
+`scene_rdl2` and no network -- but it does need a sibling `../nsi`
+checkout, for the reason below. The `rdl2` feature is what asks for a
+renderer, and it is off by default so that this crate stays workable
+from a machine that cannot build MoonRay.
 
-`scene_rdl2` builds on a modest machine — four cores, stock Ubuntu
+**Use the justfile.** `just ci` is what CI runs and what to run before
+committing; `just test-rdl2` is the renderer half. Both traps that cost
+a debugging session are encoded there rather than only written down:
+the `cdylib` `tests/dropin.rs` opens by path has to be rebuilt first,
+and the renderer tests need `cargo test` rather than nextest, because
+they serialize on a process-wide mutex that nextest's process-per-test
+model makes inert.
+
+`scene_rdl2` builds on a modest machine -- four cores, stock Ubuntu
 packages, about fifteen minutes. `quickstart.md` has the recipe and the
 three upstream problems it has to work around, each with the error it
 produces. None of them is subtle once seen, and all three cost time:
@@ -50,7 +59,7 @@ produces. None of them is subtle once seen, and all three cost time:
 - `BinPacketDictionary.h` uses `std::function` without including
   `<functional>`; GCC 13 rejects it. One line.
 - A **consumer must repeat the compile definitions** rdl2's own build
-  passes — `__cdecl=`, `PLATFORM_UNIX`, `PLATFORM_LINUX`, `__AVX__` —
+  passes -- `__cdecl=`, `PLATFORM_UNIX`, `PLATFORM_LINUX`, `__AVX__` --
   or `rdl2/Types.h` does not parse at its first function typedef.
 
 ## What The Oracle Corrected
@@ -68,15 +77,15 @@ and two findings in `research.md` that were simply wrong:
 - **`scene_rdl2` does need ISPC.** F7 said it did not.
 - **MoonRay has no `use velocity` flag.** F1 said it had one. Velocity
   is `velocity_list_0` plus `motion_blur_type`, and the deformation
-  attribute is `vertex_list_1` — `vertex list mb` is an alias.
+  attribute is `vertex_list_1` -- `vertex list mb` is an alias.
 
 This is the same discipline that made the `.nsi` emitter correct, and
 it paid the same way. Keep it: capture, then emit.
 
 ## Upstream Moved, And It Answers The Hard Part
 
-`nsi-intermediate` gained a synchronise journal and dirty propagation —
-`Scene::take_changes()` and `Scene::affected()` — plus motion-sample
+`nsi-intermediate` gained a synchronise journal and dirty propagation --
+`Scene::take_changes()` and `Scene::affected()` -- plus motion-sample
 resolution, a `.nsi` parser (`nsi-parse`) and much else. Three things
 `002` listed as upstream asks were already done.
 
@@ -101,7 +110,7 @@ are corrections rather than churn:
 is a workaround, not a resolution: the crate is unpublished, and a git
 dependency on the `nsi` workspace makes Cargo fetch that repository's
 private `.blueprints` submodule. Two things worth knowing before
-trying to improve it — both were tried:
+trying to improve it -- both were tried:
 
 - Making the dependency **optional** does not help. Cargo resolves
   every dependency whether or not the feature gating it is enabled.
@@ -111,18 +120,34 @@ trying to improve it — both were tried:
 Publishing `nsi-intermediate`, or making `.blueprints` non-blocking for
 a consumer's fetch, is what would actually settle it. `T0.7`.
 
+**It is one step from settled.** Upstream released `nsi-intermediate`
+0.1.0 on 2026-09-08, explicitly because a backend had driven it. The
+crate is not on crates.io yet; once it is, the four path dependencies
+in `Cargo.toml` become version requirements, the sibling checkout stops
+being a precondition, and CI becomes possible at all -- there is no
+workflow in this repository because there is nothing a runner could
+check out that would build.
+
+**Until then, keep the sibling current, and know how it fails.** A
+path dependency has no version to disagree about, so an out-of-date
+`../nsi` does not report a version conflict. It reports a missing
+method in *this* crate's source, which reads like a bug here and is
+not. Master did not compile for a day for exactly this reason: the
+commit that adopted upstream's primitive-variable resolver landed
+against six upstream commits that the checkout beside it did not have.
+
 ## How This Reaches A Renderer
 
 Two shapes, and neither asks this repository to build MoonRay:
 
 - **`mnry`** is the command. `render`, `cat`, `watch`, modelled on
   `rdl` from `virtualritz/delight-helpers` so the two take the same
-  shape. Built with `rdl2` it renders in process; without it — or for
-  an `.rdla`, which only rdl2's own reader parses — it writes the
+  shape. Built with `rdl2` it renders in process; without it -- or for
+  an `.rdla`, which only rdl2's own reader parses -- it writes the
   scene out and runs the `moonray` binary. `-v` says which.
 - **`libnsi_moonray.so`** is a drop-in ɴsɪ renderer, and it exists:
   `src/capi.rs`. `nsi-ffi-wrap` `dlopen`s a library and resolves its
-  whole symbol table up front, so all twelve have to be there —
+  whole symbol table up front, so all twelve have to be there --
   the eleven `NSI*` entry points plus `DspyRegisterDriver`, which the
   `output` feature looks up and whose absence would make the load fail
   for a consumer that has that feature on. `tests/dropin.rs` opens the
@@ -130,7 +155,7 @@ Two shapes, and neither asks this repository to build MoonRay:
 
   It is interactive now: `"start"` with `"interactive"`,
   `"synchronize"`, `"wait"` and `"stop"` all act on a live
-  `Session`. `"suspend"` and `"resume"` are deliberately unmapped —
+  `Session`. `"suspend"` and `"resume"` are deliberately unmapped --
   MoonRay can `stopFrame`/`startFrame`, but restarting loses the
   samples taken so far, and a viewport that dimmed whenever it was
   touched would be worse than one that ignores the call.
@@ -139,7 +164,7 @@ Two shapes, and neither asks this repository to build MoonRay:
 
 MoonRay delivers progressively; it just does not *push*.
 `RenderMode::PROGRESSIVE` puts samples up as they exist and a consumer
-*pulls* them with `snapshotDelta` — `moonray_gui` is a loop around
+*pulls* them with `snapshotDelta` -- `moonray_gui` is a loop around
 that. An ɴsɪ consumer expects a push. The gap is pull-versus-push, not
 a missing capability, and it closes on this side. They meet in
 `nsi-ffi-wrap`'s
@@ -152,7 +177,7 @@ Three things worth knowing before touching it, each of which cost a
 debugging session:
 
 - **`Reference` must survive recording.** It never reaches MoonRay,
-  which is exactly why `capi.rs` dropped it — and dropping it leaves
+  which is exactly why `capi.rs` dropped it -- and dropping it leaves
   an application with a driver, a perfect render, and an empty
   viewport. No error anywhere.
 - **MoonRay does not write `RGBA`.** It names channels after the ɴsɪ
@@ -165,10 +190,10 @@ debugging session:
   `dlopen` is a different compilation, and the safe route there is the
   `extern "C"` entry points `DspyRegisterDriver` hands over. `T5.2`.
 
-Delivery is still one bucket at the end, read back off the file —
+Delivery is still one bucket at the end, read back off the file --
 because this backend *spawns* MoonRay, and a batch process has no
 `RenderContext` to snapshot. That is the whole reason, and linking
-`libmoonray` (`002` `R1`–`R3`) is the whole fix. `T5.3`.
+`libmoonray` (`002` `R1`--`R3`) is the whole fix. `T5.3`.
 
 Taking `.nsi` *files* works: `mnry render scene.nsi` parses it and
 builds MoonRay's scene from it. The parser is upstream's `nsi-parse`, which drives
@@ -188,7 +213,7 @@ have the fast path still gets its render.
   C++ exception crosses the boundary (`set` by name throws, and
   unwinding into Rust is undefined behaviour), and nothing refuses a
   scene. `shim/tests/smoke.cc` drives every setter through rdl2's own
-  `ExtensiveObject` — which is how the calls were checked against the
+  `ExtensiveObject` -- which is how the calls were checked against the
   library rather than against its headers.
 - **`src/session.rs`** is the interactive loop: a scene you keep
   editing and a renderer that keeps what it already built.
@@ -211,37 +236,59 @@ ways.
   in `scene_rdl2`, and the evidence that they are safe is in the
   report.
 
-**Waiting on knowledge this repository does not have.** Each is a name
-or a rule that a guess would get plausibly wrong, which is the failure
-the oracle discipline exists to prevent:
+**The four that were waiting on knowledge are answered**, and none of
+them by a guess. They are worth reading as a set, because each was
+settled by finding something readable rather than by picking the
+plausible name:
 
-- `T1.3a`, which ɴsɪ shader parameter means `roughness`.
-- `T2.4`, which ɴsɪ attribute carries velocity. MoonRay's side is
-  fully mapped; only the name is missing.
-- `T1.7a`, how to recognise an area light, which in ɴsɪ is geometry
-  wearing an emissive shader.
-- `T1.6`, whether ɴsɪ's `fov` is vertical. Read as vertical from how
-  `nsi-toolbelt` uses it; unconfirmed against a 3Delight render.
+- `T1.3a`, which ɴsɪ shader parameter means `roughness`. There is no
+  answer in general -- an ɴsɪ shader is an OSL shader and its parameter
+  names are its author's. `.oso` is a text format, so the `PARAMETERS`
+  table in `flush.rs` was *read* off the shaders 3Delight ships.
+- `T1.7a`, how to recognise a light. ɴsɪ has no light nodes: geometry
+  whose surface shader produces an `emission()` closure is one. `LIGHTS`
+  in `flush.rs` matches the same short list of emitters by name.
+- `T1.6`, whether ɴsɪ's `fov` is vertical. It is, measured against
+  3Delight with `tools/probe/framing.nsi` on a 400x200 frame where the
+  two axes cannot be confused.
+- `T2.4`, velocity. **Not applicable**: ɴsɪ has no such attribute.
+  MoonRay's side was fully mapped and there was nothing to map it to.
 
-**Still worth doing here:**
+The substitution those two tables drive is now the *fallback*. Shading
+runs OSL -- see `specs/003-osl/` -- and the tables are what a build
+without `$OSL_ROOT` gets.
 
+**Still worth doing here**, and the first two are the ones with real
+weight:
+
+- **The orthographic camera renders through `moonray` and not through
+  the in-process path.** The flush emits the right class and the right
+  attributes, and the emitted `.rdla` renders. The same document
+  applied to a live `SceneContext` and rendered progressively comes
+  back empty, with no error from `apply` and no complaint from render
+  prep. Batch against progressive is the difference that has not been
+  ruled out. This is the only open item that is a *silent wrong
+  answer* rather than a missing feature, which is why it is first.
+- **An OSL volume shader.** The geometry crosses -- the interface's
+  `volume` node is OpenVDB and `VdbGeometry` reads exactly that -- but
+  it renders through MoonRay's stock `VdbVolume` rather than the
+  network bound through `volumeshader`. OSL's `anisotropic_vdf` and
+  `medium_vdf` against `VolumeShader`'s four separate virtuals, from
+  one OSL execution, is the missing piece. Two things already measured
+  on the way are in `specs/003-osl/research.md`, and both are the kind
+  that cost an afternoon: a volume is shaded through the `Layer`'s
+  *sixth* column, and `emission_grid` must name an RGB grid.
 - **`T0.6`, the authoring twin of `RdlMeshGeometry`.** Less valuable
-  than it was — `tests/apply.rs` now checks against real rdl2 — but it
+  than it was -- `tests/apply.rs` now checks against real rdl2 -- but it
   is what would let a host with no MoonRay check a mesh scene.
 - **`T5.2`, the `dlopen` route for callbacks.** Deprioritised
   deliberately: the closures work where the application and this
   backend share one `nsi-ffi-wrap`, which is the case that was asked
   for.
-- **`TN.2`, OSL.** MoonRay has none. Its own spec, and its own
-  project; `BsdfBuilder` is closure-shaped and is the plausible
-  landing site.
 
-Materials are substituted, not translated: every ɴsɪ shader becomes a
-`UsdPreviewSurface` at its defaults. Carrying its *parameters* across
-(`T1.3a`) needs real scenes — which ɴsɪ shader parameter means
-`roughness` depends on the shader, and a guessed name table is exactly
-the kind of plausible-but-wrong the oracle discipline exists to
-prevent.
+The rest of the OSL open questions -- `vdbparticles`, AOV forwarding,
+3Delight's hair closure, scoped `getattribute` -- are listed with their
+reasoning at the end of `specs/003-osl/research.md`.
 
 ## What Has Been Rendered
 
@@ -251,24 +298,41 @@ Through a spawned MoonRay:
 - a translated quad, checked against where the transform puts it rather
   than against the matrix in the file (`T1.2`);
 - two quads with two materials, red and green, asserted per channel
-  (`T1.4` — the inherited top risk, and the one thing reading the file
+  (`T1.4` -- the inherited top risk, and the one thing reading the file
   could never have settled);
 - a moving quad, blurred (`T2.2`);
 - a `polyhedron-ops` polyhedron through the backend loaded as
-  `lib3delight.so` — the drop-in path end to end with an unmodified
+  `lib3delight.so` -- the drop-in path end to end with an unmodified
   consumer (`examples/polyhedron`).
 
 Through a **linked** MoonRay, with no file and no process:
 
 - a lit quad, asserted at the centre of frame and across a tenth of
-  the pixels — "any pixel is non-zero" would pass on a stray sample;
+  the pixels -- "any pixel is non-zero" would pass on a stray sample;
 - the same, streamed to an application's closures as it converged: six
   buckets for a frame taking a third of a second;
 - a red quad turning green through one `synchronize`, and a quad
-  moving to where a transform edit put it — both asserted on pixels,
+  moving to where a transform edit put it -- both asserted on pixels,
   because "applied but not marked" is a scene holding the new value
   while the render shows the old one, and reading the scene back would
   pass on exactly that.
+
+With OSL executing, which is `003`:
+
+- an arbitrary OSL shader, compiled by `oslc` during the test rather
+  than checked in, so what is proved is that *a* shader crosses and not
+  that one does;
+- an ɴsɪ shader network as an OSL group specification, and a shader
+  that transforms coordinates -- which is what caught render space
+  following the camera (`O9`);
+- the shaders 3Delight ships, run as themselves rather than
+  substituted;
+- an OSL displacement, which is a usage of the same system rather than
+  a second one (`O11`);
+- an OSL light lighting the scene and varying across its own surface;
+- OpenVDB volumes;
+- an output layer naming a lobe, which reaches a MoonRay AOV -- and the
+  material has to stay unlabelled for it to (`O16`).
 
 ## Eight Things Found By Running It
 
@@ -314,7 +378,7 @@ a crash or a silent wrong answer rather than an error:
 
 **The incremental path is measured now, and the measurement says
 "not yet".** A shader edit, a transform, a deformation and a hide each
-cross in one synchronise and are asserted on pixels — but
+cross in one synchronise and are asserted on pixels -- but
 `Session::last_cost` says every one of them re-tessellates. Two
 different reasons, and only one is ours to fix:
 
@@ -337,7 +401,7 @@ never wired up at all.
 rendering rather than by reasoning, and both now fixed:
 
 - MoonRay renders what the `Layer` names. Geometry left out of it is
-  not dim — it is absent.
+  not dim -- it is absent.
 - MoonRay skips a `Layer` row whose **material column is `undef()`**.
   The same triangle is missing from the image without a material and
   present with one, which is why unshaded geometry gets a default
