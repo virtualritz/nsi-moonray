@@ -2525,6 +2525,7 @@ fn camera(
     let mut object = Object::new(class, handle);
 
     object = with_transform(object, scene, handle, shutter, flushed);
+    object = clipping(object, node, handle, flushed);
 
     let degrees = match node.effective("fov").map(|arg| &arg.data) {
         Some(OwnedData::F32(values)) => values.first().copied(),
@@ -3009,6 +3010,67 @@ fn screen_window(scene: &Scene, resolution: (i32, i32)) -> [f64; 4] {
 
     let aspect = f64::from(resolution.0) / f64::from(resolution.1.max(1));
     [-aspect, -1.0, aspect, 1.0]
+}
+
+/// The near and far clipping planes.
+///
+/// `clippingrange` is one of the attributes the specification gives
+/// *all* camera nodes, and MoonRay's `Camera` base class declares
+/// `near` and `far` for the same thing -- so this is a rename.
+///
+/// It matters more than a rename usually does. MoonRay's defaults are
+/// `near` 1 and `far` 10000, in world units, and a scene modelled in
+/// centimetres or millimetres puts its whole subject inside the near
+/// plane. Nothing is reported when that happens: the geometry is
+/// simply not there, and the image is empty in the way this backend
+/// keeps running into.
+fn clipping(
+    object: Object,
+    node: &Node,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    let values: Vec<f64> =
+        match node.effective("clippingrange").map(|arg| &arg.data) {
+            Some(OwnedData::F64(values)) => values.clone(),
+            Some(OwnedData::F32(values)) => {
+                values.iter().map(|value| *value as f64).collect()
+            }
+            _ => return object,
+        };
+
+    if values.len() < 2 {
+        flushed.limitations.push(format!(
+            "camera {handle:?} has a \"clippingrange\" of {} value(s) \
+             rather than two; MoonRay's own near and far are used",
+            values.len()
+        ));
+        return object;
+    }
+
+    let (near, far) = (values[0], values[1]);
+
+    // A near plane at or behind the camera is not a clipping range,
+    // and rdl2 clamps it to 0.01 without saying so -- which renders a
+    // plausible image of a scene that was asking for something else.
+    //
+    // Spelled out rather than negated, so that NaN -- which fails
+    // every comparison and would slip through a `<=` -- is refused
+    // along with the rest.
+    let usable =
+        near.is_finite() && far.is_finite() && near > 0.0 && far > near;
+    if !usable {
+        flushed.limitations.push(format!(
+            "camera {handle:?} has a \"clippingrange\" of \
+             [{near}, {far}], which is not a near plane in front of a \
+             far one; MoonRay's own near and far are used"
+        ));
+        return object;
+    }
+
+    object
+        .set("near", Value::Float(near as f32))
+        .set("far", Value::Float(far as f32))
 }
 
 /// Say when a perspective camera's screen window is not the one its
@@ -5061,6 +5123,75 @@ mod tests {
             "the transform must be interpolated to the shutter's \
              ends\n{rdla}"
         );
+    }
+
+    /// **`clippingrange` becomes `near` and `far`, on every camera
+    /// type.**
+    ///
+    /// MoonRay defaults to a near plane at 1 world unit, so a scene
+    /// modelled in centimetres puts its whole subject inside it and
+    /// renders nothing, with no error.
+    #[test]
+    fn a_clipping_range_becomes_near_and_far() {
+        for node_type in ["perspectivecamera", "orthographiccamera"] {
+            let mut scene = triangle();
+            scene.delete("cam").expect("a recordable edit");
+            scene.create("cam", node_type).expect("a recordable edit");
+            scene.connect("cam", None, ".root", "objects").unwrap();
+            scene.connect("screen", None, "cam", "screens").unwrap();
+            scene
+                .set_attribute(
+                    "cam",
+                    vec![
+                        arg("fov", Type::F32, OwnedData::F32(vec![45.0])),
+                        arg(
+                            "clippingrange",
+                            Type::F64,
+                            OwnedData::F64(vec![0.01, 250.0]),
+                        ),
+                    ],
+                )
+                .expect("a recordable edit");
+
+            let rdla = flush(&scene).to_rdla();
+
+            assert!(
+                rdla.contains("[\"near\"] = 0.00999999978,"),
+                "{node_type}\n{rdla}"
+            );
+            assert!(rdla.contains("[\"far\"] = 250,"), "{node_type}\n{rdla}");
+        }
+    }
+
+    /// A range that is not a near plane in front of a far one is
+    /// reported: rdl2 clamps silently, and a clamped plane renders a
+    /// plausible image of a scene nobody described.
+    #[test]
+    fn a_clipping_range_that_is_not_one_is_reported() {
+        let mut scene = triangle();
+        scene
+            .set_attribute(
+                "cam",
+                vec![arg(
+                    "clippingrange",
+                    Type::F64,
+                    OwnedData::F64(vec![0.0, -1.0]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("\"cam\"")
+                    && line.contains("clippingrange")),
+            "{:?}",
+            flushed.limitations
+        );
+        assert!(!flushed.to_rdla().contains("[\"near\"]"), "nothing is set");
     }
 
     /// A perspective camera's screen window is not carried, and the
