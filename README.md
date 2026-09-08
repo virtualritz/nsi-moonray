@@ -166,6 +166,17 @@ verifies the tools and headers before anything is cloned, which beats
 learning an hour in that ISPC is missing, and the build picks up where
 a failure stopped.
 
+```bash
+cargo binstall --git https://github.com/prefix-dev/pixi pixi
+```
+
+**`--git`, not the plain crate name.** crates.io still has pixi 0.15.2
+while the current release is 0.80, so `cargo binstall pixi` fetches
+something two years old. This form reads the version from the
+repository and puts the binary in `~/.cargo/bin` like any other Rust
+tool, rather than creating `~/.pixi` and editing a shell profile the
+way the installer at pixi.sh does.
+
 **Dependencies come from [pixi](https://pixi.sh), and that is not a
 preference.** Open Shading Language is not packaged by Ubuntu -- its
 `libosl-dev` is a library for Shogi programs -- nor by Homebrew, and

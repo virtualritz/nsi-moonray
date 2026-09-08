@@ -11,8 +11,16 @@
 # against a matching OpenImageIO, which is the part that is tedious by
 # hand.
 #
+#     cargo binstall --git https://github.com/prefix-dev/pixi pixi
 #     just pixi-install     resolve and install
 #     just test-rdl2        picks the environment up on its own
+#
+# **Install pixi with `--git`, not by name.** crates.io still has
+# 0.15.2 while the current release is 0.80.0, so `cargo binstall pixi`
+# fetches something two years old. `--git` reads the version from the
+# repository and lands the binary in `~/.cargo/bin` like any other Rust
+# tool -- the shell installer at pixi.sh instead creates `~/.pixi` and
+# edits a shell profile.
 #
 # Two platforms, because those are the two MoonRay builds on. Windows
 # is absent on purpose: its CMake has no MSVC path at all. See

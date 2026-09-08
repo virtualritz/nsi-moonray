@@ -97,6 +97,13 @@ setup: pixi-install renderer
 
 # Resolve and install the dependencies into `.pixi/`. No root.
 pixi-install:
+    #!/usr/bin/env sh
+    if ! command -v pixi >/dev/null 2>&1; then
+        echo "pixi is not installed. Use --git, not the plain name:" >&2
+        echo "  cargo binstall --git https://github.com/prefix-dev/pixi pixi" >&2
+        echo "crates.io still has 0.15.2; the current release is 0.80." >&2
+        exit 1
+    fi
     pixi install
 
 # The system-package route instead of pixi: no OSL, and asks for sudo.
