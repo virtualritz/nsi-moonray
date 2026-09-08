@@ -137,9 +137,24 @@ described above — about 50 minutes on four cores — and the renderer it
 produced rendered a scene this crate flushed. Each of the five problems
 named below stopped the build until it was worked around.
 
-One caveat: `MOONRAY_BUILD_TESTING=NO` does not stop the test binaries
-being configured, and two of them fail to link. `cmake --build
-build-moonray --target moonray` builds the renderer without them.
+One caveat, **corrected 2026-09-08**: `MOONRAY_BUILD_TESTING=NO` does
+not stop the test binaries being configured, and two of them fail to
+link. The flag that does is CMake's own `BUILD_TESTING`. MoonRay's gate
+reads
+
+```cmake
+if((CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME OR MOONRAY_BUILD_TESTING)
+        AND BUILD_TESTING)
+```
+
+and the first clause is already true whenever MoonRay is the top-level
+project, which it is in a build like this -- so its own flag never had
+an effect. Pass `-DBUILD_TESTING=OFF`.
+
+Building the `moonray` target alone also avoids the test binaries and
+is the *wrong* answer: the install set is wider than that target's
+dependencies, so `cmake --install` then fails on a `libcommon_noise.so`
+nothing has built. `packaging/renderer.sh` does this correctly.
 
 The dependencies are all in Ubuntu 24.04 except OpenSubdiv and
 OpenImageDenoise:

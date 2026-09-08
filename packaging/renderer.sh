@@ -228,6 +228,7 @@ step "scene_rdl2"
 CMAKE_MODULES_ROOT="$MODULES" cmake -S "$VENDOR/scene_rdl2" -B "$VENDOR/build-rdl2" \
     -G "Unix Makefiles" $TOOLCHAIN \
     -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTING=OFF \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_MODULE_PATH="$MODULES/cmake"
 cmake --build "$VENDOR/build-rdl2" -j"$JOBS"
@@ -276,6 +277,7 @@ cp -a "$VENDOR/$OIDN/lib/." "$PREFIX/lib/"
 step "mcrt_denoise"
 CMAKE_MODULES_ROOT="$MODULES" cmake -S "$VENDOR/mcrt_denoise" -B "$VENDOR/build-denoise" \
     -G "Unix Makefiles" $TOOLCHAIN \
+    -DBUILD_TESTING=OFF \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_MODULE_PATH="$MODULES/cmake" \
     -DMOONRAY_USE_OPTIX=NO
@@ -289,14 +291,26 @@ CMAKE_MODULES_ROOT="$MODULES" cmake -S "$VENDOR/moonray" -B "$VENDOR/build-moonr
     -G "Unix Makefiles" $TOOLCHAIN \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_MODULE_PATH="$MODULES/cmake" \
-    -DMOONRAY_USE_OPTIX=NO -DMOONRAY_BUILD_TESTING=NO \
+    -DMOONRAY_USE_OPTIX=NO -DBUILD_TESTING=OFF \
     -DOpenSubDiv_INCLUDE_DIR="$OSD_INCLUDE" \
     -DOpenSubDiv_CPU_LIBRARY="$OSD_LIBRARY" \
     -DOpenSubDiv_GPU_LIBRARY="$OSD_LIBRARY"
-# **`MOONRAY_BUILD_TESTING=NO` does not stop the test binaries being
-# configured**, and two of them fail to link. Naming the target builds
-# the renderer without them.
-cmake --build "$VENDOR/build-moonray" -j"$JOBS" --target moonray
+# **`BUILD_TESTING=OFF` is the flag, not `MOONRAY_BUILD_TESTING=NO`.**
+# The gate is
+#
+#     if((CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME OR MOONRAY_BUILD_TESTING)
+#             AND BUILD_TESTING)
+#
+# and the first clause is already true when MoonRay is the top-level
+# project, which it is here -- so MoonRay's own flag never had an
+# effect and the tests were always configured. Two of them fail to
+# link.
+#
+# Building the `moonray` target alone avoided them and was the wrong
+# answer: the install set is wider than that target's dependencies, so
+# `cmake --install` then failed on a `libcommon_noise.so` nothing had
+# built. With the tests gone, `all` builds and installs cleanly.
+cmake --build "$VENDOR/build-moonray" -j"$JOBS"
 cmake --install "$VENDOR/build-moonray"
 
 step "done"
