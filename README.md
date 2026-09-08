@@ -57,9 +57,19 @@ subcommands, same frame-sequence syntax. What differs is underneath:
 streams into `nsi-intermediate` and builds MoonRay's scene from them
 directly.
 
-`--dso-path`, or `$NSI_MOONRAY_DSO`, has to name MoonRay's `rdl2dso`
-directory. Without it no scene class resolves and the render comes out
-empty rather than failing.
+Every scene class is loaded from MoonRay's `rdl2dso` directory, and an
+ordinary install is found without being named: beside the running
+binary first, so a bundle works wherever it was unpacked, then where
+the platform puts one -- `~/.local/share/moonray` on Linux,
+`~/Library/Application Support/MoonRay` on macOS, `%LOCALAPPDATA%\MoonRay`
+on Windows, then the system-wide equivalents.
+
+`--dso-path`, or `$NSI_MOONRAY_DSO`, overrides that. It is not
+second-guessed: a path that is not there fails rather than falling back
+to an install you did not ask for, because rendering with a renderer
+you did not choose is the worse outcome. When nothing is found, every
+directory tried is listed -- a path that is almost right is the common
+case and is invisible otherwise.
 
 Built without the `rdl2` feature -- the default, since linking
 `scene_rdl2` needs it installed -- `mnry render` writes the scene out and

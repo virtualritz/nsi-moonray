@@ -73,11 +73,15 @@ pub struct Renderer {
         long,
         env = "NSI_MOONRAY_DSO",
         value_name = "DIR",
-        help = "MoonRay's rdl2dso directory",
+        help = "MoonRay's rdl2dso directory [default: found]",
         long_help = "MoonRay's rdl2dso directory\n\
-            Every scene class is loaded from here. Without it MoonRay \
-            resolves nothing and renders an empty frame rather than \
-            reporting, so this is worth getting right.",
+            Every scene class is loaded from here, and an ordinary \
+            install is found without being named: beside this binary \
+            first, so a bundle works wherever it was unpacked, then \
+            where the platform puts one. This overrides that, and is \
+            not second-guessed -- a path that is not there fails rather \
+            than falling back to an install you did not ask for. \
+            `mnry render -v` says which directory was used.",
         value_hint = clap::ValueHint::DirPath
     )]
     pub dso_path: Option<PathBuf>,

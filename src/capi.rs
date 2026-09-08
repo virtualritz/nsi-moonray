@@ -723,10 +723,11 @@ pub unsafe extern "C" fn NSIRenderControl(
 pub fn render_in_process(scene: &nsi_intermediate::Scene) -> bool {
     let Some(dso) = moonray_dso_path() else {
         eprintln!(
-            "nsi-moonray: $NSI_MOONRAY_DSO or $MOONRAY_ROOT names \
-             MoonRay's `rdl2dso`; without it the renderer cannot be used \
-             in process and the scene is handed to the `moonray` binary \
-             instead"
+            "nsi-moonray: MoonRay's `rdl2dso` was not found in any of \
+             {:?}, so the renderer cannot be used in process and the \
+             scene is handed to the `moonray` binary instead. \
+             $NSI_MOONRAY_DSO names it outright.",
+            crate::dso::searched()
         );
         return false;
     };
@@ -808,17 +809,14 @@ fn wait_for_frame(ctx: NsiContext) {
 
 /// Where MoonRay's scene classes live.
 ///
-/// `$NSI_MOONRAY_DSO` names the directory outright; `$MOONRAY_ROOT`
-/// names an install and `rdl2dso` is found under it.
+/// A drop-in renderer has no command line to be told on, so this is
+/// the path that most needs finding an ordinary install by itself. The
+/// order and the reasoning are in [`crate::dso`]; the environment
+/// still wins, and a bundle is found beside this library's own
+/// executable.
 #[cfg(all(feature = "rdl2", moonray))]
 fn moonray_dso_path() -> Option<String> {
-    if let Some(path) = std::env::var_os("NSI_MOONRAY_DSO") {
-        return Some(path.to_string_lossy().into_owned());
-    }
-
-    let root = std::env::var_os("MOONRAY_ROOT")?;
-    let path = PathBuf::from(root).join("rdl2dso");
-    path.is_dir().then(|| path.to_string_lossy().into_owned())
+    crate::dso::find().map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Where the `.rdla` for a context goes.

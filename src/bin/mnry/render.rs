@@ -90,13 +90,29 @@ fn in_process(
 ) -> Result<()> {
     use nsi_moonray::session::Session;
 
-    let Some(dso) = args.renderer.dso_path.as_ref() else {
+    // `--dso-path` is an override, not the only way to be told. An
+    // ordinary install is found where the platform puts one, and a
+    // bundle is found beside this binary -- `nsi_moonray::dso` has the
+    // order and the reasoning.
+    let Some(dso) =
+        nsi_moonray::dso::resolve(args.renderer.dso_path.as_deref())
+    else {
         return Err(anyhow!(
-            "--dso-path (or $NSI_MOONRAY_DSO) has to name MoonRay's \
-             rdl2dso directory; without it no scene class resolves and \
-             the render would come out empty rather than fail"
+            "MoonRay's rdl2dso directory was not found, and without it no \
+             scene class resolves -- the render would come out empty \
+             rather than fail. Name it with --dso-path or \
+             $NSI_MOONRAY_DSO. Looked in:\n{}",
+            nsi_moonray::dso::searched()
+                .iter()
+                .map(|path| format!("  {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
         ));
     };
+
+    if verbose > 0 && args.renderer.dso_path.is_none() {
+        eprintln!("mnry: scene classes from {}", dso.display());
+    }
 
     if args.renderer.threads.is_some() && verbose > 0 {
         eprintln!(
@@ -179,7 +195,9 @@ fn spawn(scene_file: PathBuf, args: &cli::Render) -> Result<()> {
     let mut job = nsi_moonray::render::Render::new(scene_file);
     job.image.clone_from(&args.output);
     job.threads = args.renderer.threads;
-    job.dso_path.clone_from(&args.renderer.dso_path);
+    // Same resolution as the in-process path, so a spawned render and
+    // a linked one load the same classes.
+    job.dso_path = nsi_moonray::dso::resolve(args.renderer.dso_path.as_deref());
 
     job.run().map_err(|error| anyhow!("{error}"))
 }
