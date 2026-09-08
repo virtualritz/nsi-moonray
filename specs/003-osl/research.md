@@ -660,8 +660,40 @@ shader's own default in place.
   hands to `moonray` and renders, in both execution modes. The same
   document applied to a live `SceneContext` and rendered
   progressively comes back empty, with no error from `apply` and no
-  complaint from render prep. Batch against progressive is the
-  difference that has not been ruled out.
+  complaint from render prep.
+
+  **The observation changes two things at once**, which is why it has
+  not resolved: the transport (rdl2's `AsciiReader` against `apply`)
+  *and* the render mode (batch against progressive). Only the second
+  was named as unruled-out. Two experiments separate them, and neither
+  has to render: apply the document to a live context and
+  `Context::write_ascii` it, then diff against the `.rdla` that works
+  -- `tests/apply.rs` is already exactly this shape -- and render that
+  same working `.rdla` in process in `Mode::Batch` before
+  `Mode::Progressive`.
+
+  **A third possibility, which the source supports and which is not a
+  transport bug at all.** `camera()` gives an `OrthographicCamera` no
+  attributes: "orthographic and spherical cameras have no attributes of
+  their own on either side". But an ɴsɪ orthographic camera has no
+  `fov`, so its extent comes from the `screen` node's `screenwindow`,
+  whose default the specification gives as `[-f, -1], [f, 1]` for
+  `f = xres/yres` -- and **the flush carries no `screenwindow`
+  anywhere**. MoonRay's orthographic frustum is
+  `film_width_aperture * window`, and
+  `dso/camera/OrthographicCamera/attributes.cc` defaults that to
+  `24.0`. So the view is a 24-unit-wide slab of world space whatever
+  the scene asked for, and a unit-sized subject lands on about one
+  twenty-fourth of the frame width -- under two percent of the pixels,
+  and gone entirely if it is off centre or smaller.
+
+  That would look like "renders empty" and be nothing of the kind. It
+  also predicts the `.rdla` through `moonray` is *equally* wrong, and
+  was judged by a different standard: an image that opens, against a
+  render asserted on pixels. Re-checking what the spawned render
+  actually contained is the cheapest step of the three, and it comes
+  first. `screenwindow` is worth carrying either way; it is missing for
+  every camera, and only orthographic makes it obvious.
 - **AOV forwarding.** 3Delight has a per-object attribute that puts a
   diffuse surface seen in a mirror into the *diffuse* AOV rather than
   the reflection one. MoonRay's LPEs have no equivalent, and inventing
