@@ -1239,7 +1239,9 @@ fn deformation(
 fn points_of(values: &[f32]) -> Value {
     Value::Vector(
         values
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|p| Value::Vec3f([p[0], p[1], p[2]]))
             .collect(),
     )
@@ -1496,7 +1498,9 @@ fn mesh(
                     "vertex_list_0",
                     Value::Vector(
                         points
-                            .chunks_exact(3)
+                            .as_chunks::<3>()
+                            .0
+                            .iter()
                             .map(|p| Value::Vec3f([p[0], p[1], p[2]]))
                             .collect(),
                     ),
@@ -1589,7 +1593,9 @@ fn primitive_variables(
             "uv_list",
             Value::Vector(
                 values
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|st| Value::Vec2f([st[0], st[1]]))
                     .collect(),
             ),
@@ -1601,7 +1607,9 @@ fn primitive_variables(
             "normal_list",
             Value::Vector(
                 values
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .map(|n| Value::Vec3f([n[0], n[1], n[2]]))
                     .collect(),
             ),
@@ -1618,8 +1626,7 @@ fn primitive_variables(
             continue;
         }
 
-        let Some(user_data) =
-            user_data(scene, name, argument, handle, flushed)
+        let Some(user_data) = user_data(scene, name, argument, handle, flushed)
         else {
             continue;
         };
@@ -1705,15 +1712,21 @@ fn user_data(
 
     let vector = Value::Vector(match components {
         3 if argument.type_tag == Type::Color => expanded
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|v| Value::Rgb([v[0], v[1], v[2]]))
             .collect(),
         3 => expanded
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|v| Value::Vec3f([v[0], v[1], v[2]]))
             .collect(),
         2 => expanded
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|v| Value::Vec2f([v[0], v[1]]))
             .collect(),
         _ => expanded.into_iter().map(Value::Float).collect(),
@@ -3136,16 +3149,13 @@ mod tests {
 
         let flushed = flush(&scene);
 
-        assert!(
-            !flushed.to_rdla().contains("heat"),
-            "{}",
-            flushed.to_rdla()
-        );
+        assert!(!flushed.to_rdla().contains("heat"), "{}", flushed.to_rdla());
         assert!(
             flushed
                 .limitations
                 .iter()
-                .any(|line| line.contains("heat") && line.contains("not carried")),
+                .any(|line| line.contains("heat")
+                    && line.contains("not carried")),
             "{:?}",
             flushed.limitations
         );

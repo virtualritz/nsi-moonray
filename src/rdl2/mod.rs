@@ -335,6 +335,13 @@ macro_rules! vector {
     };
 }
 
+// One line per rdl2 type, and the table is the point: what is here and
+// what is missing is readable at a glance only while it stays a table.
+// `rustfmt` puts a blank line between macro invocations in an `impl`,
+// which turns twenty-five lines into fifty, so this half of `Update`
+// is its own block and is skipped. The hand-written methods below are
+// formatted normally.
+#[rustfmt::skip]
 impl Update<'_> {
     scalar!(set_int, nmr_set_int, i32);
     scalar!(set_long, nmr_set_long, i64);
@@ -363,7 +370,9 @@ impl Update<'_> {
     vector!(set_vec4f_vector, nmr_set_vec4f_vector, f32, 4);
     vector!(set_mat4f_vector, nmr_set_mat4f_vector, f32, 16);
     vector!(set_mat4d_vector, nmr_set_mat4d_vector, f64, 16);
+}
 
+impl Update<'_> {
     pub fn set_bool(
         &self,
         attribute: &str,
