@@ -9,7 +9,7 @@ were done on a 4-core, 16 GB container with no renderer present.
 
 Verified 2026-09-05 on Ubuntu 24.04, GCC 13.3, CMake 3.28.3.
 `scene_rdl2` needs Boost, Lua, CppUnit, OpenSSL, JsonCpp, Log4cplus,
-Python and TBB — all stock packages — plus **ISPC**, which
+Python and TBB -- all stock packages -- plus **ISPC**, which
 `research.md` F7 originally missed: `scene_rdl2/CMakeLists.txt` adds
 `ISPC` to `project(... LANGUAGES ...)` and five library sources are
 `.ispc`. Nothing from Embree/OpenVDB/OpenImageIO is needed; that part
@@ -59,8 +59,8 @@ needed by 'lib/common/math/libcommon_math.so', missing and no known
 rule to make it
 ```
 
-Reproduced with CMake 3.23.1 — the version MoonRay's own
-`install_packages.sh` downloads — as well as 3.28.3, so it is not a
+Reproduced with CMake 3.23.1 -- the version MoonRay's own
+`install_packages.sh` downloads -- as well as 3.28.3, so it is not a
 CMake regression; the Makefile generator resolves the same property to
 the right place and builds clean.
 
@@ -80,7 +80,7 @@ library.
 
 ### Compiling Against The Install
 
-`scene_rdl2`'s headers do not stand on their own — its own build passes
+`scene_rdl2`'s headers do not stand on their own -- its own build passes
 definitions on the command line that a consumer must repeat, or
 `rdl2/Types.h` fails to parse at the first `__cdecl` function typedef:
 
@@ -99,7 +99,7 @@ needed even to write a scene out.
 
 `tools/oracle` builds small scenes through the real library and writes
 them with rdl2's own `AsciiWriter`. **Nothing about `.rdla` is
-inferred** — see `oracle/` for the captured output and
+inferred** -- see `oracle/` for the captured output and
 `contracts/flush.md` for what it settled.
 
 ```bash
@@ -114,7 +114,7 @@ LD_LIBRARY_PATH=/path/to/install/lib \
     specs/001-moonray-backend/oracle
 ```
 
-And to check that rdl2 reads back what it wrote — and, since the
+And to check that rdl2 reads back what it wrote -- and, since the
 emitter produces the same bytes, what this crate writes:
 
 ```bash
@@ -129,11 +129,11 @@ and its reader returns `0`.
 
 ## Building MoonRay Itself
 
-Only needed to *render*. Nothing else here does — the emitter, the
+Only needed to *render*. Nothing else here does -- the emitter, the
 oracle and the flush are all checked without it.
 
 **Status: verified.** This recipe built MoonRay on the container
-described above — about 50 minutes on four cores — and the renderer it
+described above -- about 50 minutes on four cores -- and the renderer it
 produced rendered a scene this crate flushed. Each of the five problems
 named below stopped the build until it was worked around.
 
@@ -215,8 +215,8 @@ problem:
    OpenSubdiv does not build, and `find_package_handle_standard_args`
    fails on the `NOTFOUND`. Pointing `OpenSubDiv_GPU_LIBRARY` at
    `libosdCPU.so` gets past it; nothing links GPU subdivision.
-3. **OpenImageDenoise cannot be built from a plain clone** — its
-   trained weights are Git LFS pointers and the build refuses them —
+3. **OpenImageDenoise cannot be built from a plain clone** -- its
+   trained weights are Git LFS pointers and the build refuses them --
    and `mcrt_denoise` needs **2.x**, not 1.4: it uses
    `OIDN_DEVICE_TYPE_CUDA`, which 1.4 does not have. The release
    tarball ships weights, libraries and a CMake config.
@@ -308,7 +308,7 @@ cargo test
 
 A path dependency, and temporary: the crate is unpublished, and a git
 dependency on that workspace makes Cargo fetch its private
-`.blueprints` submodule. `[patch]` does not help — Cargo fetches the
+`.blueprints` submodule. `[patch]` does not help -- Cargo fetches the
 patched source anyway, which is worth knowing before trying it. `T0.7`.
 
 ## Verification Commands
