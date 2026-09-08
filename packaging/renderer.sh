@@ -136,7 +136,20 @@ if [ "$CHECK" -eq 1 ]; then
 fi
 
 mkdir -p "$VENDOR" "$PREFIX"
+
+# **MoonRay's DSO build runs a tool that scene_rdl2 installed.**
+# `rdl2_json_exporter` generates a `.json` per DSO, and it is executed
+# from the prefix during the build -- so the prefix has to be on both
+# the command path and the loader path. Without the second it dies with
+#
+#     rdl2_json_exporter: error while loading shared libraries:
+#     libscene_rdl2.so: cannot open shared object file
+#
+# which names neither MoonRay nor the step that ran it. The pixi
+# libraries go on for the same reason.
 export PATH="$PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$PREFIX/lib${PIXI_ENV:+:$PIXI_ENV/lib}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export DYLD_LIBRARY_PATH="$PREFIX/lib${PIXI_ENV:+:$PIXI_ENV/lib}${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 
 # A shallow clone at a ref, idempotent: running this again after a
 # failure picks up where it stopped rather than starting over.
