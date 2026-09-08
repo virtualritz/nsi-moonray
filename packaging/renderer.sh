@@ -175,14 +175,23 @@ fetch OpenSubdiv    https://github.com/PixarAnimationStudios/OpenSubdiv.git "$OP
 
 MODULES="$PWD/$VENDOR/cmake_modules"
 
-# **`std::function` without `<functional>`.** GCC 13 rejects it, it is
-# one line, and it is the first thing that stops this build. Patched
-# rather than reported here because the report is already written.
-HEADER="$VENDOR/scene_rdl2/lib/common/grid_util/BinPacketDictionary.h"
-if [ -f "$HEADER" ] && ! grep -q "#include <functional>" "$HEADER"; then
-    step "patching BinPacketDictionary.h (GCC 13 needs <functional>)"
-    sed -i.bak '1a #include <functional>' "$HEADER"
-fi
+# **Two headers used without being included.** Both are one line, and
+# both stop the build outright. Which of them you hit depends on the
+# compiler: GCC 13 rejects the first, clang 18 rejects both, and a
+# standard library that happens to include them transitively rejects
+# neither -- which is why they reached a release at all.
+patch_include() {
+    file="$VENDOR/scene_rdl2/$1"
+    header="$2"
+    [ -f "$file" ] || return 0
+    grep -q "#include <$header>" "$file" && return 0
+    step "patching $(basename "$file") (needs <$header>)"
+    sed -i.bak "1a #include <$header>" "$file"
+}
+# `std::function`.
+patch_include lib/common/grid_util/BinPacketDictionary.h functional
+# `std::sort` and `std::max_element`.
+patch_include lib/common/grid_util/AffinityResourceControl.cc algorithm
 
 # **The Python bindings are built unconditionally and are not wanted.**
 # `mod/python/py_scene_rdl2` needs Boost.Python and a matching Python,
@@ -200,6 +209,17 @@ if [ -f "$MOD" ] && grep -q "^add_subdirectory(python)" "$MOD"; then
     sed -i.bak 's|^add_subdirectory(python)|# skipped by packaging/renderer.sh: needs Boost.Python\n# add_subdirectory(python)|' "$MOD"
 fi
 
+# **GCC, explicitly, when it is there.** `/usr/bin/c++` is clang on
+# some distributions, and the build above is only known to work with
+# GCC -- `quickstart.md` verified it on 13.3. Letting CMake take
+# whatever `c++` happens to be turns one missing include into an
+# unknown number of them. Override with `$CC`/`$CXX` to use another.
+TOOLCHAIN=""
+if [ -z "${CXX:-}" ] && command -v g++ >/dev/null 2>&1; then
+    TOOLCHAIN="-DCMAKE_C_COMPILER=$(command -v gcc) \
+-DCMAKE_CXX_COMPILER=$(command -v g++)"
+fi
+
 step "scene_rdl2"
 # **The Makefile generator, not Ninja.** `ISPC_HEADER_DIRECTORY` is set
 # with a leading slash, so under Ninja the generated header is declared
@@ -207,7 +227,7 @@ step "scene_rdl2"
 # tree. Same under the CMake version MoonRay's own script downloads, so
 # it is not a regression to wait out.
 CMAKE_MODULES_ROOT="$MODULES" cmake -S "$VENDOR/scene_rdl2" -B "$VENDOR/build-rdl2" \
-    -G "Unix Makefiles" \
+    -G "Unix Makefiles" $TOOLCHAIN \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_MODULE_PATH="$MODULES/cmake"
@@ -239,7 +259,7 @@ cp -a "$VENDOR/$OIDN/lib/." "$PREFIX/lib/"
 
 step "mcrt_denoise"
 CMAKE_MODULES_ROOT="$MODULES" cmake -S "$VENDOR/mcrt_denoise" -B "$VENDOR/build-denoise" \
-    -G "Unix Makefiles" \
+    -G "Unix Makefiles" $TOOLCHAIN \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_MODULE_PATH="$MODULES/cmake" \
     -DMOONRAY_USE_OPTIX=NO
@@ -250,7 +270,7 @@ step "moonray"
 # **`FindOpenSubDiv` wants an `osdGPU`** a CPU-only OpenSubdiv does not
 # build, so the CPU library is named for both.
 CMAKE_MODULES_ROOT="$MODULES" cmake -S "$VENDOR/moonray" -B "$VENDOR/build-moonray" \
-    -G "Unix Makefiles" \
+    -G "Unix Makefiles" $TOOLCHAIN \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_MODULE_PATH="$MODULES/cmake" \
     -DMOONRAY_USE_OPTIX=NO -DMOONRAY_BUILD_TESTING=NO \

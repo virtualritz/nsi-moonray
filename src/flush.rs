@@ -2555,8 +2555,22 @@ fn camera(
             object = fisheye_mapping(object, node, handle, flushed);
         }
 
-        // Orthographic and spherical cameras have no attributes of
-        // their own on either side.
+        // **An orthographic camera's extent is the screen window.**
+        // The interface gives it no `fov`, and MoonRay's default
+        // aperture is 24 world units, so without this the framing is
+        // wrong by whatever the scene's scale happens to be.
+        "OrthographicCamera" => {
+            object = orthographic_extent(
+                object,
+                screen_window(scene, resolution),
+                resolution,
+                handle,
+                flushed,
+            );
+        }
+
+        // A spherical camera sees everything; there is no extent to
+        // carry.
         _ => {}
     }
 
@@ -2961,6 +2975,102 @@ fn resolution(scene: &Scene) -> (i32, i32) {
     }
 
     (1920, 1080)
+}
+
+/// The screen window, as the interface's four numbers.
+///
+/// `[left, bottom, right, top]` in screen space. The specification's
+/// default is `[-f, -1], [f, 1]` for `f = xres/yres`, and it says so
+/// rather than leaving it to the renderer -- so a scene that sets
+/// nothing still has a definite one, and it is the one computed here.
+fn screen_window(scene: &Scene, resolution: (i32, i32)) -> [f64; 4] {
+    for output in scene.render_outputs() {
+        if let Some(node) = scene.node(&output.screen)
+            && let Some(argument) = node.effective("screenwindow")
+        {
+            let values: Vec<f64> = match &argument.data {
+                OwnedData::F64(values) => values.clone(),
+                OwnedData::F32(values) => {
+                    values.iter().map(|value| *value as f64).collect()
+                }
+                _ => continue,
+            };
+            if values.len() >= 4 {
+                return [values[0], values[1], values[2], values[3]];
+            }
+        }
+    }
+
+    let aspect = f64::from(resolution.0) / f64::from(resolution.1.max(1));
+    [-aspect, -1.0, aspect, 1.0]
+}
+
+/// An orthographic camera's extent, which is the screen window and
+/// nothing else.
+///
+/// **MoonRay has no screen-window attribute at all.**
+/// `ProjectiveCamera::updateImpl` builds its normalised window from the
+/// aperture viewport alone -- `[-1, -h/w, 1, h/w]`, every time -- so
+/// there is nothing to carry `screenwindow` into directly. What the
+/// orthographic projection multiplies that window by is
+/// `film_width_aperture`, which is therefore the *width of the screen
+/// window in world units*.
+///
+/// For a perspective camera the same scale is absorbed by the focal
+/// length, which is why this matters here and nowhere else. And it
+/// matters a lot: `film_width_aperture` defaults to **24**, so an
+/// orthographic camera framing a unit-sized subject renders it about a
+/// twelfth of the frame wide unless this is set. That reads as an
+/// empty image rather than as a framing error.
+fn orthographic_extent(
+    object: Object,
+    window: [f64; 4],
+    resolution: (i32, i32),
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    let [left, bottom, right, top] = window;
+    let width = right - left;
+    let height = top - bottom;
+
+    if width <= 0.0 || height <= 0.0 {
+        flushed.limitations.push(format!(
+            "camera {handle:?} has an empty screen window; MoonRay's \
+             default aperture is used"
+        ));
+        return object;
+    }
+
+    // The vertical extent is not a separate attribute: MoonRay derives
+    // it from the aperture's aspect ratio. A screen window shaped
+    // differently from the image cannot be carried, and squashing it
+    // silently would be a plausible render of the wrong framing.
+    let image = f64::from(resolution.0) / f64::from(resolution.1.max(1));
+    let asked = width / height;
+    if (asked - image).abs() > 1e-6 * image.max(1.0) {
+        flushed.limitations.push(format!(
+            "camera {handle:?} has a screen window {asked:.4} wide for \
+             every unit high while the image is {image:.4}; MoonRay \
+             takes its vertical extent from the image, so the width is \
+             carried and the height follows the frame"
+        ));
+    }
+
+    let object = object.set("film_width_aperture", Value::Float(width as f32));
+
+    // A window that is not centred becomes a film offset, in the same
+    // world units.
+    let (x, y) = ((left + right) / 2.0, (bottom + top) / 2.0);
+    let object = if x != 0.0 {
+        object.set("horizontal_film_offset", Value::Float(x as f32))
+    } else {
+        object
+    };
+    if y != 0.0 {
+        object.set("vertical_film_offset", Value::Float(y as f32))
+    } else {
+        object
+    }
 }
 
 fn camera_reference(scene: &Scene, handle: &str) -> Reference {
@@ -4904,6 +5014,158 @@ mod tests {
             ),
             "the transform must be interpolated to the shutter's \
              ends\n{rdla}"
+        );
+    }
+
+    /// **An orthographic camera's extent comes from the screen
+    /// window, and without it the framing is wrong by the scene's
+    /// scale.**
+    ///
+    /// MoonRay builds its projection window from the aperture viewport
+    /// alone and has no screen-window attribute, so `screenwindow`
+    /// lands on `film_width_aperture` -- which defaults to 24 world
+    /// units. A scene framing a unit-sized subject therefore rendered
+    /// it a twelfth of the frame wide, which reads as an empty image.
+    #[test]
+    fn an_orthographic_camera_takes_its_extent_from_the_screen_window() {
+        let mut scene = triangle();
+        scene.delete("cam").expect("a recordable edit");
+        scene
+            .create("cam", "orthographiccamera")
+            .expect("a recordable edit");
+        scene.connect("cam", None, ".root", "objects").unwrap();
+        scene.connect("screen", None, "cam", "screens").unwrap();
+        // 320x240, so a window four wide and three high matches the
+        // frame and nothing is reported.
+        scene
+            .set_attribute(
+                "screen",
+                vec![arg(
+                    "screenwindow",
+                    Type::F64,
+                    OwnedData::F64(vec![-2.0, -1.5, 2.0, 1.5]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(
+            rdla.contains("[\"film_width_aperture\"] = 4,"),
+            "the window's width in world units\n{rdla}"
+        );
+        assert!(
+            !rdla.contains("horizontal_film_offset"),
+            "a centred window needs no offset\n{rdla}"
+        );
+        // Quoted, because a handle is quoted in a report and
+        // "became" contains "cam".
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .all(|line| !line.contains("\"cam\"")),
+            "a window matching the frame is carried without comment: \
+             {:?}",
+            flushed.limitations
+        );
+    }
+
+    /// The interface's default screen window is `[-f, -1], [f, 1]` for
+    /// `f = xres/yres`, and it is what an orthographic camera gets when
+    /// the scene sets none -- **not** MoonRay's 24.
+    #[test]
+    fn an_orthographic_camera_without_a_screen_window_uses_the_default() {
+        let mut scene = triangle();
+        scene.delete("cam").expect("a recordable edit");
+        scene
+            .create("cam", "orthographiccamera")
+            .expect("a recordable edit");
+        scene.connect("cam", None, ".root", "objects").unwrap();
+        scene.connect("screen", None, "cam", "screens").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        // 320/240 is 4/3, so the default window is 8/3 wide.
+        assert!(
+            rdla.contains("[\"film_width_aperture\"] = 2.66666675,"),
+            "twice the frame aspect ratio, printed the way rdl2 prints \
+             a float\n{rdla}"
+        );
+    }
+
+    /// A window shaped differently from the image cannot be carried:
+    /// MoonRay takes the vertical extent from the frame. Reported,
+    /// because the alternative is a plausible render of the wrong
+    /// framing.
+    #[test]
+    fn a_screen_window_that_does_not_match_the_frame_is_reported() {
+        let mut scene = triangle();
+        scene.delete("cam").expect("a recordable edit");
+        scene
+            .create("cam", "orthographiccamera")
+            .expect("a recordable edit");
+        scene.connect("cam", None, ".root", "objects").unwrap();
+        scene.connect("screen", None, "cam", "screens").unwrap();
+        // Square, on a 4:3 frame.
+        scene
+            .set_attribute(
+                "screen",
+                vec![arg(
+                    "screenwindow",
+                    Type::F64,
+                    OwnedData::F64(vec![-1.0, -1.0, 1.0, 1.0]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("cam") && line.contains("wide")),
+            "{:?}",
+            flushed.limitations
+        );
+        // The width is still carried; only the height cannot be.
+        assert!(
+            flushed.to_rdla().contains("[\"film_width_aperture\"] = 2,"),
+            "{}",
+            flushed.to_rdla()
+        );
+    }
+
+    /// An off-centre window becomes a film offset, in the same world
+    /// units.
+    #[test]
+    fn an_off_centre_screen_window_becomes_a_film_offset() {
+        let mut scene = triangle();
+        scene.delete("cam").expect("a recordable edit");
+        scene
+            .create("cam", "orthographiccamera")
+            .expect("a recordable edit");
+        scene.connect("cam", None, ".root", "objects").unwrap();
+        scene.connect("screen", None, "cam", "screens").unwrap();
+        scene
+            .set_attribute(
+                "screen",
+                vec![arg(
+                    "screenwindow",
+                    Type::F64,
+                    OwnedData::F64(vec![3.0, -1.5, 7.0, 1.5]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("[\"film_width_aperture\"] = 4,"), "{rdla}");
+        assert!(
+            rdla.contains("[\"horizontal_film_offset\"] = 5,"),
+            "the centre of the window\n{rdla}"
         );
     }
 

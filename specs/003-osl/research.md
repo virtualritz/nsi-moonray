@@ -716,8 +716,7 @@ shader's own default in place.
   same working `.rdla` in process in `Mode::Batch` before
   `Mode::Progressive`.
 
-  **A third possibility, which the source supports and which is not a
-  transport bug at all.** `camera()` gives an `OrthographicCamera` no
+  **The third possibility was the right one, and it is fixed.** `camera()` gives an `OrthographicCamera` no
   attributes: "orthographic and spherical cameras have no attributes of
   their own on either side". But an ɴsɪ orthographic camera has no
   `fov`, so its extent comes from the `screen` node's `screenwindow`,
@@ -731,13 +730,25 @@ shader's own default in place.
   twenty-fourth of the frame width -- under two percent of the pixels,
   and gone entirely if it is off centre or smaller.
 
-  That would look like "renders empty" and be nothing of the kind. It
-  also predicts the `.rdla` through `moonray` is *equally* wrong, and
-  was judged by a different standard: an image that opens, against a
-  render asserted on pixels. Re-checking what the spawned render
-  actually contained is the cheapest step of the three, and it comes
-  first. `screenwindow` is worth carrying either way; it is missing for
-  every camera, and only orthographic makes it obvious.
+  Reading `ProjectiveCamera::updateImpl` settled where it goes:
+  **MoonRay has no screen-window attribute at all.** `mWindow` is built
+  from the aperture viewport alone, `[-1, -h/w, 1, h/w]`, every time.
+  What the orthographic projection multiplies it by is
+  `film_width_aperture`, so that attribute *is* the screen window's
+  width in world units, and the vertical extent follows the frame.
+
+  The two defaults agree, which is the part worth keeping: the
+  interface's `[-f, -1], [f, 1]` for `f = xres/yres` is `2f` wide, and
+  `2f` through MoonRay's window gives a height of exactly `2`. For a
+  perspective camera the same scale is absorbed by the focal length,
+  which is why this surfaced only on an orthographic one.
+
+  A window shaped differently from the image cannot be carried and is
+  reported rather than squashed. This also predicts the `.rdla` through
+  `moonray` was *equally* wrong and was judged by a laxer standard --
+  an image that opens, against a render asserted on pixels -- so the
+  spawned render is still worth re-checking against pixels once a
+  renderer is to hand.
 - **AOV forwarding.** 3Delight has a per-object attribute that puts a
   diffuse surface seen in a mirror into the *diffuse* AOV rather than
   the reflection one. MoonRay's LPEs have no equivalent, and inventing
