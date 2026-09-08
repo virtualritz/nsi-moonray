@@ -14,6 +14,7 @@
 #include <OSL/genclosure.h>
 #include <OpenImageIO/texture.h>
 
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -188,6 +189,12 @@ public:
 
 /// Everything the shared system owns, so its lifetime is one object's.
 struct System {
+    // **OpenImageIO 3 returns a `shared_ptr` from
+    // `TextureSystem::create`,** where 2.x returned a raw pointer and
+    // asked you to call `destroy`. Held by value so the lifetime is
+    // the system's; `Services` and `ShadingSystem` want the raw
+    // pointer and do not own it.
+    std::shared_ptr<OIIO::TextureSystem> texture_system;
     OIIO::TextureSystem* texture;
     Services services;
     OSL::ShadingSystem shading;
@@ -195,7 +202,8 @@ struct System {
     std::set<std::string> search_paths;
 
     System()
-        : texture(OIIO::TextureSystem::create())
+        : texture_system(OIIO::TextureSystem::create())
+        , texture(texture_system.get())
         , services(texture)
         , shading(&services, texture)
     {
@@ -614,17 +622,17 @@ key_of(const std::string& name, OSL::TypeDesc type)
 {
     using namespace moonray::shading;
 
-    if (type == OSL::TypeDesc::TypeFloat) {
+    if (type == ::OIIO::TypeFloat) {
         return TypedAttributeKey<float>(name);
     }
-    if (type == OSL::TypeDesc::TypeInt) {
+    if (type == ::OIIO::TypeInt) {
         return TypedAttributeKey<int>(name);
     }
-    if (type == OSL::TypeDesc::TypeColor) {
+    if (type == ::OIIO::TypeColor) {
         return TypedAttributeKey<scene_rdl2::math::Color>(name);
     }
-    if (type == OSL::TypeDesc::TypePoint || type == OSL::TypeDesc::TypeVector
-        || type == OSL::TypeDesc::TypeNormal) {
+    if (type == ::OIIO::TypePoint || type == ::OIIO::TypeVector
+        || type == ::OIIO::TypeNormal) {
         return TypedAttributeKey<scene_rdl2::math::Vec3f>(name);
     }
     // OSL has no two-float type of its own; `float[2]` is how a shader
@@ -633,7 +641,7 @@ key_of(const std::string& name, OSL::TypeDesc type)
         && type.arraylen == 2) {
         return TypedAttributeKey<scene_rdl2::math::Vec2f>(name);
     }
-    if (type == OSL::TypeDesc::TypeString) {
+    if (type == ::OIIO::TypeString) {
         return TypedAttributeKey<std::string>(name);
     }
     return -1;
@@ -699,17 +707,17 @@ Attributes::read(const moonray::shading::State& state, OSL::ustringhash name,
             return false;
         }
 
-        if (type == OSL::TypeDesc::TypeFloat) {
+        if (type == ::OIIO::TypeFloat) {
             *static_cast<float*>(value) =
                 state.getAttribute(TypedAttributeKey<float>(key));
             return true;
         }
-        if (type == OSL::TypeDesc::TypeInt) {
+        if (type == ::OIIO::TypeInt) {
             *static_cast<int*>(value) =
                 state.getAttribute(TypedAttributeKey<int>(key));
             return true;
         }
-        if (type == OSL::TypeDesc::TypeColor) {
+        if (type == ::OIIO::TypeColor) {
             const scene_rdl2::math::Color& colour = state.getAttribute(
                 TypedAttributeKey<scene_rdl2::math::Color>(key));
             auto* out = static_cast<float*>(value);
@@ -718,9 +726,9 @@ Attributes::read(const moonray::shading::State& state, OSL::ustringhash name,
             out[2] = colour.b;
             return true;
         }
-        if (type == OSL::TypeDesc::TypePoint
-            || type == OSL::TypeDesc::TypeVector
-            || type == OSL::TypeDesc::TypeNormal) {
+        if (type == ::OIIO::TypePoint
+            || type == ::OIIO::TypeVector
+            || type == ::OIIO::TypeNormal) {
             const scene_rdl2::math::Vec3f& vector = state.getAttribute(
                 TypedAttributeKey<scene_rdl2::math::Vec3f>(key));
             auto* out = static_cast<float*>(value);
@@ -738,7 +746,7 @@ Attributes::read(const moonray::shading::State& state, OSL::ustringhash name,
             out[1] = uv.y;
             return true;
         }
-        if (type == OSL::TypeDesc::TypeString) {
+        if (type == ::OIIO::TypeString) {
             *static_cast<OSL::ustring*>(value) = OSL::ustring(
                 state.getAttribute(TypedAttributeKey<std::string>(key)));
             return true;
