@@ -51,7 +51,19 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -n "$PREFIX" ] || PREFIX="$PWD/$VENDOR/install"
+# **Installed where an installed `mnry` looks**, which is the whole
+# point: `src/dso.rs` searches the platform's per-user data directory,
+# so a renderer put here is found by a binary from
+# `cargo install --path .` with no flag and no environment. Building
+# into the checkout instead would need `--dso-path` forever.
+#
+# Sources and build trees stay in `vendor/`; only the install escapes.
+if [ -z "$PREFIX" ]; then
+    case "$(uname -s)" in
+        Darwin) PREFIX="$HOME/Library/Application Support/MoonRay" ;;
+        *)      PREFIX="${XDG_DATA_HOME:-$HOME/.local/share}/moonray" ;;
+    esac
+fi
 [ -n "$JOBS" ] || JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 # OpenImageDenoise ships a build per platform and architecture, and the

@@ -197,3 +197,38 @@ fn an_app_bundle_finds_its_own_classes() {
         "the resolver looked in {looked:?}"
     );
 }
+
+/// **`just renderer` installs where the resolver looks.**
+///
+/// The recipe defaults its prefix to the platform's per-user data
+/// directory precisely because `dso.rs` searches there, which is what
+/// lets an `mnry` from `cargo install --path .` find scene classes
+/// with no flag and no environment. The two defaults are written in
+/// different languages in different files, so this holds them
+/// together; drift is a renderer that resolves nothing and renders a
+/// black frame.
+#[test]
+fn the_default_renderer_prefix_is_one_the_resolver_searches() {
+    let Some(home) = std::env::var_os("HOME") else {
+        // Nothing to check against, rather than a fabricated pass.
+        return;
+    };
+    let home = PathBuf::from(home);
+
+    let expected = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/MoonRay/rdl2dso")
+    } else {
+        match std::env::var_os("XDG_DATA_HOME") {
+            Some(data) => PathBuf::from(data).join("moonray/rdl2dso"),
+            None => home.join(".local/share/moonray/rdl2dso"),
+        }
+    };
+
+    let looked = nsi_moonray::dso::searched();
+    assert!(
+        looked.contains(&expected),
+        "packaging/renderer.sh and the justfile default to {}, which \
+         the resolver must search; it looked in {looked:?}",
+        expected.display()
+    );
+}

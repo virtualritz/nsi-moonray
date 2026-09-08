@@ -115,12 +115,31 @@ dump is written, which is how you look at what a render was made from.
 
 ## Installing
 
-An install carries MoonRay with it and finds its own scene classes, so
-nothing has to be set:
+From a checkout:
 
 ```bash
-just bundle /path/to/moonray-install   # a relocatable tree in dist/bundle
-just package                           # .deb and AppImage, or .dmg
+just setup     # dependencies, then MoonRay (about an hour)
+just install   # mnry into ~/.cargo/bin, renderer linked
+```
+
+`just install` is `cargo install --path .` with the renderer feature
+turned on when there is a renderer to turn it on for, and without when
+there is not. Plain `cargo install --path .` works too and gives you
+the emitter -- `mnry cat`, `.nsi` to `.rdla`, scene conversion -- with
+`mnry render` falling back to spawning the `moonray` binary.
+
+**No flag is needed to find the scene classes.** `just setup` installs
+MoonRay into the platform's per-user data directory, which is one of
+the places `mnry` searches, so an installed binary finds an installed
+renderer on its own. `tests/bundle.rs` holds those two defaults
+together, since they are written in different files and drifting apart
+would render a black frame in silence.
+
+For distribution rather than a checkout:
+
+```bash
+just bundle    # a relocatable tree in dist/bundle
+just package   # .deb and AppImage, or .dmg
 ```
 
 The tree is `bin/mnry` beside `lib/rdl2dso`, which is the first place

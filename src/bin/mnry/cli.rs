@@ -27,10 +27,15 @@ pub fn parse() -> Cli {
     version
 )]
 pub struct Cli {
+    // **`global`, so `-v` works after the subcommand as well as before
+    // it.** Without it `mnry render scene.nsi -v` is an error telling
+    // you to write `-- -v`, which is the natural place to put it and
+    // the one the documentation implies.
     #[arg(
         display_order = 10,
         long,
         short,
+        global = true,
         action = clap::ArgAction::Count,
         help = "Verbosity level (-v verbose, -vv very verbose, etc.)",
     )]

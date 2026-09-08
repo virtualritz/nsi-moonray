@@ -2,16 +2,26 @@
 #
 # The environment every renderer recipe needs, in one place.
 #
-# Sourced, not run: `. packaging/env.sh <prefix>`. Sets what `build.rs`
-# and the shim read, and picks the pixi environment up when there is
-# one so that a checkout with `just pixi-install` behind it gets OSL
-# without anybody exporting anything.
+# Sourced, not run: `NSI_MOONRAY_PREFIX=... . packaging/env.sh`. Sets
+# what `build.rs` and the shim read, and picks the pixi environment up
+# when there is one so that a checkout with `just pixi-install` behind
+# it gets OSL without anybody exporting anything.
+#
+# **The prefix arrives in the environment, not as `$1`.** POSIX leaves
+# the behaviour of arguments to `.` unspecified and some shells drop
+# them, which reads as the default silently winning -- a renderer built
+# in one place and looked for in another.
 #
 # Each variable is left alone if already set, so an explicit one from
 # the shell always wins.
 
-PREFIX="${1:-}"
-[ -n "$PREFIX" ] || PREFIX="$PWD/vendor/install"
+PREFIX="${NSI_MOONRAY_PREFIX:-}"
+if [ -z "$PREFIX" ]; then
+    case "$(uname -s)" in
+        Darwin) PREFIX="$HOME/Library/Application Support/MoonRay" ;;
+        *)      PREFIX="${XDG_DATA_HOME:-$HOME/.local/share}/moonray" ;;
+    esac
+fi
 
 # The MoonRay install: scene classes and the renderer.
 export SCENE_RDL2_ROOT="${SCENE_RDL2_ROOT:-$PREFIX}"

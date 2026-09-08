@@ -16,10 +16,18 @@
 # the line touching the recipe is its summary.
 
 # The MoonRay install every renderer recipe uses: `$SCENE_RDL2_ROOT`
-# when it is set, otherwise `vendor/install`, which is where
-# `just renderer` puts one. So `just setup && just test-rdl2` works with
-# nothing exported.
-prefix := env('SCENE_RDL2_ROOT', justfile_directory() / 'vendor' / 'install')
+# when it is set, otherwise the platform's per-user data directory,
+# which is where `just renderer` puts one.
+#
+# **That location is not arbitrary.** `src/dso.rs` searches it, so a
+# renderer installed there is found by an `mnry` from
+# `cargo install --path .` with no flag and no environment. Building
+# into the checkout would mean `--dso-path` forever.
+prefix := env('SCENE_RDL2_ROOT', if os() == 'macos' {
+    home_directory() / 'Library' / 'Application Support' / 'MoonRay'
+} else {
+    env('XDG_DATA_HOME', home_directory() / '.local' / 'share') / 'moonray'
+})
 
 # Default recipe: show available commands.
 default:
@@ -126,7 +134,7 @@ renderer-check:
 check-rdl2: require-rdl2
     #!/usr/bin/env sh
     set -eu
-    . packaging/env.sh "{{prefix}}"
+    NSI_MOONRAY_PREFIX="{{prefix}}" . packaging/env.sh
     cargo check --all-targets --features rdl2
 
 # **`cargo test`, not `nextest`, and that is the whole point of this
@@ -143,7 +151,7 @@ check-rdl2: require-rdl2
 test-rdl2: require-rdl2
     #!/usr/bin/env sh
     set -eu
-    . packaging/env.sh "{{prefix}}"
+    NSI_MOONRAY_PREFIX="{{prefix}}" . packaging/env.sh
     cargo build --features rdl2 --lib
     cargo test --features rdl2
 
@@ -154,7 +162,7 @@ test-rdl2: require-rdl2
 # Say what the renderer recipes can see.
 env:
     #!/usr/bin/env sh
-    . packaging/env.sh "{{prefix}}"
+    NSI_MOONRAY_PREFIX="{{prefix}}" . packaging/env.sh
     echo "pixi env        = $([ -d .pixi/envs/default ] && echo present || echo '(none) -- run just pixi-install')"
     echo "SCENE_RDL2_ROOT = $SCENE_RDL2_ROOT$([ -d "$SCENE_RDL2_ROOT/rdl2dso" ] || echo '  (no rdl2dso there)')"
     echo "MOONRAY_ROOT    = $MOONRAY_ROOT"
@@ -177,6 +185,26 @@ require-rdl2:
 build:
     cargo build --release
 
+# Put `mnry` on the PATH from this checkout. With a renderer built --
+# `just setup` -- this links it, so renders happen in process; without
+# one it still installs, and falls back to spawning the `moonray`
+# binary. Either way the scene classes are found with no flag, because
+# `just renderer` installs them where `src/dso.rs` looks.
+
+# Install `mnry` into ~/.cargo/bin.
+install:
+    #!/usr/bin/env sh
+    set -eu
+    NSI_MOONRAY_PREFIX="{{prefix}}" . packaging/env.sh
+    if [ -d "{{prefix}}/rdl2dso" ]; then
+        cargo install --path . --locked --features rdl2
+        echo "mnry: installed with the renderer linked"
+    else
+        cargo install --path . --locked
+        echo "mnry: installed without a renderer -- it will spawn the" >&2
+        echo "      \`moonray\` binary. \`just setup\` builds one." >&2
+    fi
+
 # Assemble a relocatable tree from a MoonRay install: this backend, the
 # renderer, its scene classes and every shared library the two need.
 # `packaging/bundle.sh --help` has the layout, and `tests/bundle.rs`
@@ -189,7 +217,7 @@ build:
 bundle PREFIX=prefix: require-rdl2
     #!/usr/bin/env sh
     set -eu
-    . packaging/env.sh "{{PREFIX}}"
+    NSI_MOONRAY_PREFIX="{{PREFIX}}" . packaging/env.sh
     cargo build --release --features rdl2
     rm -rf dist/bundle
     packaging/bundle.sh --prefix "{{PREFIX}}" --out dist/bundle
