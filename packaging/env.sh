@@ -23,6 +23,21 @@ if [ -z "$PREFIX" ]; then
     esac
 fi
 
+# **One compiler across the shim, the OSL DSO and the renderer.**
+# `packaging/renderer.sh` builds MoonRay with GCC because that is what
+# the recipe was verified with, and `/usr/bin/c++` is clang on some
+# machines -- so without this, `cc-rs` compiles `shim/src/scene.cc`
+# with a different compiler than the library it links against. That is
+# an ABI question nobody wants to have, and on clang 18 it does not
+# even get that far: `scene_rdl2/scene/rdl2/Shader.h` subscripts a
+# pointer to a type only MoonRay completes, which GCC accepts and
+# clang rejects.
+if [ -z "${CXX:-}" ] && command -v g++ >/dev/null 2>&1; then
+    CC="$(command -v gcc)"
+    CXX="$(command -v g++)"
+    export CC CXX
+fi
+
 # The MoonRay install: scene classes and the renderer.
 export SCENE_RDL2_ROOT="${SCENE_RDL2_ROOT:-$PREFIX}"
 export MOONRAY_ROOT="${MOONRAY_ROOT:-$PREFIX}"
