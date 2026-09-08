@@ -54,6 +54,36 @@ done
 [ -n "$PREFIX" ] || PREFIX="$PWD/$VENDOR/install"
 [ -n "$JOBS" ] || JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
+# OpenImageDenoise ships a build per platform and architecture, and the
+# shared-library suffix follows the same split.
+case "$(uname -s)/$(uname -m)" in
+    Darwin/arm64)  OIDN_PLATFORM="arm64.macos";  SHLIB="dylib" ;;
+    Darwin/*)      OIDN_PLATFORM="x86_64.macos"; SHLIB="dylib" ;;
+    *)             OIDN_PLATFORM="x86_64.linux"; SHLIB="so" ;;
+esac
+
+# **The pixi environment, when the checkout has one.** It is the same
+# set of dependencies on Linux and macOS, resolved from one lockfile,
+# and it needs no root -- which is why it is preferred over the system
+# packages `packaging/deps.sh` installs. Everything below looks there
+# first and falls back to the system.
+PIXI_ENV="$PWD/.pixi/envs/default"
+if [ -d "$PIXI_ENV" ]; then
+    export PATH="$PIXI_ENV/bin:$PATH"
+    export CMAKE_PREFIX_PATH="$PIXI_ENV${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+    SEARCH="$PIXI_ENV/include"
+else
+    PIXI_ENV=""
+    SEARCH="/usr/include /usr/local/include /opt/homebrew/include"
+fi
+
+have_header() {
+    for root in $SEARCH; do
+        [ -f "$root/$1" ] && return 0
+    done
+    return 1
+}
+
 # **Checked before anything is cloned.** An hour into a build is a bad
 # time to learn that ISPC is missing, and the CMake error when it is
 # names a language rather than a package.
@@ -61,18 +91,27 @@ missing=""
 for tool in cmake git curl c++ ispc; do
     command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
 done
-for header in \
-    /usr/include/boost/version.hpp \
-    /usr/include/log4cplus/loglevel.h \
-    /usr/include/jsoncpp/json/json.h
-do
-    [ -f "$header" ] || missing="$missing $(basename "$(dirname "$header")")"
+for header in boost/version.hpp json/json.h; do
+    have_header "$header" || missing="$missing $header"
 done
+
+# `log4cplus` is the one gap in the pixi route, and only on macOS:
+# conda-forge builds it for linux-64 and win-64 and not for osx-arm64.
+# Built from source below rather than sending someone to a second
+# package manager for one library.
+NEED_LOG4CPLUS=0
+if ! have_header log4cplus/loglevel.h; then
+    if [ -n "$PIXI_ENV" ]; then
+        NEED_LOG4CPLUS=1
+    else
+        missing="$missing log4cplus/loglevel.h"
+    fi
+fi
 
 if [ -n "$missing" ]; then
     echo "renderer: missing:$missing" >&2
-    echo "renderer: \`just deps\` installs everything; \
-\`packaging/deps.sh --list\` prints the list without installing." >&2
+    echo "renderer: \`just pixi-install\` gets all of it without root, \
+on both platforms. \`just deps\` uses system packages instead." >&2
     [ "$CHECK" -eq 1 ] || exit 1
 fi
 
@@ -97,6 +136,23 @@ fetch() {
     fi
     git clone --depth 1 --branch "$ref" "$url" "$VENDOR/$name"
 }
+
+if [ "$NEED_LOG4CPLUS" -eq 1 ] && [ "$CHECK" -eq 0 ]; then
+    step "log4cplus (no osx-arm64 conda build; from source)"
+    mkdir -p "$VENDOR"
+    if [ ! -d "$VENDOR/log4cplus/.git" ]; then
+        git clone --depth 1 --branch REL_2_1_2 --recurse-submodules \
+            https://github.com/log4cplus/log4cplus.git "$VENDOR/log4cplus"
+    fi
+    cmake -S "$VENDOR/log4cplus" -B "$VENDOR/build-log4cplus" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="$PIXI_ENV" \
+        -DLOG4CPLUS_BUILD_TESTING=OFF \
+        -DWITH_UNIT_TESTS=OFF \
+        -DBUILD_SHARED_LIBS=ON
+    cmake --build "$VENDOR/build-log4cplus" -j"$JOBS"
+    cmake --install "$VENDOR/build-log4cplus"
+fi
 
 step "fetching"
 fetch cmake_modules https://github.com/OpenMoonRay/cmake_modules.git "$CMAKE_MODULES_REF"
@@ -144,7 +200,7 @@ cmake --build "$VENDOR/build-osd" -j"$JOBS"
 cmake --install "$VENDOR/build-osd"
 
 step "OpenImageDenoise (binary release)"
-OIDN="oidn-$OIDN_VERSION.x86_64.linux"
+OIDN="oidn-$OIDN_VERSION.$OIDN_PLATFORM"
 if [ ! -d "$VENDOR/$OIDN" ]; then
     curl -sSL -o "$VENDOR/$OIDN.tar.gz" \
       "https://github.com/OpenImageDenoise/oidn/releases/download/v$OIDN_VERSION/$OIDN.tar.gz"
@@ -171,8 +227,8 @@ CMAKE_MODULES_ROOT="$MODULES" cmake -S "$VENDOR/moonray" -B "$VENDOR/build-moonr
     -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_MODULE_PATH="$MODULES/cmake" \
     -DMOONRAY_USE_OPTIX=NO -DMOONRAY_BUILD_TESTING=NO \
     -DOpenSubDiv_INCLUDE_DIR="$PREFIX/include/opensubdiv" \
-    -DOpenSubDiv_CPU_LIBRARY="$PREFIX/lib/libosdCPU.so" \
-    -DOpenSubDiv_GPU_LIBRARY="$PREFIX/lib/libosdCPU.so"
+    -DOpenSubDiv_CPU_LIBRARY="$PREFIX/lib/libosdCPU.$SHLIB" \
+    -DOpenSubDiv_GPU_LIBRARY="$PREFIX/lib/libosdCPU.$SHLIB"
 # **`MOONRAY_BUILD_TESTING=NO` does not stop the test binaries being
 # configured**, and two of them fail to link. Naming the target builds
 # the renderer without them.
@@ -184,7 +240,7 @@ step "done"
 no scene class would resolve; the build above did not finish"
 
 echo "renderer: $PREFIX"
-echo "renderer: $(find "$PREFIX/rdl2dso" -name '*.so' | wc -l | tr -d ' ') \
+echo "renderer: $(find "$PREFIX/rdl2dso" -name "*.$SHLIB" | wc -l | tr -d ' ') \
 scene classes"
 echo ""
 echo "  just test-rdl2      the renderer tests"

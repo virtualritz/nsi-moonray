@@ -81,18 +81,29 @@ test: build-lib
 test-single TEST: build-lib
     cargo nextest run {{TEST}}
 
-# Everything needed to render, from nothing. Roughly an hour: the
-# packages are quick and MoonRay is not. Both halves are re-runnable,
-# and `just renderer` picks up where a failed build stopped.
+# Everything needed to render, from nothing. Roughly an hour, nearly
+# all of it MoonRay. Re-runnable: `just renderer` picks up where a
+# failed build stopped.
+#
+# **The dependencies come from pixi, and that is not a preference.**
+# Open Shading Language is not packaged by Ubuntu -- its `libosl-dev`
+# is a Shogi library -- nor by Homebrew, and without it every shader
+# becomes a `UsdPreviewSurface`. The ASWF conda channel has it, built
+# against a matching OpenImageIO. pixi also needs no root and resolves
+# Linux and macOS from one lockfile. `pixi.toml` has the detail.
 
-# Install the system packages, then fetch and build MoonRay.
-setup: deps renderer
+# Install the dependencies, then fetch and build MoonRay.
+setup: pixi-install renderer
 
-# Install the system packages MoonRay needs. Asks for sudo.
+# Resolve and install the dependencies into `.pixi/`. No root.
+pixi-install:
+    pixi install
+
+# The system-package route instead of pixi: no OSL, and asks for sudo.
 deps:
     packaging/deps.sh
 
-# Print those packages without installing anything.
+# Print those system packages without installing anything.
 deps-list:
     @packaging/deps.sh --list
 
@@ -106,7 +117,10 @@ renderer-check:
 
 # Type-check the renderer half.
 check-rdl2: require-rdl2
-    SCENE_RDL2_ROOT="{{prefix}}" cargo check --all-targets --features rdl2
+    #!/usr/bin/env sh
+    set -eu
+    . packaging/env.sh "{{prefix}}"
+    cargo check --all-targets --features rdl2
 
 # **`cargo test`, not `nextest`, and that is the whole point of this
 # being a separate recipe.** MoonRay's driver state is process-global:
@@ -120,12 +134,11 @@ check-rdl2: require-rdl2
 
 # Run the tests that link MoonRay and render.
 test-rdl2: require-rdl2
-    SCENE_RDL2_ROOT="{{prefix}}" MOONRAY_ROOT="{{prefix}}" \
-        NSI_MOONRAY_DSO="{{prefix}}/rdl2dso" \
-        cargo build --features rdl2 --lib
-    SCENE_RDL2_ROOT="{{prefix}}" MOONRAY_ROOT="{{prefix}}" \
-        NSI_MOONRAY_DSO="{{prefix}}/rdl2dso" \
-        cargo test --features rdl2
+    #!/usr/bin/env sh
+    set -eu
+    . packaging/env.sh "{{prefix}}"
+    cargo build --features rdl2 --lib
+    cargo test --features rdl2
 
 # Run this first when a renderer recipe does something surprising. A
 # half-set environment is the usual cause, and the `cfg`s it selects
@@ -133,11 +146,14 @@ test-rdl2: require-rdl2
 
 # Say what the renderer recipes can see.
 env:
-    @echo "SCENE_RDL2_ROOT = ${SCENE_RDL2_ROOT:-(unset) -- rdl2 will not build}"
-    @echo "MOONRAY_ROOT    = ${MOONRAY_ROOT:-(unset) -- scene only, nothing renders}"
-    @echo "OSL_ROOT        = ${OSL_ROOT:-(unset) -- shaders become UsdPreviewSurface}"
-    @echo "NSI_MOONRAY_DSO = ${NSI_MOONRAY_DSO:-(unset) -- no MoonRay classes resolve}"
-    @echo "LUA_INCLUDE_DIR = ${LUA_INCLUDE_DIR:-/usr/include/lua5.3 (default)}"
+    #!/usr/bin/env sh
+    . packaging/env.sh "{{prefix}}"
+    echo "pixi env        = $([ -d .pixi/envs/default ] && echo present || echo '(none) -- run just pixi-install')"
+    echo "SCENE_RDL2_ROOT = $SCENE_RDL2_ROOT$([ -d "$SCENE_RDL2_ROOT/rdl2dso" ] || echo '  (no rdl2dso there)')"
+    echo "MOONRAY_ROOT    = $MOONRAY_ROOT"
+    echo "NSI_MOONRAY_DSO = $NSI_MOONRAY_DSO"
+    echo "OSL_ROOT        = ${OSL_ROOT:-(unset) -- shaders become UsdPreviewSurface}"
+    echo "LUA_INCLUDE_DIR = ${LUA_INCLUDE_DIR:-/usr/include/lua5.3 (default)}"
 
 # Fail with the recipe rather than with a link error four minutes in.
 [private]
@@ -164,8 +180,10 @@ build:
 
 # Assemble a bundle from a MoonRay install (default: vendor/install).
 bundle PREFIX=prefix: require-rdl2
-    SCENE_RDL2_ROOT="{{PREFIX}}" MOONRAY_ROOT="{{PREFIX}}" \
-        cargo build --release --features rdl2
+    #!/usr/bin/env sh
+    set -eu
+    . packaging/env.sh "{{PREFIX}}"
+    cargo build --release --features rdl2
     rm -rf dist/bundle
     packaging/bundle.sh --prefix "{{PREFIX}}" --out dist/bundle
 

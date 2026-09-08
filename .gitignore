@@ -19,3 +19,7 @@
 # repositories and several hundred megabytes, useless to anyone who
 # wants the emitter and the flush.
 /vendor/
+
+# The conda environment `just pixi-install` resolves. `pixi.toml` and
+# `pixi.lock` are committed; what they resolve to is not.
+/.pixi/

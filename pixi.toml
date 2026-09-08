@@ -1,0 +1,67 @@
+# Every dependency MoonRay needs, without root.
+#
+# `just deps` installs system packages and wants a password. This does
+# not: pixi resolves a conda environment into `.pixi/` inside the
+# checkout, so nothing outside the project is touched and two projects
+# can want different versions.
+#
+# **It is also the only way to get Open Shading Language.** Ubuntu does
+# not package OSL -- its `libosl-dev` is a library for Shogi programs --
+# and neither does Homebrew. The ASWF channel below has it built
+# against a matching OpenImageIO, which is the part that is tedious by
+# hand.
+#
+#     just pixi-install     resolve and install
+#     just test-rdl2        picks the environment up on its own
+#
+# Two platforms, because those are the two MoonRay builds on. Windows
+# is absent on purpose: its CMake has no MSVC path at all. See
+# `specs/005-packaging/spec.md`.
+
+[workspace]
+name = "nsi-moonray"
+channels = ["https://conda.anaconda.org/anderslanglands", "conda-forge"]
+platforms = ["linux-64", "osx-arm64"]
+
+# The ASWF channel is **first**, and that matters: it carries a
+# coherent VFX set -- OSL, OpenImageIO, OpenVDB, OpenSubdiv, OpenEXR,
+# Imath -- built against each other, and strict channel priority is
+# what keeps conda-forge from substituting one of them and splitting
+# the ABI. TBB, Embree and the rest come from conda-forge because that
+# channel does not carry them.
+[dependencies]
+# The reason this file exists.
+openshadinglanguage = ">=1.15.5"
+# Not in conda-forge either; `packaging/renderer.sh` builds it from
+# source when this environment is not used.
+opensubdiv = "*"
+openimageio = "*"
+openvdb = "*"
+openexr = "*"
+imath = "*"
+embree3 = "*"
+libboost-devel = "*"
+lua = "*"
+jsoncpp = "*"
+cppunit = "*"
+# Five of `scene_rdl2`'s library sources are `.ispc`, and its
+# CMakeLists adds ISPC to `project(... LANGUAGES ...)`. A reading of
+# the documentation misses this one.
+ispc = "*"
+cmake = "*"
+pkg-config = "*"
+
+# **`log4cplus` has no macOS ARM build in conda-forge**, so it is
+# declared per platform rather than left to fail the solve for both.
+# On macOS it comes from Homebrew: `brew install log4cplus`.
+[target.linux-64.dependencies]
+log4cplus = "*"
+
+# Deliberately absent: **OpenImageDenoise**. conda-forge's is built
+# against OpenImageIO 2.5 and TBB 2023, and OSL 1.15 wants OpenImageIO
+# 3.1 -- taking both makes the environment unsolvable.
+# `packaging/renderer.sh` downloads the official binary release, which
+# is what MoonRay's own instructions do.
+
+# Not in either channel, and header-only: `packaging/renderer.sh`
+# fetches Random123.

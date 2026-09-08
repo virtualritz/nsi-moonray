@@ -38,18 +38,46 @@ TOOLS="build-essential cmake git curl patchelf pkg-config"
 
 PACKAGES="$RDL2 $MOONRAY $TOOLS"
 
+# Homebrew's names, each checked against `formulae.brew.sh` rather than
+# transliterated from the Debian ones. Two do not map:
+#
+# - **Random123 is not in Homebrew.** It is header-only, and
+#   `packaging/renderer.sh` fetches it.
+# - **There is no `lua@5.3`.** Homebrew's `lua` is 5.4, and rdl2's
+#   `AsciiReader` includes `lua.hpp`. Whether 5.4 works is untested;
+#   `$LUA_INCLUDE_DIR` is how you point at another one.
+BREW="boost lua cppunit jsoncpp log4cplus tbb ispc embree openvdb \
+openimageio openexr imath c-blosc bison flex openssl@3 jpeg-turbo zlib \
+libmicrohttpd curl cmake pkgconf"
+
+case "$(uname -s)" in
+    Darwin)
+        command -v brew >/dev/null 2>&1 || {
+            echo "deps: Homebrew is not installed. https://brew.sh" >&2
+            exit 1
+        }
+        if [ "${1:-}" = "--list" ]; then
+            for package in $BREW; do echo "$package"; done
+            exit 0
+        fi
+        echo "deps: installing $(echo "$BREW" | wc -w | tr -d ' ') formulae"
+        echo "deps: nothing on macOS has been run from here -- neither \
+this list nor MoonRay itself. Report what breaks." >&2
+        brew install $BREW
+        exit 0
+        ;;
+esac
+
 if [ "${1:-}" = "--list" ]; then
     for package in $PACKAGES; do echo "$package"; done
     exit 0
 fi
 
-if ! command -v apt-get >/dev/null 2>&1; then
-    echo "deps: this list is Debian/Ubuntu. On macOS the equivalent is \
-Homebrew -- boost lua cppunit jsoncpp log4cplus tbb ispc embree \
-openvdb openimageio openexr imath c-blosc bison flex -- and neither \
-that nor MoonRay on macOS has been run from here." >&2
+command -v apt-get >/dev/null 2>&1 || {
+    echo "deps: no apt-get and not macOS. \`--list\` prints the \
+Debian/Ubuntu names to translate." >&2
     exit 1
-fi
+}
 
 echo "deps: installing $(echo "$PACKAGES" | wc -w | tr -d ' ') packages"
 # Not run under `sudo` from inside: a script that elevates itself is a

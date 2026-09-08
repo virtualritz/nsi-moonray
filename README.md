@@ -157,17 +157,33 @@ off.
 ### With a renderer
 
 ```bash
-just setup       # the system packages, then MoonRay into vendor/install
+just setup       # dependencies, then MoonRay into vendor/install
 just test-rdl2   # the tests that link it and render
 ```
 
-Roughly an hour, nearly all of it MoonRay. `just deps-list` prints the
-thirty system packages without installing any; `just renderer-check`
+Roughly an hour, nearly all of it MoonRay. `just renderer-check`
 verifies the tools and headers before anything is cloned, which beats
-learning an hour in that ISPC is missing. Both halves are re-runnable
-and the build picks up where a failure stopped.
+learning an hour in that ISPC is missing, and the build picks up where
+a failure stopped.
 
-Every renderer recipe uses `$SCENE_RDL2_ROOT` when it is set and
+**Dependencies come from [pixi](https://pixi.sh), and that is not a
+preference.** Open Shading Language is not packaged by Ubuntu -- its
+`libosl-dev` is a library for Shogi programs -- nor by Homebrew, and
+without OSL every shader becomes a `UsdPreviewSurface`. The
+[ASWF conda channel](https://github.com/anderslanglands/aswf-pixi) has
+it, built against a matching OpenImageIO. pixi also needs no root,
+installs into `.pixi/` inside the checkout, and resolves Linux and
+macOS from one lockfile. `pixi.toml` says what comes from where and
+why; `just deps` is the system-package route instead, and it has no
+OSL.
+
+Two things pixi does not cover, both handled by
+`packaging/renderer.sh`: OpenImageDenoise, whose conda build pins an
+OpenImageIO that OSL 1.15 conflicts with, so the official binary
+release is downloaded; and `log4cplus` on macOS ARM, which conda-forge
+does not build and which is compiled from source there.
+
+Every renderer recipe uses `$SCENE_RDL2_ROOT` when set and
 `vendor/install` otherwise, so an install you already have needs only
 `SCENE_RDL2_ROOT=/path/to/install just test-rdl2`. `just env` says what
 the recipes can see.
@@ -178,12 +194,10 @@ emitter and the flush -- which is the common case, and the reason
 `rdl2` is off by default. `packaging/renderer.sh` pins each ref, which
 buys the same reproducibility only when asked for.
 
-Two things are not packaged on Ubuntu and the script handles both:
-OpenSubdiv is built from source and OpenImageDenoise is downloaded.
-A third is not handled: **Open Shading Language has to be built
-separately** and `$OSL_ROOT` pointed at it. Ubuntu's `libosl-dev` is a
-Shogi library. Without OSL every shader becomes a `UsdPreviewSurface`
-and the flush says so.
+Longer term the hour goes away: `packaging/conda/` drafts a recipe so
+that `pixi add nsi-moonray` installs the backend with a renderer
+already built. It needs `scene_rdl2` and MoonRay packaged first, and a
+conversation with the channel owner.
 
 ## Why MoonRay
 

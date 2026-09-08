@@ -1,0 +1,128 @@
+# A conda package for this backend, in the shape `aswf-pixi` uses.
+#
+# **Draft. Not built, and it cannot be until two others exist.** See
+# `packaging/conda/README.md` for the ordering and what to agree with
+# the channel owner before opening anything.
+#
+# Conventions taken from that repository's own `AGENTS.md`: one
+# `recipe.yaml` per version, feature combinations as separate outputs,
+# runtime libraries suffixed `-lib` and development files `-dev`, and
+# the plain name kept as a metapackage over the useful default split.
+
+context:
+  version: "0.1.0"
+  build_number: 0
+
+recipe:
+  name: nsi-moonray
+  version: ${{ version }}
+
+source:
+  url: https://github.com/virtualritz/nsi-moonray/archive/refs/tags/v${{ version }}.tar.gz
+  # Filled in at the tag. rattler-build refuses a source with no
+  # checksum, which is the correct behaviour and not something to work
+  # around.
+  sha256: 0000000000000000000000000000000000000000000000000000000000000000
+
+build:
+  number: ${{ build_number }}
+
+outputs:
+  # The command, and the `cdylib` an ɴsɪ application `dlopen`s. Both
+  # come out of one `cargo build`, so they are one build and two
+  # outputs rather than two builds.
+  - staging:
+      name: nsi-moonray-build
+    build:
+      script:
+        - if: unix
+          then: |
+            export SCENE_RDL2_ROOT="$PREFIX"
+            export MOONRAY_ROOT="$PREFIX"
+            # The OSL root shaders in `dso/osl/` are what make a scene
+            # shade as itself rather than as a substituted
+            # `UsdPreviewSurface`. `$OSL_ROOT` is what `build.rs` reads
+            # to decide whether to build them, and this channel is the
+            # reason OSL is available at all.
+            export OSL_ROOT="$PREFIX"
+            # rdl2's `AsciiReader` includes `lua.hpp`, and the conda
+            # layout puts it in `include` rather than the
+            # `include/lua5.3` Debian uses and `build.rs` defaults to.
+            export LUA_INCLUDE_DIR="$PREFIX/include"
+
+            cargo build --release --features rdl2 --locked
+
+            mkdir -p "$PREFIX/bin" "$PREFIX/lib"
+            cp target/release/mnry "$PREFIX/bin/"
+            cp target/release/libnsi_moonray.* "$PREFIX/lib/"
+    requirements:
+      build:
+        - ${{ compiler('cxx') }}
+        - ${{ stdlib('c') }}
+        - rust
+        - cmake
+        - pkg-config
+      host:
+        # The two that do not exist yet. Both are prerequisites rather
+        # than optional: without `scene_rdl2` the `rdl2` feature does
+        # not link, and without MoonRay there is nothing to render in
+        # process with.
+        - scene_rdl2
+        - moonray
+        - openshadinglanguage
+        - openimageio
+        - imath
+        - openexr
+        - libboost-devel
+        - lua
+        - jsoncpp
+        - tbb-devel
+
+  - package:
+      name: nsi-moonray-lib
+      version: ${{ version }}
+    build:
+      # `libnsi_moonray` is a drop-in ɴsɪ renderer: an application
+      # points `$MOONRAY_NSI` at it and loads MoonRay where it loads
+      # 3Delight. It is useful without the command, which is why this
+      # is its own output.
+      files:
+        - lib/libnsi_moonray.*
+    requirements:
+      run:
+        - ${{ pin_subpackage('nsi-moonray-build', exact=True) }}
+
+  - package:
+      name: nsi-moonray-tools
+      version: ${{ version }}
+    build:
+      files:
+        - bin/mnry
+    requirements:
+      run:
+        - ${{ pin_subpackage('nsi-moonray-lib', exact=True) }}
+
+  # The compatibility metapackage, per that repository's convention:
+  # the plain name pulls the useful default split.
+  - package:
+      name: nsi-moonray
+      version: ${{ version }}
+    requirements:
+      run:
+        - ${{ pin_subpackage('nsi-moonray-lib', exact=True) }}
+        - ${{ pin_subpackage('nsi-moonray-tools', exact=True) }}
+    tests:
+      - script:
+          - if: unix
+            then: |
+              mnry --version
+              # **A scene class that does not resolve renders a black
+              # frame with no error**, so the test has to be that
+              # MoonRay's classes are found rather than that the binary
+              # starts. `mnry cat` builds the scene and prints it.
+              mnry cat --help
+
+about:
+  homepage: https://github.com/virtualritz/nsi-moonray
+  license: MIT OR Apache-2.0 OR Zlib
+  summary: An ɴsɪ backend on MoonRay, DreamWorks Animation's production renderer
