@@ -137,15 +137,24 @@ check-rdl2: require-rdl2
     NSI_MOONRAY_PREFIX="{{prefix}}" . packaging/env.sh
     cargo check --all-targets --features rdl2
 
-# **`cargo test`, not `nextest`, and that is the whole point of this
-# being a separate recipe.** MoonRay's driver state is process-global:
+# **`nextest`, and the first version of this recipe argued the
+# opposite.** The reasoning was that `tests/inprocess.rs` serializes on
+# a `static ONE_AT_A_TIME` mutex, which nextest's process-per-test
+# model makes inert, so `cargo test` was the safe runner. Running it
+# settled it the other way.
+#
+# What MoonRay actually requires is **one renderer per process** --
 # `initGlobalDriver` sets up thread-local pools, the affinity manager
-# and the image-write driver once per process, and two live
-# `RenderContext`s abort inside the allocator rather than failing
-# politely. `tests/inprocess.rs` and `tests/incremental.rs` serialize on
-# a `static ONE_AT_A_TIME` mutex, and that only works where the tests
-# are threads in one process. nextest gives each test its own process
-# and the mutex goes inert -- .blueprints/base/test-runner-isolation.md.
+# and the image-write driver once per process. nextest gives exactly
+# that by construction, so the mutex is not merely inert, it is
+# unnecessary. And a renderer test that dies takes its process with
+# it: under `cargo test` one SIGBUS lost fifteen tests that had not run
+# yet and reported nothing about them, where nextest lost one and ran
+# the other twenty-five.
+#
+# The general rule in .blueprints/base/test-runner-isolation.md still
+# holds; the resource here just happens to be one a process boundary
+# provides rather than one it breaks.
 
 # Run the tests that link MoonRay and render.
 test-rdl2: require-rdl2
@@ -153,7 +162,7 @@ test-rdl2: require-rdl2
     set -eu
     NSI_MOONRAY_PREFIX="{{prefix}}" . packaging/env.sh
     cargo build --features rdl2 --lib
-    cargo test --features rdl2
+    cargo nextest run --features rdl2 --no-fail-fast
 
 # Run this first when a renderer recipe does something surprising. A
 # half-set environment is the usual cause, and the `cfg`s it selects

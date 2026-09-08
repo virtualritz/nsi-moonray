@@ -635,6 +635,31 @@ supplies, and `RendererServices::get_attribute` answering
 does not apply, because `get_attribute` returning false leaves the
 shader's own default in place.
 
+### O18: `a_lobe_label_reaches_a_named_aov` crashes with SIGBUS
+
+**Reproducible in isolation**, on OSL 1.15.6 and OpenImageIO 3.1 from
+the ASWF conda channel, against MoonRay built from `main` on
+2026-09-08. Every other in-process test passes, including the rest of
+the OSL ones -- an arbitrary shader, a MaterialX closure, a
+displacement, `st` and primitive variables, a light, the limit surface.
+
+Two things about how it was found are worth keeping:
+
+- **Under `cargo test` it took the whole process with it**, so fifteen
+  tests that had not run yet reported nothing at all, and the failure
+  read as "the in-process suite is broken". Under `cargo nextest run`
+  it is one abort out of twenty-six. That reversed the reasoning behind
+  the `test-rdl2` recipe, which is now nextest: what MoonRay needs is
+  one renderer per process, and a process boundary supplies that rather
+  than breaking it.
+- The test passed in the environment it was written in. What changed is
+  the OSL and OpenImageIO versions, so the first question is whether
+  `O16`'s arrangement -- a lobe label reaching an AOV, with the
+  material deliberately unlabelled -- still holds in OSL 1.15.
+
+Not diagnosed. It is the one thing standing between this backend and a
+green renderer suite.
+
 ## Open questions
 
 - **An OSL volume shader.** The geometry crosses now -- the interface's
