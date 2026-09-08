@@ -49,19 +49,14 @@ be built at all, and has.
       the flush writes `subd_scheme` as `1` and rdl2's writer emits
       `"catclark"`, so a text diff against the emitter differs on every
       enumerable attribute even when the value is identical.
-- [~] T0.7 **Settle how to depend on `nsi-intermediate`.** Worked
-      around, not settled: a path dependency on a sibling `nsi`
-      checkout. `[patch]` was tried first and does not help -- Cargo
-      fetches the patched git source anyway. Publishing the crate, or
-      making `.blueprints` non-blocking, is what would actually settle
-      it.
-
-## Delivery
-
-How a consumer actually gets a MoonRay render out of an ɴsɪ scene.
-Neither of these needs *this* repository to build MoonRay -- they need
-whoever renders to have it installed.
-
+- [x] T0.7 **Settle how to depend on `nsi-intermediate`.** Closed
+      2026-09-08: the crate is on crates.io, and this one depends on it
+      by version. It was a path dependency on a sibling checkout for as
+      long as it was unpublished -- a git dependency makes Cargo fetch
+      the workspace's private `.blueprints` submodule and fail, and
+      `[patch]` does not help because Cargo fetches the patched source
+      anyway. Work on both at once with a `[patch.crates-io]` path in a
+      local `.cargo/config.toml`, uncommitted.
 - [x] T4.1 **`mnry`, the command.** Modelled on
       [`rdl`](https://github.com/virtualritz/delight-helpers), the
       `renderdl` replacement, so the two take the same shape: `render`,

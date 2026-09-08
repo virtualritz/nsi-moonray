@@ -32,12 +32,11 @@ the captured oracle -- but it is a **dump**, not the transport. See
 `HANDOFF.md` for what that cost to learn, and `specs/README.md` for
 which feature owns what.
 
-`T0.7` is the one structural workaround left: `nsi-intermediate` is
-overlaid from a sibling `../nsi` checkout, because it is not on
-crates.io yet. **Keep that checkout current.** It is a path dependency,
-so an out-of-date sibling does not fail as a version conflict -- it
-fails as a missing method in this crate's own source, which reads like
-a bug here.
+`T0.7` is **closed**: `nsi-intermediate`, `nsi-parse`, `nsi-trait` and
+`nsi-ffi-wrap` are on crates.io as of 2026-09-08, and this crate
+depends on them by version. A sibling `../nsi` checkout is no longer a
+precondition for anything. To work on both at once, override the
+dependency in a local `.cargo/config.toml` and do not commit it.
 
 ## Before Committing
 

@@ -136,18 +136,15 @@ what is still missing, code signing included.
 
 ## Building
 
-`nsi-intermediate` is overlaid from a sibling checkout for now, since
-it is unpublished:
+Nothing but Rust and this repository:
 
 ```bash
-git clone https://github.com/virtualritz/nsi.git      # ../nsi
 git clone https://github.com/virtualritz/nsi-moonray.git
 cd nsi-moonray && just ci
 ```
 
-`just --list` has the rest. Keep `../nsi` current: it is a path
-dependency, so an out-of-date one has no version to disagree about and
-surfaces as a missing method in *this* crate's source instead.
+`just --list` has the rest. That builds and tests the emitter, the
+flush and the oracle -- everything except linking a renderer.
 
 Handles are interned by default (`interned_handles`: upstream's
 `ustr_handles`, plus this crate's `Name` for class names, handles and

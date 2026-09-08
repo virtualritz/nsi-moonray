@@ -33,8 +33,7 @@ renderer, which is what let the transport change underneath them.
 
 A hundred and twenty-three tests without a renderer, and forty-three more
 integration tests behind one. `just test` needs no renderer, no
-`scene_rdl2` and no network -- but it does need a sibling `../nsi`
-checkout, for the reason below. The `rdl2` feature is what asks for a
+`scene_rdl2`, and nothing beside this repository. The `rdl2` feature is what asks for a
 renderer, and it is off by default so that this crate stays workable
 from a machine that cannot build MoonRay.
 
@@ -104,37 +103,28 @@ are corrections rather than churn:
   panic at the boundary, which is what "always returns an image"
   requires.
 
-## The Dependency, And Why It Is A Path
+## The Dependency, Which Was A Path And Is Not
 
-`nsi-intermediate` is overlaid from a sibling `../nsi` checkout. That
-is a workaround, not a resolution: the crate is unpublished, and a git
-dependency on the `nsi` workspace makes Cargo fetch that repository's
-private `.blueprints` submodule. Two things worth knowing before
-trying to improve it -- both were tried:
+`nsi-intermediate`, `nsi-parse`, `nsi-trait` and `nsi-ffi-wrap` are on
+crates.io as of 2026-09-08, and this crate depends on them by version.
+**`T0.7` is closed.** A sibling `../nsi` checkout is no longer a
+precondition for anything, and CI is possible for the first time.
 
-- Making the dependency **optional** does not help. Cargo resolves
-  every dependency whether or not the feature gating it is enabled.
-- **`[patch]`** does not help either. Cargo fetches the patched git
-  source anyway, and fails on the same submodule.
+Worth keeping, because both were tried and both cost a day:
 
-Publishing `nsi-intermediate`, or making `.blueprints` non-blocking for
-a consumer's fetch, is what would actually settle it. `T0.7`.
+- A **git** dependency on the `nsi` workspace makes Cargo fetch its
+  private `.blueprints` submodule, and fail. `[patch]` does not help --
+  Cargo fetches the patched source anyway.
+- A **path** dependency has no version to disagree about, so an
+  out-of-date sibling does not report a version conflict. It reports a
+  missing method in *this* crate's source, which reads like a bug here
+  and is not. Master did not compile for a day for exactly that: the
+  commit adopting upstream's primitive-variable resolver landed against
+  six upstream commits the checkout beside it did not have.
 
-**It is one step from settled.** Upstream released `nsi-intermediate`
-0.1.0 on 2026-09-08, explicitly because a backend had driven it. The
-crate is not on crates.io yet; once it is, the four path dependencies
-in `Cargo.toml` become version requirements, the sibling checkout stops
-being a precondition, and CI becomes possible at all -- there is no
-workflow in this repository because there is nothing a runner could
-check out that would build.
-
-**Until then, keep the sibling current, and know how it fails.** A
-path dependency has no version to disagree about, so an out-of-date
-`../nsi` does not report a version conflict. It reports a missing
-method in *this* crate's source, which reads like a bug here and is
-not. Master did not compile for a day for exactly this reason: the
-commit that adopted upstream's primitive-variable resolver landed
-against six upstream commits that the checkout beside it did not have.
+To work on both at once, override the dependency in a local
+`.cargo/config.toml` and do not commit it. Putting a `[patch]` in
+`Cargo.toml` puts the sibling checkout back in everyone's way.
 
 ## How This Reaches A Renderer
 

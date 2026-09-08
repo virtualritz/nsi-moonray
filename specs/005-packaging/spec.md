@@ -84,14 +84,12 @@ moves. macOS uses `install_name_tool`, which ships with Xcode.
 
 ## What is blocked, and on what
 
-**A release workflow cannot run yet.** `nsi-intermediate` is a path
-dependency on a sibling checkout, so there is nothing a CI runner
-could check out that would build -- `T0.7`, and the same thing that
-keeps this repository from having any CI at all. Upstream tagged
-`nsi-intermediate` 0.1.0 on 2026-09-08; once it is on crates.io the
-path dependencies become version requirements and a workflow modelled
-on `virtualritz/akatela`'s -- a draft release, one job per platform,
-`cargo packager`, assets uploaded to the tag -- is the remaining step.
+**A release workflow is now possible.** It was blocked on
+`nsi-intermediate` being a path dependency, so nothing a CI runner
+checked out would build. That closed on 2026-09-08 when the crate
+reached crates.io -- `T0.7`. The remaining step is a workflow modelled
+on `virtualritz/akatela`'s: a draft release, one job per platform,
+`cargo packager`, assets uploaded to the tag.
 
 **Building MoonRay in CI is the expensive part.** About fifty minutes
 on four cores, plus OpenSubdiv and OpenImageDenoise, and

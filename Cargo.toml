@@ -137,17 +137,19 @@ clap_complete = { version = "4", optional = true }
 frame-sequence = { version = "0.2", optional = true }
 # `mnry watch`.
 notify = { version = "8", optional = true }
-# The intermediate representation this backend flushes, overlaid from a
-# sibling checkout of https://github.com/virtualritz/nsi.
+# The intermediate representation this backend flushes.
 #
-# A path dependency, and deliberately so *for now*: the crate is
-# unpublished, and a git dependency on that workspace makes Cargo fetch
-# the repository's private `.blueprints` submodule, which fails without
-# access to it. `[patch]` does not help -- Cargo fetches the patched
-# source anyway. So until `nsi-intermediate` is published, or the
-# submodule stops blocking a fetch, building this crate means cloning
-# `nsi` next to it. `T0.7`.
-nsi-intermediate = { path = "../nsi/crates/nsi-intermediate" }
+# **Published, and `T0.7` is closed.** This was a path dependency on a
+# sibling checkout for as long as the crate was unpublished -- a git
+# dependency on that workspace makes Cargo fetch its private
+# `.blueprints` submodule and fail, and `[patch]` does not help because
+# Cargo fetches the patched source anyway. Neither applies now.
+#
+# To work on both at once, override it *locally* and do not commit the
+# override: `[patch.crates-io] nsi-intermediate = { path = ... }` in a
+# `.cargo/config.toml`, which is ignored here. Putting it in this file
+# would put the sibling checkout back in everyone's way.
+nsi-intermediate = "0.1"
 # The same intern table upstream fills with every handle in the scene.
 # `Name` -- a class name, a handle, an attribute name -- is a `Ustr`
 # with this and a `Box<str>` without, and a flushed document is mostly
@@ -156,11 +158,11 @@ nsi-intermediate = { path = "../nsi/crates/nsi-intermediate" }
 ustr = { version = "1", optional = true }
 # The ɴsɪ types the C entry points speak: `FfiParam` is layout-identical
 # to `NSIParam_t`, and `Type` carries the `NSIType_t` values.
-nsi-trait = { path = "../nsi/crates/nsi-trait" }
+nsi-trait = "0.4.2"
 # For the output-driver callbacks an application hands ɴsɪ. MoonRay has
 # no display-driver interface, so this crate calls those closures
 # itself; see `src/display.rs`. Nothing here marshals ndspy structs.
-nsi-ffi-wrap = { path = "../nsi/crates/nsi-ffi-wrap", features = ["output"] }
+nsi-ffi-wrap = { version = "0.10.2", features = ["output"] }
 # One ndspy struct, and only one: `PixelFormat::from_ndspy` takes the
 # channel list in that shape, and it is the only public way to build the
 # type the callbacks are handed. Nothing else here marshals ndspy.
@@ -193,20 +195,20 @@ oslquery-petite = "0.1.2"
 # here but the wiring. `gzip` because 3Delight writes compressed
 # streams and a caller who took a file from a pipeline should not have
 # to know that.
-nsi-parse = { path = "../nsi/crates/nsi-parse", features = ["gzip"] }
+nsi-parse = { version = "0.1", features = ["gzip"] }
 
 [dev-dependencies]
 # The application side of the callback test: it writes the closure the
 # way an ɴsɪ consumer does.
-nsi-ffi-wrap = { path = "../nsi/crates/nsi-ffi-wrap", features = ["output"] }
+nsi-ffi-wrap = { version = "0.10.2", features = ["output"] }
 # Loads the `cdylib` in `tests/dropin.rs` the way `nsi-ffi-wrap` loads a
 # renderer: by `dlopen` and by symbol.
 libloading = "0.8"
 # For the ɴsɪ types the in-process tests build arguments with.
-nsi-trait = { path = "../nsi/crates/nsi-trait" }
+nsi-trait = "0.4.2"
 # For building `OwnedArg` values in `tests/render.rs`; the library
 # itself already depends on it.
-nsi-intermediate = { path = "../nsi/crates/nsi-intermediate" }
+nsi-intermediate = "0.1"
 # Reads the rendered EXR in `tests/render.rs`, so the check is "the
 # triangle is in the image" rather than "a file appeared".
 exr = "1"

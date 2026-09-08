@@ -662,6 +662,8 @@ dependencies = [
 [[package]]
 name = "nsi-ffi-wrap"
 version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f0ee933342546d90d7c18776bb92e1118c654e6b8892569d608454ea3611f6c"
 dependencies = [
  "ahash",
  "dlopen2",
@@ -681,6 +683,8 @@ dependencies = [
 [[package]]
 name = "nsi-intermediate"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1dfa9e58b0f52430ab6abee4bf5cedb71523d40a66c6394b4f4c1ddbdf6a01"
 dependencies = [
  "ahash",
  "indexmap",
@@ -714,6 +718,8 @@ dependencies = [
 [[package]]
 name = "nsi-parse"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cde5b41700ad3fb8f2ddbc557b648ee64c9a53483a540da506c5529fa87fe21"
 dependencies = [
  "flate2",
  "memchr",
@@ -725,6 +731,8 @@ dependencies = [
 [[package]]
 name = "nsi-sys"
 version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17d797ded89d099fe4b20868a2b0b37a270a72b24cb1b0e0253ad136a4bed28e"
 dependencies = [
  "bindgen",
  "bitflags",
@@ -733,6 +741,8 @@ dependencies = [
 [[package]]
 name = "nsi-trait"
 version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef3fc321843de8f5b6a32541c0fb187f0a7cf7d1041a9693ec51299aecbc8d62"
 dependencies = [
  "bitflags",
 ]
