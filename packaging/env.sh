@@ -65,6 +65,16 @@ if [ -d "$PIXI_ENV" ]; then
     export DYLD_LIBRARY_PATH="$PIXI_ENV/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 fi
 
+# The sample volume the volume tests render, if `just assets` has
+# fetched it. Absent, those tests say why they did nothing.
+if [ -z "${NSI_MOONRAY_VDB:-}" ] && [ -s "$PWD/vendor/assets/fire.vdb" ]; then
+    export NSI_MOONRAY_VDB="$PWD/vendor/assets/fire.vdb"
+fi
+if [ -z "${NSI_MOONRAY_VDB_POINTS:-}" ] \
+   && [ -s "$PWD/vendor/assets/waterfall_points.vdb" ]; then
+    export NSI_MOONRAY_VDB_POINTS="$PWD/vendor/assets/waterfall_points.vdb"
+fi
+
 # MoonRay's own libraries, for the same reason.
 export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export DYLD_LIBRARY_PATH="$PREFIX/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"

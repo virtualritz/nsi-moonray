@@ -126,6 +126,30 @@ deps-list:
 renderer:
     packaging/renderer.sh --prefix "{{prefix}}"
 
+# **The volume tests need a volume**, and one is an asset rather than
+# something a checkout has. These are the OpenVDB project's own sample
+# models, so the framing in `tests/inprocess.rs` is measured against a
+# file anyone can fetch rather than taken on faith -- which is what
+# kept the volume path from ever being exercised.
+#
+# About 38 MB, into `vendor/assets/`, which is gitignored.
+
+# Download the OpenVDB sample models the volume tests use.
+assets:
+    #!/usr/bin/env sh
+    set -eu
+    mkdir -p vendor/assets
+    base=https://media.githubusercontent.com/media/AcademySoftwareFoundation/openvdb-website/master/download/models
+    for name in fire.vdb waterfall_points.vdb; do
+        if [ -s "vendor/assets/$name" ]; then
+            echo "assets: $name is already here"
+            continue
+        fi
+        echo "assets: fetching $name"
+        curl -sSL -o "vendor/assets/$name" "$base/$name"
+    done
+    ls -la vendor/assets/
+
 # Check the tools and headers a renderer build needs, building nothing.
 renderer-check:
     packaging/renderer.sh --prefix "{{prefix}}" --check

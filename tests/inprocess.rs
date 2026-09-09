@@ -2777,12 +2777,167 @@ fn a_lobe_label_reaches_a_named_aov() {
     );
 }
 
+/// **An OSL volume shader shades the volume.**
+///
+/// Without one, MoonRay renders the density grid through its own
+/// `VdbVolume` and the result is a plausible grey puff -- which is why
+/// this asserts *colour* rather than coverage. The shader returns a
+/// strongly green `anisotropic_vdf`, so a green cast is the only thing
+/// that distinguishes a shaded volume from the stock one, and coverage
+/// alone would pass either way.
+#[cfg(osl)]
+#[test]
+fn an_osl_volume_shader_shades_the_volume() {
+    use nsi_moonray::session::Session;
+
+    let Some(vdb) = vdb_file() else {
+        eprintln!("skipped: run `just assets` for the sample volume");
+        return;
+    };
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = scratch("nsi-moonray-osl-volume");
+    let source = directory.join("green_smoke.osl");
+    std::fs::write(
+        &source,
+        "volume green_smoke()\n\
+         {\n\
+         \x20   Ci = anisotropic_vdf(color(0.05, 0.9, 0.05),\n\
+         \x20                        color(1.0, 1.0, 1.0), 0.0);\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("green_smoke.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (96usize, 72usize);
+    let mut nsi = scene(width as i32, height as i32);
+    nsi.disconnect("quad", None, ".root", "objects").unwrap();
+
+    nsi.create("smoke", "volume").unwrap();
+    nsi.set_attribute(
+        "smoke",
+        vec![
+            arg(
+                "vdbfilename",
+                Type::String,
+                OwnedData::String(vec![
+                    vdb.to_string_lossy().into_owned().into_bytes(),
+                ]),
+            ),
+            arg(
+                "densitygrid",
+                Type::String,
+                OwnedData::String(vec![b"density".to_vec()]),
+            ),
+        ],
+    )
+    .unwrap();
+    nsi.connect("smoke", None, ".root", "objects").unwrap();
+
+    // The volume shader, bound the way the interface binds one.
+    nsi.create("attr", "attributes").unwrap();
+    nsi.create("green", "shader").unwrap();
+    nsi.set_attribute(
+        "green",
+        vec![arg(
+            "shaderfilename",
+            Type::String,
+            OwnedData::String(vec![
+                directory
+                    .join("green_smoke.oso")
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_bytes(),
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.connect("attr", None, "smoke", "geometryattributes")
+        .unwrap();
+    nsi.connect("green", None, "attr", "volumeshader").unwrap();
+
+    // The same framing as `a_volume_renders`; see `vdb_file`.
+    nsi.set_attribute(
+        "cam",
+        vec![arg("fov", Type::F32, OwnedData::F32(vec![60.0]))],
+    )
+    .unwrap();
+    nsi.create("xform", "transform").unwrap();
+    nsi.set_attribute(
+        "xform",
+        vec![arg(
+            "transformationmatrix",
+            Type::MatrixF64,
+            OwnedData::F64(vec![
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                0.0, 37.0, 100.0, 1.0,
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.disconnect("cam", None, ".root", "objects").unwrap();
+    nsi.connect("xform", None, ".root", "objects").unwrap();
+    nsi.connect("cam", None, "xform", "objects").unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let (_, _, pixels) = session.render().snapshot().expect("a frame");
+
+    let mut green_over_red = 0usize;
+    let mut covered = 0usize;
+    for pixel in pixels.chunks_exact(4) {
+        if pixel[3] <= 0.01 {
+            continue;
+        }
+        covered += 1;
+        if pixel[1] > pixel[0] * 1.5 {
+            green_over_red += 1;
+        }
+    }
+
+    assert!(covered > 0, "the volume rendered nothing at all");
+    assert!(
+        green_over_red * 2 > covered,
+        "only {green_over_red} of {covered} covered pixels are green. \
+         The stock `VdbVolume` renders this grid grey, so a volume that \
+         is not green is one the OSL shader never shaded"
+    );
+}
+
 /// Where an OpenVDB file to render lives, if this machine has one.
 ///
-/// `$NSI_MOONRAY_VDB` points at a `.vdb` with a `density` grid. Like
-/// 3Delight's shaders, it is an asset rather than something everyone
-/// building this crate has, so the test that needs it says why it did
-/// nothing rather than failing.
+/// **`fire.vdb` from the OpenVDB sample models**, which `just assets`
+/// downloads. It is an asset rather than something everyone building
+/// this crate has, so the tests that need it say why they did nothing
+/// rather than failing.
+///
+/// The framing below is measured off *that* file rather than taken on
+/// faith, which is what the previous version of this did and what kept
+/// the volume path from ever being exercised: `vdb_print` gives a
+/// voxel size of 0.244 and an index-to-world translation of
+/// `(-19.1, -8.9, -18.7)` over active bounds `(0,5,0)-(160,368,152)`,
+/// so the flame occupies roughly `x -19..20`, `y -8..81`, `z -19..18`.
+/// A tall, narrow plume centred near `y = 37` and **not** on the
+/// origin, which is why a camera pointed at the origin saw almost
+/// nothing.
 fn vdb_file() -> Option<std::path::PathBuf> {
     let path = std::path::PathBuf::from(std::env::var("NSI_MOONRAY_VDB").ok()?);
     path.exists().then_some(path)
@@ -2847,8 +3002,8 @@ fn a_volume_renders() {
     .unwrap();
     nsi.connect("smoke", None, ".root", "objects").unwrap();
 
-    // The grid is hundreds of units across in its own space, so the
-    // camera goes back far enough to see it whole.
+    // Framed for the plume: 60 degrees at 100 units gives a frame
+    // about 115 units tall against a flame about 89 tall.
     nsi.set_attribute(
         "cam",
         vec![arg("fov", Type::F32, OwnedData::F32(vec![60.0]))],
@@ -2864,7 +3019,9 @@ fn a_volume_renders() {
                 1.0, 0.0, 0.0, 0.0, //
                 0.0, 1.0, 0.0, 0.0, //
                 0.0, 0.0, 1.0, 0.0, //
-                0.0, 0.0, 330.0, 1.0,
+                // Up at the middle of the plume, back far enough to
+                // hold it.
+                0.0, 37.0, 100.0, 1.0,
             ]),
         )],
     )
