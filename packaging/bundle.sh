@@ -236,12 +236,30 @@ for root in "$PREFIX" "$PIXI_ENV"; do
     done
 done
 
-if [ "$found" -eq 0 ]; then
-    echo "bundle: no third-party licences were found to copy. A bundle \
-redistributes MoonRay and its dependencies, so this needs checking by \
-hand before the build goes anywhere." >&2
-else
-    echo "bundle: $found third-party licence directories collected"
+# The source checkouts `packaging/renderer.sh` made. MoonRay and
+# `scene_rdl2` are built rather than packaged, so nothing installs
+# their licences and the only copy is in the tree they were built
+# from.
+for source in vendor/*/LICENSE vendor/*/LICENSE.md vendor/*/LICENSE.txt \
+              vendor/*/COPYING; do
+    [ -f "$source" ] || continue
+    project="$(basename "$(dirname "$source")")"
+    [ -e "$LICENCES/$project" ] && continue
+    mkdir -p "$LICENCES/$project"
+    cp -pL "$source" "$LICENCES/$project/" 2>/dev/null || continue
+    found=$((found + 1))
+done
+
+# **Counted against what is actually being shipped.** Eight notices
+# beside ninety libraries is not "collected", it is "mostly missed",
+# and a count on its own reads like success.
+libraries=$(find "$OUT/lib" -maxdepth 1 -type f | wc -l | tr -d ' ')
+echo "bundle: $found licence sets for $libraries libraries" >&2
+if [ "$found" -lt "$libraries" ]; then
+    echo "bundle: that is fewer notices than libraries, so some are \
+missing. Redistributing a library means redistributing its licence; \
+check share/nsi-moonray/licences by hand before this build goes \
+anywhere." >&2
 fi
 
 echo "bundle: $OUT"

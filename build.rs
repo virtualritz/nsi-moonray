@@ -12,11 +12,23 @@ fn main() {
     println!("cargo::rerun-if-env-changed=MOONRAY_ROOT");
     println!("cargo::rerun-if-changed=shim/src/render.cc");
     println!("cargo::rerun-if-env-changed=OSL_ROOT");
-    println!("cargo::rerun-if-changed=dso/osl/Osl.cc");
-    println!("cargo::rerun-if-changed=dso/osl/attributes.cc");
-    println!("cargo::rerun-if-changed=dso/osl/shading_system.cc");
-    println!("cargo::rerun-if-changed=dso/osl/shading_system.h");
-    println!("cargo::rerun-if-changed=dso/osl/build.sh");
+    // **Every source, not the ones that existed when this was
+    // written.** `OslDisplacement.cc` and `OslMap.cc` were missing
+    // here, so editing either left Cargo believing the DSOs were
+    // current and the tests ran against the previous build -- the same
+    // trap as the stale `cdylib`, and just as invisible.
+    for source in [
+        "Osl.cc",
+        "OslDisplacement.cc",
+        "OslMap.cc",
+        "OslVolume.cc",
+        "attributes.cc",
+        "shading_system.cc",
+        "shading_system.h",
+        "build.sh",
+    ] {
+        println!("cargo::rerun-if-changed=dso/osl/{source}");
+    }
     println!("cargo::rustc-check-cfg=cfg(moonray)");
     println!("cargo::rustc-check-cfg=cfg(osl)");
 

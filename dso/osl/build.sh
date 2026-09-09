@@ -61,5 +61,19 @@ g++ $flags -DNSI_MOONRAY_OSL_ROOT=rdl2::Map \
     "$here/attributes.cc" -o "$out/OslMap.so.proxy" \
     -L"$moonray/lib64" -L"$moonray/lib" -lscene_rdl2
 
-echo "built $out/Osl.so, $out/OslDisplacement.so, $out/OslMap.so and \
-their proxies"
+# The volume root shader. Four virtuals over one execution; see the
+# note at the top of `OslVolume.cc`.
+# shellcheck disable=SC2086
+g++ $flags "$here/OslVolume.cc" "$here/shading_system.cc" \
+    -o "$out/OslVolume.so" \
+    -L"$moonray/lib64" -L"$moonray/lib" -lscene_rdl2 -lrendering_shading \
+    -L"$osl/lib" -loslexec -lOpenImageIO -lOpenImageIO_Util \
+    -Wl,-rpath,"$osl/lib"
+
+# shellcheck disable=SC2086
+g++ $flags -DNSI_MOONRAY_OSL_ROOT=rdl2::VolumeShader \
+    "$here/attributes.cc" -o "$out/OslVolume.so.proxy" \
+    -L"$moonray/lib64" -L"$moonray/lib" -lscene_rdl2
+
+echo "built $out/Osl.so, $out/OslDisplacement.so, $out/OslMap.so, \
+$out/OslVolume.so and their proxies"

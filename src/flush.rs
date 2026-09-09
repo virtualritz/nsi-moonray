@@ -183,6 +183,14 @@ const VOLUME_SHADER: &str = "VdbVolume";
 /// The one `VdbVolume` every volume in the scene is rendered with.
 const DEFAULT_VOLUME_SHADER: &str = "/nsi/volume_shader";
 
+/// The root shader an ɴsɪ `volumeshader` becomes when OSL is running.
+///
+/// Built by this repository beside the material and the displacement,
+/// from the same shading system and the same group specification. The
+/// usage is OSL's `"volume"`, and what it produces is
+/// `anisotropic_vdf` or `medium_vdf` rather than a surface closure.
+const OSL_VOLUME: &str = "OslVolume";
+
 /// Every way MoonRay can see a piece of geometry.
 ///
 /// Read from `scene_rdl2/lib/scene/rdl2/Geometry.cc` rather than
@@ -358,7 +366,7 @@ pub fn flush_with(
     // rather than per geometry because the *class* a shader node
     // becomes is a property of the shader, and the node walk reaches it
     // in whatever order the scene was recorded in.
-    let (surfaces, displaces) = shader_roles(scene);
+    let (surfaces, displaces, volume_shaders) = shader_roles(scene);
 
     for (handle, node) in scene.nodes() {
         match node.node_type() {
@@ -455,7 +463,7 @@ pub fn flush_with(
                 // interchangeable: MoonRay reads the volume through the
                 // sixth and would render nothing from the third.
                 bindings.push((VOLUME, handle, None, None));
-                report_volume_shader(scene, handle, &mut flushed);
+                report_volume_shader(scene, handle, shading, &mut flushed);
                 volumes.push(handle);
             }
 
@@ -536,10 +544,16 @@ pub fn flush_with(
                 // second object under a name another class already
                 // holds is an error, not a shadowing -- so a shader
                 // becomes *one* object and its binding decides which.
-                if shading == Shading::Osl && displaces.contains(&handle) {
+                if shading == Shading::Osl && volume_shaders.contains(&handle) {
+                    objects.push(osl_volume(scene, handle, &mut flushed));
+                } else if shading == Shading::Osl && displaces.contains(&handle)
+                {
                     if surfaces.contains(&handle) {
                         flushed.limitations.push(format!(
-                            "shader {handle:?} is bound as both a surface                              and a displacement shader; it crossed as the                              surface, because a MoonRay object has one                              class and one name"
+                            "shader {handle:?} is bound as both a \
+                             surface and a displacement shader; it \
+                             crossed as the surface, because a MoonRay \
+                             object has one class and one name"
                         ));
                         objects.push(shader(
                             scene,
@@ -654,12 +668,12 @@ pub fn flush_with(
             // `VolumeShader` and a material there does nothing; the row
             // still needs one, or the volume renders as nothing at all.
             if class == VOLUME {
-                volumes_shaded = true;
+                let bound = volume_shader(scene, handle, shading);
+                volumes_shaded = volumes_shaded || bound.is_none();
                 return Assignment {
-                    volume_shader: Some(Reference::new(
-                        VOLUME_SHADER,
-                        DEFAULT_VOLUME_SHADER,
-                    )),
+                    volume_shader: Some(bound.unwrap_or_else(|| {
+                        Reference::new(VOLUME_SHADER, DEFAULT_VOLUME_SHADER)
+                    })),
                     ..Assignment::new(
                         Reference::new(class, handle),
                         None,
@@ -1892,8 +1906,8 @@ fn material(
     }
 }
 
-/// The shader handles bound in each shader slot: surfaces, then
-/// displacements.
+/// The shader handles bound in each shader slot: surfaces,
+/// displacements, then volumes.
 ///
 /// Read off the edges rather than resolved per geometry, and
 /// deliberately: this decides what *class* a shader node becomes, which
@@ -1901,9 +1915,12 @@ fn material(
 /// that loses ɴsɪ's precedence rule to another still leaves an object
 /// nothing references, which costs a few lines of `.rdla`; getting the
 /// class wrong costs the surface.
-fn shader_roles(scene: &Scene) -> (HashSet<&str>, HashSet<&str>) {
+fn shader_roles(
+    scene: &Scene,
+) -> (HashSet<&str>, HashSet<&str>, HashSet<&str>) {
     let mut surfaces = HashSet::new();
     let mut displaces = HashSet::new();
+    let mut volumes = HashSet::new();
 
     for edge in scene.edges() {
         match edge.kind {
@@ -1913,11 +1930,14 @@ fn shader_roles(scene: &Scene) -> (HashSet<&str>, HashSet<&str>) {
             EdgeKind::DisplacementShader => {
                 displaces.insert(edge.from());
             }
+            EdgeKind::VolumeShader => {
+                volumes.insert(edge.from());
+            }
             _ => {}
         }
     }
 
-    (surfaces, displaces)
+    (surfaces, displaces, volumes)
 }
 
 /// The displacement bound to one piece of geometry, if any.
@@ -1950,6 +1970,31 @@ fn displacement(
     Some(Reference::new(OSL_DISPLACEMENT, shader))
 }
 
+/// The OSL volume shader bound to one volume, if there is one and OSL
+/// can run it.
+///
+/// The same shape as [`material`] and [`displacement`]: upstream
+/// resolves the binding and this decides what *class* it became, which
+/// has to match what was emitted or the `Layer` row points at nothing.
+/// A volume row pointing at nothing renders no volume at all.
+fn volume_shader(
+    scene: &Scene,
+    handle: &str,
+    shading: Shading,
+) -> Option<Reference> {
+    let shader = scene
+        .geometry_binding(handle)
+        .ok()
+        .flatten()?
+        .volume_shader?;
+
+    if shading != Shading::Osl || !crate::osl::is_runnable(scene, &shader) {
+        return None;
+    }
+
+    Some(Reference::new(OSL_VOLUME, shader))
+}
+
 /// Say that a bound `volumeshader` is not the one being run.
 ///
 /// The interface binds a volume shader through the `attributes` node
@@ -1966,7 +2011,12 @@ fn displacement(
 /// *volume* shader shows up as a perfectly plausible puff of the
 /// density grid, with none of the shader's extinction, colour or
 /// emission, and nothing about the image says so.
-fn report_volume_shader(scene: &Scene, handle: &str, flushed: &mut Flushed) {
+fn report_volume_shader(
+    scene: &Scene,
+    handle: &str,
+    shading: Shading,
+    flushed: &mut Flushed,
+) {
     let Some(shader) = scene
         .geometry_binding(handle)
         .ok()
@@ -1976,11 +2026,17 @@ fn report_volume_shader(scene: &Scene, handle: &str, flushed: &mut Flushed) {
         return;
     };
 
+    // With OSL running, the shader crosses as an `OslVolume` and there
+    // is nothing to report.
+    if shading == Shading::Osl && crate::osl::is_runnable(scene, &shader) {
+        return;
+    }
+
     flushed.limitations.push(format!(
-        "{handle:?} has volume shader {shader:?} bound; MoonRay reads a \
-         volume through a `VolumeShader` root and this backend has no OSL \
-         one, so the volume renders with the stock `{VOLUME_SHADER}` and \
-         the shader's extinction, albedo, emission and anisotropy are lost"
+        "{handle:?} has volume shader {shader:?} bound, which needs \
+         OSL; the volume renders with the stock `{VOLUME_SHADER}` and \
+         the shader's extinction, albedo, emission and anisotropy are \
+         lost"
     ));
 }
 
@@ -2458,6 +2514,18 @@ fn osl_shader(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
         object = object.set("search_path", Value::String(path));
     }
 
+    object
+}
+
+/// One ɴsɪ shader network, as MoonRay's `OslVolume`.
+///
+/// The same group specification again, with OSL's `"volume"` usage.
+/// What it produces is `anisotropic_vdf` or `medium_vdf` rather than a
+/// surface closure, and `dso/osl/OslVolume.cc` turns those into the
+/// four answers `VolumeShader` asks for.
+fn osl_volume(scene: &Scene, handle: &str, flushed: &mut Flushed) -> Object {
+    let mut object = osl_shader(scene, handle, flushed);
+    object.class = Name::new(OSL_VOLUME);
     object
 }
 
@@ -3796,7 +3864,73 @@ mod tests {
         assert!(!beauty.contains("lpe"), "{beauty}");
     }
 
-    /// **A bound `volumeshader` does not cross, and says so.**
+    /// **A bound `volumeshader` crosses as an `OslVolume`.**
+    ///
+    /// The same group specification a material or a displacement
+    /// carries, with OSL's `"volume"` usage. The row's *sixth* column
+    /// points at it; a material in the third would render nothing.
+    #[test]
+    fn a_bound_volume_shader_becomes_an_osl_volume() {
+        let mut scene = Scene::default();
+        scene.create("smoke", "volume").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "smoke",
+                vec![arg(
+                    "vdbfilename",
+                    Type::String,
+                    OwnedData::String(vec![b"/tmp/explosion.vdb".to_vec()]),
+                )],
+            )
+            .expect("a recordable edit");
+        scene.connect("smoke", None, ".root", "objects").unwrap();
+
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("vol", "shader").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "vol",
+                vec![arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![
+                        b"/opt/3delight/osl/dlAtmosphere.oso".to_vec(),
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("attr", None, "smoke", "geometryattributes")
+            .unwrap();
+        scene.connect("vol", None, "attr", "volumeshader").unwrap();
+
+        let flushed = flush_with(&scene, Purpose::default(), Shading::Osl);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("OslVolume(\"vol\") {"), "{rdla}");
+        // The sixth column, and not the third.
+        assert!(
+            rdla.contains(
+                "{VdbGeometry(\"smoke\"), \"\", undef(), undef(), \
+                 undef(), OslVolume(\"vol\")"
+            ),
+            "{rdla}"
+        );
+        // And nothing is reported, because nothing was lost.
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .all(|line| !line.contains("volume shader")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// **A bound `volumeshader` does not cross without OSL, and says
+    /// so.**
     ///
     /// The interface binds one through the `attributes` node the way it
     /// binds a surface or a displacement, and every volume here is
@@ -3843,9 +3977,9 @@ mod tests {
             .unwrap();
         scene.connect("vol", None, "attr", "volumeshader").unwrap();
 
-        // With OSL running, because the point is that even then there
-        // is no `VolumeShader` root to run it in.
-        let flushed = flush_with(&scene, Purpose::default(), Shading::Osl);
+        // Without OSL: the substitution path, which has no volume
+        // shader to run.
+        let flushed = flush(&scene);
 
         assert!(
             flushed

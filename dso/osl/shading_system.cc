@@ -269,6 +269,28 @@ System::register_closures()
         { "transparent", CLOSURE_TRANSPARENT,
           { CLOSURE_FINISH_PARAM(EmptyParams) } },
 
+        // The two volume distribution functions. Registered here
+        // rather than in a volume-only table because OSL has one
+        // closure registry per shading system, and a surface shader
+        // that names a `vdf` is a scene error rather than a reason to
+        // have two systems.
+        { "anisotropic_vdf", CLOSURE_ANISOTROPIC_VDF,
+          { CLOSURE_COLOR_PARAM(AnisotropicVdfParams, albedo),
+            CLOSURE_COLOR_PARAM(AnisotropicVdfParams, extinction),
+            CLOSURE_FLOAT_PARAM(AnisotropicVdfParams, anisotropy),
+            CLOSURE_STRING_KEYPARAM(AnisotropicVdfParams, label, "label"),
+            CLOSURE_FINISH_PARAM(AnisotropicVdfParams) } },
+
+        { "medium_vdf", CLOSURE_MEDIUM_VDF,
+          { CLOSURE_COLOR_PARAM(MediumVdfParams, albedo),
+            CLOSURE_FLOAT_PARAM(MediumVdfParams, transmission_depth),
+            CLOSURE_COLOR_PARAM(MediumVdfParams, transmission_color),
+            CLOSURE_FLOAT_PARAM(MediumVdfParams, anisotropy),
+            CLOSURE_FLOAT_PARAM(MediumVdfParams, ior),
+            CLOSURE_INT_PARAM(MediumVdfParams, priority),
+            CLOSURE_STRING_KEYPARAM(MediumVdfParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MediumVdfParams) } },
+
         { "microfacet", CLOSURE_MICROFACET,
           { CLOSURE_STRING_PARAM(MicrofacetParams, dist),
             CLOSURE_VECTOR_PARAM(MicrofacetParams, N),

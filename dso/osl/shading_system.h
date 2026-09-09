@@ -120,6 +120,10 @@ enum ClosureId {
     CLOSURE_DL_OUTPUT_VARIABLE,
     CLOSURE_DL_OUTPUT_CONSTANT,
     CLOSURE_DL_OCCLUSION,
+    // Volumes. OSL's two volume distribution functions, which is what
+    // an ɴsɪ `volumeshader` produces.
+    CLOSURE_ANISOTROPIC_VDF,
+    CLOSURE_MEDIUM_VDF,
     CLOSURE_COUNT,
 };
 
@@ -199,6 +203,37 @@ struct MicrofacetParams {
     int refract;
     OSL::Color3 realeta;
     OSL::Color3 complexeta;
+    OSL::ustringhash label;
+};
+
+/// `anisotropic_vdf(color albedo, color extinction, float anisotropy)`.
+///
+/// OSL's plain volume distribution function, and the one that maps
+/// onto MoonRay's `VolumeShader` without arithmetic: albedo is albedo,
+/// extinction is extinction, anisotropy is the phase function's `g`.
+struct AnisotropicVdfParams {
+    OSL::Color3 albedo;
+    OSL::Color3 extinction;
+    float anisotropy;
+    OSL::ustringhash label;
+};
+
+/// `medium_vdf(color albedo, float transmission_depth,
+/// color transmission_color, float anisotropy, float ior,
+/// int priority)`.
+///
+/// **Extinction is not a parameter here; it is implied.** The medium
+/// is described by how far light gets through it -- a depth and the
+/// colour it has travelled to by then -- so extinction is
+/// `-log(transmission_color) / transmission_depth`, per channel. That
+/// is the standard inversion and it is done in `OslVolume`, not here.
+struct MediumVdfParams {
+    OSL::Color3 albedo;
+    float transmission_depth;
+    OSL::Color3 transmission_color;
+    float anisotropy;
+    float ior;
+    int priority;
     OSL::ustringhash label;
 };
 
