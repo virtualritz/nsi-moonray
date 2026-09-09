@@ -74,9 +74,75 @@ use std::{
 /// a bad context.
 pub type NsiContext = c_int;
 
+/// ɴsɪ's error-handler callback.
+///
+/// `void (*)(void* userdata, int level, int code, const char* message)`,
+/// read off `nsi.h` rather than guessed. The levels are the interface's
+/// own: message, info, warning, error.
+pub type ErrorHandler = unsafe extern "C" fn(
+    userdata: *mut c_void,
+    level: c_int,
+    code: c_int,
+    message: *const c_char,
+);
+
+/// How loud a report is.
+///
+/// **Everything this backend cannot carry is a warning, never an
+/// error.** ɴsɪ always returns an image, so a scene with an unmappable
+/// attribute renders without it; an error would say the render did not
+/// happen, and it did.
+pub const LEVEL_INFO: c_int = 1;
+pub const LEVEL_WARNING: c_int = 2;
+pub const LEVEL_ERROR: c_int = 3;
+
+/// Where a context's diagnostics go.
+///
+/// **Without this every limitation went to stderr**, which a host
+/// application does not read: a DCC has a message log, a render-status
+/// panel and an error count, and all three stayed empty while this
+/// crate wrote fifty-odd carefully worded explanations into a console
+/// nobody was looking at.
+#[derive(Clone, Copy)]
+struct Reporter {
+    handler: Option<ErrorHandler>,
+    userdata: HostPointer,
+}
+
+impl Reporter {
+    /// Say something to the host, and to stderr when there is no host
+    /// listening.
+    ///
+    /// Never both: a DCC that installs a handler and also captures
+    /// stderr would show every line twice.
+    fn say(&self, level: c_int, message: &str) {
+        let Some(handler) = self.handler else {
+            eprintln!("nsi-moonray: {message}");
+            return;
+        };
+
+        let Ok(text) = std::ffi::CString::new(message) else {
+            // An interior NUL. Say so rather than dropping the line,
+            // because the line that cannot be printed is the one worth
+            // seeing.
+            eprintln!("nsi-moonray: (message contains a NUL) {message}");
+            return;
+        };
+
+        // SAFETY: the host gave us this pointer in `NSIBegin` and the
+        // interface says it stays valid for the context's life. The
+        // string outlives the call.
+        unsafe {
+            handler(self.userdata.0 as *mut c_void, level, 0, text.as_ptr());
+        }
+    }
+}
+
 /// Everything one ɴsɪ context holds.
 struct Context {
     scene: Scene,
+    /// Where this context's diagnostics go. Installed by `NSIBegin`.
+    reporter: Reporter,
     /// Where the `.rdla` was written, kept so a failed render can say
     /// what to look at.
     scene_file: Option<PathBuf>,
@@ -335,6 +401,56 @@ fn argument_string(arguments: &[OwnedArgument], name: &str) -> Option<String> {
         })
 }
 
+/// Pull the error handler out of `NSIBegin`'s parameters.
+///
+/// `errorhandler` is a `Pointer`, and `errorhandler.data` the opaque
+/// userdata handed back with every call. Upstream records both as
+/// `HostPointer` -- the same thing that carries an output driver's
+/// closures -- so nothing is marshalled here.
+fn reporter_of(arguments: &[OwnedArgument]) -> Reporter {
+    let pointer = |name: &str| {
+        arguments
+            .iter()
+            .find(|argument| argument.name == name)
+            .and_then(|argument| match &argument.data {
+                OwnedData::Reference(values) => values.first().copied(),
+                _ => None,
+            })
+    };
+
+    Reporter {
+        // SAFETY of the eventual call: the host promises this is a
+        // function of the interface's error-handler shape. There is
+        // nothing to check it against -- a wrong pointer here is a
+        // wrong pointer in any ɴsɪ renderer.
+        handler: pointer("errorhandler").map(|p| unsafe {
+            std::mem::transmute::<*const c_void, ErrorHandler>(p.0)
+        }),
+        userdata: pointer("errorhandler.data")
+            .unwrap_or(HostPointer(std::ptr::null())),
+    }
+}
+
+/// Say something to a context's host, by context id.
+///
+/// For the places that have the id but not the borrow. Where a
+/// `&Context` is already in hand, call `context.reporter.say` directly.
+///
+/// Gated because its only caller is: a build with no linked renderer
+/// never reaches the arm that warns about not having one.
+#[cfg(all(feature = "rdl2", moonray))]
+fn report(ctx: NsiContext, level: c_int, message: &str) {
+    let reporter = CONTEXTS
+        .lock()
+        .ok()
+        .and_then(|contexts| contexts.get(&ctx).map(|c| c.reporter));
+
+    match reporter {
+        Some(reporter) => reporter.say(level, message),
+        None => eprintln!("nsi-moonray: {message}"),
+    }
+}
+
 // ─── The C API ──────────────────────────────────────────────────────
 
 /// # Safety
@@ -342,9 +458,13 @@ fn argument_string(arguments: &[OwnedArgument], name: &str) -> Option<String> {
 /// `params` points at `nparams` valid parameters, or is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn NSIBegin(
-    _nparams: c_int,
-    _params: *const FfiParam,
+    nparams: c_int,
+    params: *const FfiParam,
 ) -> NsiContext {
+    // SAFETY: the caller guarantees `nparams` valid parameters.
+    let arguments = unsafe { arguments(params, nparams) };
+    let reporter = reporter_of(&arguments);
+
     let Ok(mut next) = NEXT.lock() else {
         return 0;
     };
@@ -358,6 +478,7 @@ pub unsafe extern "C" fn NSIBegin(
         ctx,
         Context {
             scene: Scene::default(),
+            reporter,
             scene_file: None,
             #[cfg(all(feature = "rdl2", moonray))]
             session: None,
@@ -488,8 +609,8 @@ pub unsafe extern "C" fn NSIConnect(
     from_attr: *const c_char,
     to: *const c_char,
     to_attr: *const c_char,
-    _nparams: c_int,
-    _params: *const FfiParam,
+    nparams: c_int,
+    params: *const FfiParam,
 ) {
     let (Some(from), Some(to), Some(to_attr)) =
         (unsafe { string(from) }, unsafe { string(to) }, unsafe {
@@ -502,14 +623,36 @@ pub unsafe extern "C" fn NSIConnect(
     // connection, and the C API spells that as either null or "".
     let from_attr = unsafe { string(from_attr) }.filter(|s| !s.is_empty());
 
+    // **A connection carries arguments, and dropping them corrupts
+    // scenes rather than limiting them.** `index` on
+    // `instances.sourcemodels` is what pairs a prototype with its
+    // instances -- `flush::instancer` resolves against it rather than
+    // against connection order -- so losing it places the *wrong
+    // models*, silently. `priority` on an `attributes` connection
+    // decides which shader wins a tie, and Houdini leans on four
+    // distinct values. `value` is how the interface expresses light
+    // linking.
+    //
+    // SAFETY: the caller guarantees `nparams` valid parameters.
+    let arguments = unsafe { arguments(params, nparams) };
+
     with(ctx, |context| {
+        // **`scene_mut`, not `scene`.** Every other mutator here uses
+        // it and this one did not: while an interactive render is
+        // running the scene lives inside the `Session`, so a
+        // connection made mid-render was recorded into the parked
+        // scene and never reached the renderer.
+        //
         // An unmapped destination attribute is upstream's to reject;
         // here it means the connection is not recorded, which is what
         // `classify` refusing to guess is for.
-        let _ =
-            context
-                .scene
-                .connect(&from, from_attr.as_deref(), &to, &to_attr);
+        let _ = context.scene_mut().connect_with_arguments(
+            &from,
+            from_attr.as_deref(),
+            &to,
+            &to_attr,
+            arguments,
+        );
     });
 }
 
@@ -586,9 +729,11 @@ pub unsafe extern "C" fn NSIRenderControl(
                 // No linked renderer, and a spawned batch cannot be
                 // interactive. Say so rather than silently rendering
                 // one frame and calling it a viewport.
-                eprintln!(
-                    "nsi-moonray: no linked renderer, so this \
-                     interactive render is a single batch frame"
+                report(
+                    ctx,
+                    LEVEL_WARNING,
+                    "no linked renderer, so this interactive render is \
+                     a single batch frame",
                 );
             }
 
@@ -653,13 +798,19 @@ pub unsafe extern "C" fn NSIRenderControl(
             crate::flush::Purpose::Batch,
         );
 
+        // **Warnings, not errors.** Each of these says something was
+        // not carried, and the render still happens; an error would
+        // say it did not.
         for limitation in &flushed.limitations {
-            eprintln!("nsi-moonray: {limitation}");
+            context.reporter.say(LEVEL_WARNING, limitation);
         }
 
         let path = scene_path(ctx);
         if let Err(error) = std::fs::write(&path, flushed.to_rdla()) {
-            eprintln!("nsi-moonray: cannot write {}: {error}", path.display());
+            context.reporter.say(
+                LEVEL_ERROR,
+                &format!("cannot write {}: {error}", path.display()),
+            );
             return;
         }
         context.scene_file = Some(path.clone());
@@ -682,9 +833,9 @@ pub unsafe extern "C" fn NSIRenderControl(
         if let Err(error) = Render::new(&path).run() {
             // ɴsɪ always returns an image, and when it cannot, it says
             // so and leaves the scene where someone can look at it.
-            eprintln!(
-                "nsi-moonray: {error}; the scene is at {}",
-                path.display()
+            context.reporter.say(
+                LEVEL_ERROR,
+                &format!("{error}; the scene is at {}", path.display()),
             );
             return;
         }
@@ -693,8 +844,9 @@ pub unsafe extern "C" fn NSIRenderControl(
             if let Err(error) =
                 display::deliver_file(&callbacks, &handle, &image)
             {
-                eprintln!(
-                    "nsi-moonray: {handle:?} received no pixels: {error}"
+                context.reporter.say(
+                    LEVEL_ERROR,
+                    &format!("{handle:?} received no pixels: {error}"),
                 );
             }
         }

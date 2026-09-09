@@ -751,6 +751,11 @@ pub fn flush_with(
         .set("image_width", Value::Int(resolution.0))
         .set("image_height", Value::Int(resolution.1));
 
+    // **Last, so it never shadows a specific report.** Everything the
+    // flush looked at and could not carry has already said so in its
+    // own words; this is the sweep for what nothing looked at.
+    report_unread(scene, &mut flushed);
+
     flushed.document.push(variables);
     for object in objects {
         flushed.document.push(object);
@@ -1700,6 +1705,175 @@ const STRUCTURE: [&str; 15] = [
     "subdivision.creasesharpness",
     "subdivision.smoothcreasecorners",
 ];
+
+/// What the flush actually reads, per node type.
+///
+/// **This table exists to make silence impossible.** Everything the
+/// flush looks at and cannot carry is already reported by the code that
+/// looked; the dangerous class is what it never looks at, which until
+/// now produced a plausible image of the wrong scene with nothing said
+/// anywhere. A DCC lives almost entirely in that class: an application
+/// setting per-object visibility, a crop window or a pixel filter got
+/// a render that ignored all three without a word.
+///
+/// So every attribute set on a node whose type is handled, and absent
+/// from that type's row here, is reported by name. An entry ending in
+/// `.` is a prefix, for the families the interface spells that way.
+///
+/// **Keeping it honest is the maintenance cost**, and it is the point:
+/// carrying a new attribute means adding it here, and forgetting to
+/// means a warning rather than a silent loss.
+const CONSUMED: &[(&str, &[&str])] = &[
+    (
+        "mesh",
+        &[
+            "P",
+            "P.",
+            "N",
+            "st",
+            "nvertices",
+            "clockwisewinding",
+            "subdivision.scheme",
+            "subdivision.cornervertices",
+            "subdivision.cornersharpness",
+            "subdivision.creasevertices",
+            "subdivision.creasesharpness",
+        ],
+    ),
+    (
+        "volume",
+        &[
+            "vdbfilename",
+            "densitygrid",
+            "velocitygrid",
+            "velocityscale",
+            "emissiongrid",
+        ],
+    ),
+    ("shader", &["shaderfilename", "shaderobject."]),
+    ("screen", &["resolution", "screenwindow"]),
+    (
+        "outputlayer",
+        &[
+            "variablename",
+            "variablesource",
+            "layername",
+            "layertype",
+            "scalarformat",
+        ],
+    ),
+    ("outputdriver", &["imagefilename"]),
+    ("transform", &["transformationmatrix"]),
+    (
+        "instances",
+        &[
+            "transformationmatrices",
+            "modelindices",
+            "disabledinstances",
+        ],
+    ),
+    ("environment", &[]),
+    (
+        "perspectivecamera",
+        &["fov", "clippingrange", "shutterrange"],
+    ),
+    ("orthographiccamera", &["clippingrange", "shutterrange"]),
+    (
+        "fisheyecamera",
+        &["fov", "mapping", "clippingrange", "shutterrange"],
+    ),
+    ("sphericalcamera", &["clippingrange", "shutterrange"]),
+    ("cylindricalcamera", &["clippingrange", "shutterrange"]),
+    ("attributes", &[]),
+    ("set", &[]),
+];
+
+/// Whether a name is one the flush reads for this node type.
+fn is_consumed(known: &[&str], name: &str) -> bool {
+    known.iter().any(|entry| match entry.strip_suffix('.') {
+        Some(prefix) => name.starts_with(prefix),
+        None => *entry == name,
+    })
+}
+
+/// Report every attribute set on a handled node that the flush never
+/// looks at.
+///
+/// A mesh is the exception: an attribute that is not structure becomes
+/// a primitive variable, so only the structural ones this backend
+/// drops are worth a word.
+fn report_unread(scene: &Scene, flushed: &mut Flushed) {
+    for (handle, node) in scene.nodes() {
+        let node_type = node.node_type();
+
+        // `.global` and `.root` are reserved and carry no type.
+        if node_type.is_empty() {
+            report_unread_global(handle, node, flushed);
+            continue;
+        }
+
+        let Some((_, known)) =
+            CONSUMED.iter().find(|(kind, _)| *kind == node_type)
+        else {
+            // Not a type the flush handles; the dispatch has already
+            // said so once, for the node rather than per attribute.
+            continue;
+        };
+
+        let mesh = node_type == "mesh";
+        // `attributes()` rather than the motion samples as well: an
+        // attribute set only at times is `P` and its friends, which
+        // every row here consumes.
+        let mut unread: Vec<&str> = node
+            .attributes()
+            .map(|(name, _)| name)
+            .filter(|name| !is_consumed(known, name))
+            .filter(|name| !name.ends_with(".indices"))
+            // On a mesh, anything else is a primitive variable and
+            // does cross.
+            .filter(|name| !mesh || STRUCTURE.contains(name))
+            .collect();
+
+        if unread.is_empty() {
+            continue;
+        }
+        unread.sort_unstable();
+
+        flushed.limitations.push(format!(
+            "{handle:?} ({node_type}) sets {} this backend does not \
+             read: {}",
+            if unread.len() == 1 {
+                "an attribute"
+            } else {
+                "attributes"
+            },
+            unread.join(", ")
+        ));
+    }
+}
+
+/// The reserved nodes, which carry no node type.
+///
+/// `.global` holds the whole render configuration -- sample counts,
+/// ray depths, thread count -- and none of it is read. One line naming
+/// what was set beats forty-three silences.
+fn report_unread_global(handle: &str, node: &Node, flushed: &mut Flushed) {
+    if handle != ".global" {
+        return;
+    }
+
+    let mut set: Vec<&str> = node.attributes().map(|(n, _)| n).collect();
+    if set.is_empty() {
+        return;
+    }
+    set.sort_unstable();
+
+    flushed.limitations.push(format!(
+        "the `.global` node is not read, so the render configuration it \
+         carries is MoonRay's own rather than the scene's: {}",
+        set.join(", ")
+    ));
+}
 
 /// A `UserData` object's rdl2 name.
 ///
@@ -3862,6 +4036,123 @@ mod tests {
 
         assert!(!beauty.contains("result"), "{beauty}");
         assert!(!beauty.contains("lpe"), "{beauty}");
+    }
+
+    /// **What the flush never looks at is named, not swallowed.**
+    ///
+    /// This is the class the design comments elsewhere exist to
+    /// prevent and which nothing caught: an attribute on a *handled*
+    /// node that no arm reads produced a plausible image of the wrong
+    /// scene in silence. A DCC lives almost entirely here -- per-object
+    /// visibility, matte, the crop window, the pixel filter.
+    #[test]
+    fn an_attribute_nothing_reads_is_reported_by_name() {
+        let mut scene = triangle();
+
+        // Gaffer's whole per-object vocabulary, on an `attributes`
+        // node nothing reads.
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(
+                "attr",
+                vec![
+                    arg(
+                        "visibility.camera",
+                        Type::I32,
+                        OwnedData::I32(vec![0]),
+                    ),
+                    arg("matte", Type::I32, OwnedData::I32(vec![1])),
+                ],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+
+        // A crop and a pixel filter on the screen.
+        scene
+            .set_attribute(
+                "screen",
+                vec![
+                    arg(
+                        "crop",
+                        Type::F32,
+                        OwnedData::F32(vec![0.1, 0.1, 0.9, 0.9]),
+                    ),
+                    arg("oversampling", Type::I32, OwnedData::I32(vec![64])),
+                ],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+        let said = flushed.limitations.join("\n");
+
+        for name in ["visibility.camera", "matte", "crop", "oversampling"] {
+            assert!(
+                said.contains(name),
+                "{name:?} was dropped without a word\n{said}"
+            );
+        }
+    }
+
+    /// A mesh's non-structural attributes are primitive variables and
+    /// *do* cross, so the sweep must not cry wolf about them.
+    #[test]
+    fn a_primitive_variable_is_not_reported_as_unread() {
+        let mut scene = triangle();
+        scene
+            .set_attribute(
+                "tri",
+                vec![arg(
+                    "temperature",
+                    Type::F32,
+                    OwnedData::F32(vec![1.0, 2.0, 3.0]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+        let said = flushed.limitations.join("\n");
+
+        assert!(
+            !said.contains("does not read"),
+            "a primitive variable crosses and must not be reported \
+             unread\n{said}"
+        );
+    }
+
+    /// The `.global` node carries the whole render configuration and
+    /// none of it is read, so one line names what was set rather than
+    /// forty-three silences.
+    #[test]
+    fn the_global_node_being_unread_is_reported() {
+        let mut scene = triangle();
+        scene
+            .set_attribute(
+                ".global",
+                vec![
+                    arg(
+                        "quality.shadingsamples",
+                        Type::I32,
+                        OwnedData::I32(vec![8]),
+                    ),
+                    arg(
+                        "maximumraydepth.diffuse",
+                        Type::I32,
+                        OwnedData::I32(vec![3]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+        let said = flushed.limitations.join("\n");
+
+        assert!(said.contains("`.global`"), "{said}");
+        assert!(said.contains("quality.shadingsamples"), "{said}");
+        assert!(said.contains("maximumraydepth.diffuse"), "{said}");
     }
 
     /// **A bound `volumeshader` crosses as an `OslVolume`.**
