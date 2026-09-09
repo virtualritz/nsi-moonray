@@ -3977,9 +3977,14 @@ mod tests {
             .unwrap();
         scene.connect("vol", None, "attr", "volumeshader").unwrap();
 
-        // Without OSL: the substitution path, which has no volume
-        // shader to run.
-        let flushed = flush(&scene);
+        // **`Shading::Substitute` explicitly, not the default.**
+        // `Shading`'s default is `Osl` in a build with `$OSL_ROOT` and
+        // `Substitute` without, so a bare `flush` makes this test pass
+        // or fail on how the crate was built rather than on what it
+        // does. It passed under `just ci` and failed under
+        // `just test-rdl2` for exactly that.
+        let flushed =
+            flush_with(&scene, Purpose::default(), Shading::Substitute);
 
         assert!(
             flushed
