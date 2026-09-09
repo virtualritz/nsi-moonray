@@ -222,6 +222,88 @@ unsafe impl Sync for Callbacks {}
 /// closures, the same bucket call — so what changes when the renderer
 /// runs in process is where the pixels come from, not what receives
 /// them.
+/// Hand a rendered file to a `Dspy` driver an application registered.
+///
+/// **This is the route a real DCC uses.** The interface leaves the
+/// driver API unspecified and everyone settled on RenderMan's, so an
+/// application sets `outputdriver.drivername` to a name it registered
+/// and expects the renderer to find it. The closure route beside this
+/// one works only where the host shares a compilation of
+/// `nsi-ffi-wrap`, which a C++ application cannot.
+///
+/// Whole-image rather than per-bucket: this is the batch path, where
+/// the pixels already exist as a file. The interactive path in
+/// `stream.rs` is where per-rectangle delivery belongs.
+pub fn deliver_file_to_driver(
+    driver: crate::dspy::Driver,
+    driver_name: &str,
+    file_name: &str,
+    image: &std::path::Path,
+) -> Result<(), String> {
+    use exr::prelude::*;
+
+    let read = read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .all_channels()
+        .first_valid_layer()
+        .all_attributes();
+
+    let image_data = read
+        .from_file(image)
+        .map_err(|error| format!("reading {}: {error}", image.display()))?;
+
+    let layer = &image_data.layer_data;
+    let size = layer.size;
+    let channels: Vec<String> = layer
+        .channel_data
+        .list
+        .iter()
+        .map(|channel| channel.name.to_string())
+        .collect();
+
+    let Some(open) = crate::dspy::Image::open(
+        driver,
+        driver_name,
+        file_name,
+        size.width() as i32,
+        size.height() as i32,
+        &channels,
+    ) else {
+        return Err(format!(
+            "the {driver_name:?} driver refused to open {file_name:?}"
+        ));
+    };
+
+    // Interleaved, one entry per pixel, in the channel order the
+    // driver was told at open.
+    let count = channels.len();
+    let mut interleaved = vec![0.0f32; size.width() * size.height() * count];
+    for (index, channel) in layer.channel_data.list.iter().enumerate() {
+        let samples = channel.sample_data.values_as_f32();
+        for (pixel, value) in samples.enumerate() {
+            interleaved[pixel * count + index] = value;
+        }
+    }
+
+    let status = open.write(
+        0,
+        0,
+        size.width() as i32,
+        size.height() as i32,
+        count,
+        &interleaved,
+    );
+    if status != crate::dspy::OK {
+        return Err(format!(
+            "the {driver_name:?} driver returned {status} for \
+             {file_name:?}"
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn deliver_file(
     callbacks: &Callbacks,
     name: &str,

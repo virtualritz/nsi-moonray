@@ -44,7 +44,7 @@ fn library() -> PathBuf {
 /// registration its `output` feature needs. A consumer built with that
 /// feature cannot load a library missing it, so its absence would be
 /// invisible here and fatal there.
-const SYMBOLS: [&[u8]; 12] = [
+const SYMBOLS: [&[u8]; 13] = [
     b"NSIBegin",
     b"NSIEnd",
     b"NSICreate",
@@ -57,6 +57,11 @@ const SYMBOLS: [&[u8]; 12] = [
     b"NSIEvaluate",
     b"NSIRenderControl",
     b"DspyRegisterDriver",
+    // **The form a real application uses.** Gaffer calls exactly
+    // this, and it was not exported at all -- so a host registered no
+    // driver and its viewport stayed empty while the render
+    // succeeded.
+    b"DspyRegisterDriverTable",
 ];
 
 #[test]

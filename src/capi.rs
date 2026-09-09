@@ -830,6 +830,49 @@ pub unsafe extern "C" fn NSIRenderControl(
             })
             .collect();
 
+        // **The route a real application uses.** An `outputdriver`
+        // naming a `drivername` an application registered gets the
+        // pixels through that driver; one that names a driver nobody
+        // registered is told so, with the names that *were*, because
+        // "my viewport is black" and "I spelled the driver's name
+        // differently" look identical from the outside.
+        let through_driver: Vec<(
+            String,
+            crate::dspy::Driver,
+            String,
+            PathBuf,
+        )> = context
+            .scene
+            .nodes()
+            .filter(|(_, node)| node.node_type() == "outputdriver")
+            .filter_map(|(handle, _)| {
+                let name = crate::flush::driver_name(&context.scene, handle)?;
+                let file = crate::flush::image_file(&context.scene, handle)
+                    .unwrap_or_else(|| handle.to_owned());
+                Some((handle.to_owned(), name, file))
+            })
+            .filter_map(|(handle, name, file)| {
+                match crate::dspy::lookup(&name) {
+                    Some(driver) => {
+                        Some((handle, driver, name, PathBuf::from(file)))
+                    }
+                    None => {
+                        let registered = crate::dspy::registered();
+                        context.reporter.say(
+                            LEVEL_WARNING,
+                            &format!(
+                                "{handle:?} asks for display driver \
+                                     {name:?}, which nothing registered; \
+                                     the image is written to a file \
+                                     instead. Registered: {registered:?}"
+                            ),
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+
         if let Err(error) = Render::new(&path).run() {
             // ɴsɪ always returns an image, and when it cannot, it says
             // so and leaves the scene where someone can look at it.
@@ -838,6 +881,20 @@ pub unsafe extern "C" fn NSIRenderControl(
                 &format!("{error}; the scene is at {}", path.display()),
             );
             return;
+        }
+
+        for (handle, driver, name, image) in through_driver {
+            if let Err(error) = display::deliver_file_to_driver(
+                driver,
+                &name,
+                &image.to_string_lossy(),
+                &image,
+            ) {
+                context.reporter.say(
+                    LEVEL_ERROR,
+                    &format!("{handle:?} received no pixels: {error}"),
+                );
+            }
         }
 
         for (handle, callbacks, image) in deliveries {
@@ -997,17 +1054,70 @@ fn scene_path(ctx: NsiContext) -> PathBuf {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn DspyRegisterDriver(
     driver_name: *const c_char,
-    _open: *const c_void,
-    _write: *const c_void,
-    _close: *const c_void,
-    _query: *const c_void,
+    open: *const c_void,
+    write: *const c_void,
+    close: *const c_void,
+    query: *const c_void,
 ) -> c_int {
-    let name = unsafe { string(driver_name) }.unwrap_or_default();
-    eprintln!(
-        "nsi-moonray: display driver {name:?} registered, but this build \
-         renders in batch and writes a file; see T4.4"
+    let Some(name) = (unsafe { string(driver_name) }) else {
+        return crate::dspy::OK;
+    };
+
+    // SAFETY: the host promises these are functions of the shapes
+    // `ndspy.h` declares. There is nothing to check them against; a
+    // wrong pointer here is a wrong pointer in any renderer that
+    // implements this interface.
+    let driver = unsafe {
+        crate::dspy::Driver {
+            open: (!open.is_null()).then(|| std::mem::transmute(open)),
+            write: (!write.is_null()).then(|| std::mem::transmute(write)),
+            close: (!close.is_null()).then(|| std::mem::transmute(close)),
+            query: (!query.is_null()).then(|| std::mem::transmute(query)),
+        }
+    };
+
+    crate::dspy::register(&name, driver);
+    crate::dspy::OK
+}
+
+/// Register a display driver from a table.
+///
+/// **The form a real application uses.** Gaffer calls exactly this,
+/// with `"ieDisplay"`; it was not exported at all, so the load either
+/// failed or the driver was never registered and the viewport stayed
+/// empty. A null table unregisters, which the interface documents.
+///
+/// # Safety
+///
+/// `driver_name` is a NUL-terminated string. `table` is null or points
+/// at a valid `PtDspyDriverFunctionTable`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn DspyRegisterDriverTable(
+    driver_name: *const c_char,
+    table: *const crate::dspy::FunctionTable,
+) -> c_int {
+    let Some(name) = (unsafe { string(driver_name) }) else {
+        return crate::dspy::OK;
+    };
+
+    if table.is_null() {
+        crate::dspy::unregister(&name);
+        return crate::dspy::OK;
+    }
+
+    // SAFETY: the caller guarantees a valid table.
+    let table = unsafe { &*table };
+    crate::dspy::register(
+        &name,
+        crate::dspy::Driver {
+            open: table.open,
+            write: table.write,
+            close: table.close,
+            query: table.query,
+        },
     );
-    0
+
+    crate::dspy::OK
 }
 
 #[cfg(test)]

@@ -1986,7 +1986,7 @@ const CONSUMED: &[(&str, &[&str])] = &[
             "lightdepth",
         ],
     ),
-    ("outputdriver", &["imagefilename"]),
+    ("outputdriver", &["imagefilename", "drivername"]),
     ("transform", &["transformationmatrix"]),
     (
         "instances",
@@ -3718,6 +3718,20 @@ fn state_variable(name: &str) -> Option<&'static str> {
 }
 
 /// The file an ɴsɪ output driver writes to.
+/// The `drivername` an `outputdriver` node asks for.
+///
+/// The name an application registered a `Dspy` driver under. Absent
+/// means a file, which is the interface's own default.
+pub(crate) fn driver_name(scene: &Scene, driver: &str) -> Option<String> {
+    let node = scene.node(driver)?;
+    match &node.effective("drivername")?.data {
+        OwnedData::String(values) => values
+            .first()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+        _ => None,
+    }
+}
+
 pub(crate) fn image_file(scene: &Scene, driver: &str) -> Option<String> {
     match &scene.node(driver)?.effective("imagefilename")?.data {
         OwnedData::String(files) => files

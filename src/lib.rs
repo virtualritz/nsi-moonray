@@ -57,6 +57,7 @@ pub mod capi;
 pub mod display;
 pub mod document;
 pub mod dso;
+pub mod dspy;
 pub mod flush;
 pub mod name;
 pub mod osl;
