@@ -347,6 +347,8 @@ pub fn flush_with(
     // Handles borrow from the scene now rather than being copied:
     // upstream interns them, and a flush that cloned every one back
     // into a `String` would hand that saving straight back.
+    // Geometry, part name and the material bound to that part.
+    let mut parts: Vec<(&str, &str, Reference)> = Vec::new();
     let mut bindings: Vec<(
         &'static str,
         &str,
@@ -454,12 +456,38 @@ pub fn flush_with(
                     }
                     objects.push(hidden(shape));
                 } else {
+                    let sets = face_sets(scene, handle);
+                    let shape =
+                        with_parts(shape, scene, handle, &sets, &mut flushed);
                     objects.push(with_visibility(
                         shape,
                         scene,
                         handle,
                         &mut flushed,
                     ));
+
+                    // **A row per part.** MoonRay assigns a material to
+                    // a geometry *and a part*, so a face set with its
+                    // own shader is a second row rather than a second
+                    // object -- and a face set with none inherits the
+                    // whole mesh's row, which is what the interface
+                    // means by attaching attributes to some faces.
+                    for set in sets {
+                        if let Some(shader) = face_set_shader(scene, set) {
+                            let class = if shading == Shading::Osl
+                                && crate::osl::is_runnable(scene, shader)
+                            {
+                                OSL_MATERIAL
+                            } else {
+                                MATERIAL
+                            };
+                            parts.push((
+                                handle,
+                                set,
+                                Reference::new(class, shader),
+                            ));
+                        }
+                    }
                 }
                 geometries.push(Reference::new(MESH, handle));
 
@@ -622,6 +650,11 @@ pub fn flush_with(
                 }
             }
 
+            // Carried by the mesh it names rather than as an object of
+            // its own: MoonRay spells a face set as a *part* on the
+            // geometry, so there is nothing here to create.
+            "faceset" => {}
+
             other => flushed.limitations.push(format!(
                 "node {handle:?} of type {other:?} has no MoonRay mapping \
                  and was skipped"
@@ -766,6 +799,21 @@ pub fn flush_with(
             }
         })
         .collect();
+
+    // The per-part rows, after the whole-geometry ones. MoonRay reads
+    // the more specific row for a face in a part, so the order here is
+    // for legibility rather than for meaning.
+    let mut assignments: Vec<Assignment> = assignments;
+    for (geometry, part, material) in parts {
+        assignments.push(Assignment {
+            part: Name::new(part),
+            ..Assignment::new(
+                Reference::new(MESH, geometry),
+                Some(material),
+                light_set.clone(),
+            )
+        });
+    }
 
     if volumes_shaded {
         objects.push(Object::new(VOLUME_SHADER, DEFAULT_VOLUME_SHADER));
@@ -2062,6 +2110,7 @@ const CONSUMED: &[(&str, &[&str])] = &[
         ],
     ),
     ("set", &[]),
+    ("faceset", &["faces"]),
 ];
 
 /// Whether a name is one the flush reads for this node type.
@@ -3313,6 +3362,100 @@ fn focal(fov_degrees: f32, resolution: (i32, i32)) -> f32 {
     let half = (fov_degrees.to_radians() * 0.5).tan();
 
     FILM_WIDTH_APERTURE * 0.5 * aspect / half
+}
+
+/// The surface shader bound to a face set.
+///
+/// **Not `geometry_binding`.** That resolves attributes along a
+/// geometry's *chain*, and a face set is not geometry -- it names some
+/// of another primitive's faces. So the two edges are walked directly:
+/// the `attributes` node connected to the face set, and the shader
+/// connected to that.
+fn face_set_shader<'a>(scene: &'a Scene, set: &str) -> Option<&'a str> {
+    let attributes: Vec<&str> = scene
+        .edges()
+        .filter(|edge| {
+            edge.kind == EdgeKind::AttributeBinding && edge.to() == set
+        })
+        .map(|edge| edge.from())
+        .collect();
+
+    scene
+        .edges()
+        .filter(|edge| edge.kind == EdgeKind::SurfaceShader)
+        .find(|edge| attributes.contains(&edge.to()))
+        .map(|edge| edge.from())
+}
+
+/// The face sets attached to one mesh, in the order they were
+/// connected.
+///
+/// A `faceset` names some of a mesh's faces so that a different
+/// material can be bound to them. MoonRay spells the same thing as a
+/// *part*: three parallel lists on the mesh, and a `Layer` row per
+/// part.
+fn face_sets<'a>(scene: &'a Scene, mesh: &str) -> Vec<&'a str> {
+    scene
+        .edges()
+        .filter(|edge| edge.kind == EdgeKind::FaceSet && edge.to() == mesh)
+        .map(|edge| edge.from())
+        .collect()
+}
+
+/// Put a mesh's face sets on it as MoonRay's parts.
+///
+/// Three parallel lists: the names, how many faces each holds, and the
+/// indices themselves end to end. **The order is the contract** --
+/// `part_face_count_list` is what says where one part's indices stop
+/// and the next begins, so a mismatch silently reassigns faces between
+/// parts rather than failing.
+fn with_parts(
+    mut object: Object,
+    scene: &Scene,
+    handle: &str,
+    sets: &[&str],
+    flushed: &mut Flushed,
+) -> Object {
+    if sets.is_empty() {
+        return object;
+    }
+
+    let mut names = Vec::new();
+    let mut counts = Vec::new();
+    let mut indices = Vec::new();
+
+    for set in sets {
+        let faces = scene.node(set).and_then(|node| {
+            match node.effective("faces").map(|argument| &argument.data) {
+                Some(OwnedData::I32(values)) => Some(values.clone()),
+                _ => None,
+            }
+        });
+
+        let Some(faces) = faces else {
+            flushed.limitations.push(format!(
+                "face set {set:?} on {handle:?} lists no \"faces\", so \
+                 it names no part and anything bound to it is not \
+                 rendered"
+            ));
+            continue;
+        };
+
+        names.push(Value::String((*set).to_owned()));
+        counts.push(Value::Int(faces.len() as i32));
+        indices.extend(faces.into_iter().map(Value::Int));
+    }
+
+    if names.is_empty() {
+        return object;
+    }
+
+    object = object
+        .set("part_list", Value::Vector(names))
+        .set("part_face_count_list", Value::Vector(counts))
+        .set("part_face_indices", Value::Vector(indices));
+
+    object
 }
 
 /// One `curves` node, as a `RdlCurveGeometry`.
@@ -4735,6 +4878,54 @@ mod tests {
             spec.contains("[\"lpe\"] = \"C<..'specular'>.*L\""),
             "{spec}"
         );
+    }
+
+    /// **A face set becomes a MoonRay part, with its own layer row.**
+    ///
+    /// The interface attaches attributes to some faces of a mesh;
+    /// MoonRay assigns a material to a geometry *and a part*. So a face
+    /// set with its own shader is a second row rather than a second
+    /// object, and per-face materials -- which Houdini emits -- work.
+    #[test]
+    fn a_face_set_becomes_a_part_with_its_own_material() {
+        let mut scene = triangle();
+        scene.create("lid", "faceset").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "lid",
+                vec![arg("faces", Type::I32, OwnedData::I32(vec![0, 2]))],
+            )
+            .expect("a recordable edit");
+        scene.connect("lid", None, "tri", "facesets").unwrap();
+
+        // A shader bound to the face set alone.
+        scene.create("attr", "attributes").unwrap();
+        scene.create("red", "shader").unwrap();
+        scene
+            .set_attribute(
+                "red",
+                vec![arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![
+                        b"/opt/3delight/osl/dlPrincipled.oso".to_vec(),
+                    ]),
+                )],
+            )
+            .unwrap();
+        scene
+            .connect("attr", None, "lid", "geometryattributes")
+            .unwrap();
+        scene.connect("red", None, "attr", "surfaceshader").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        // The three parallel lists on the mesh.
+        assert!(rdla.contains("[\"part_list\"] = { \"lid\"}"), "{rdla}");
+        assert!(rdla.contains("[\"part_face_count_list\"] = { 2}"), "{rdla}");
+        assert!(rdla.contains("[\"part_face_indices\"] = { 0, 2}"), "{rdla}");
+        // And a layer row naming the part.
+        assert!(rdla.contains("RdlMeshGeometry(\"tri\"), \"lid\""), "{rdla}");
     }
 
     /// **An environment texture crosses even though its shader does
