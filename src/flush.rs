@@ -629,7 +629,35 @@ pub fn flush_with(
         }
     }
 
-    for output in scene.render_outputs() {
+    // **One `SceneVariables`, so the last output wins.** A scene with
+    // two camera-and-screen chains wrote `output_file` and `camera`
+    // once per output into one block, so the last was rendered, at the
+    // *first* screen's resolution, and nothing said so. MoonRay renders
+    // one camera per frame; the interface does not promise that, so
+    // what is dropped is named.
+    let outputs = scene.render_outputs();
+    if outputs.len() > 1 {
+        let ignored: Vec<&str> = outputs
+            .iter()
+            .take(outputs.len() - 1)
+            .map(|output| output.camera.as_str())
+            .collect();
+        flushed.limitations.push(format!(
+            "the scene has {} camera-and-screen chains and MoonRay \
+             renders one camera per frame, so {:?} is used and {} \
+             {} not: {}",
+            outputs.len(),
+            outputs
+                .last()
+                .map(|output| output.camera.as_str())
+                .unwrap_or_default(),
+            ignored.len(),
+            if ignored.len() == 1 { "is" } else { "are" },
+            ignored.join(", ")
+        ));
+    }
+
+    for output in &outputs {
         for layer in &output.layers {
             objects.push(render_output(
                 scene,
@@ -1999,7 +2027,13 @@ const CONSUMED: &[(&str, &[&str])] = &[
     ("environment", &[]),
     (
         "perspectivecamera",
-        &["fov", "clippingrange", "shutterrange"],
+        &[
+            "fov",
+            "clippingrange",
+            "shutterrange",
+            "depthoffield.",
+            "unitlengthmillimeters",
+        ],
     ),
     ("orthographiccamera", &["clippingrange", "shutterrange"]),
     (
@@ -3033,6 +3067,7 @@ fn camera(
             Some(degrees) => {
                 object = object
                     .set("focal", Value::Float(focal(degrees, resolution)));
+                object = depth_of_field(object, node, handle, flushed);
                 report_perspective_window(
                     screen_window(scene, resolution),
                     resolution,
@@ -3072,6 +3107,105 @@ fn camera(
         // A spherical camera sees everything; there is no extent to
         // carry.
         _ => {}
+    }
+
+    object
+}
+
+/// Depth of field, which MoonRay has and nothing was giving it.
+///
+/// The interface describes a lens the way a photographer does -- an
+/// f-stop, a focal length in millimetres and a focus distance -- and
+/// MoonRay wants an aperture *radius* in world units and the same
+/// focus distance. So there is one conversion, and it is the whole of
+/// the mapping:
+///
+/// ```text
+/// aperture radius = focal length / (2 * f-stop)
+/// ```
+///
+/// **In millimetres, then into world units.** `unitlengthmillimeters`
+/// is the interface's own scale factor for exactly this, defaulting to
+/// one millimetre per unit -- so a scene modelled in metres and left at
+/// the default gets an aperture a thousand times too large, which is a
+/// render that is entirely blur. Reported when the scene never said.
+///
+/// A polygonal iris crosses too: MoonRay's `bokeh_sides` is the
+/// interface's `aperture.sides`.
+fn depth_of_field(
+    mut object: Object,
+    node: &Node,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    let enabled = node
+        .effective("depthoffield.enable")
+        .and_then(|argument| match &argument.data {
+            OwnedData::I32(values) => values.first().copied(),
+            _ => None,
+        })
+        .unwrap_or(0)
+        != 0;
+
+    if !enabled {
+        return object;
+    }
+
+    object = object.set("dof", Value::Bool(true));
+
+    let number = |name: &str| scalar_of(node, name);
+
+    if let Some(distance) = number("depthoffield.focaldistance") {
+        object = object.set("dof_focus_distance", Value::Float(distance));
+    }
+
+    let (Some(focal), Some(fstop)) = (
+        number("depthoffield.focallength"),
+        number("depthoffield.fstop"),
+    ) else {
+        flushed.limitations.push(format!(
+            "camera {handle:?} enables depth of field without both \
+             \"depthoffield.focallength\" and \"depthoffield.fstop\"; \
+             MoonRay's own aperture is used"
+        ));
+        return object;
+    };
+
+    if fstop <= 0.0 {
+        flushed.limitations.push(format!(
+            "camera {handle:?} has an f-stop of {fstop}, which is not a \
+             lens; MoonRay's own aperture is used"
+        ));
+        return object;
+    }
+
+    // The interface's lengths are in millimetres and the scene is in
+    // whatever it is in; `unitlengthmillimeters` is the bridge.
+    let per_unit = number("unitlengthmillimeters").unwrap_or_else(|| {
+        flushed.limitations.push(format!(
+            "camera {handle:?} enables depth of field without \
+             \"unitlengthmillimeters\", so its lens is read as one \
+             millimetre per scene unit; a scene modelled in metres will \
+             render as blur"
+        ));
+        1.0
+    });
+
+    if per_unit > 0.0 {
+        let radius = focal / (2.0 * fstop) / per_unit;
+        object = object.set("dof_aperture", Value::Float(radius));
+    }
+
+    // A polygonal iris.
+    if number("depthoffield.aperture.enable").unwrap_or(0.0) != 0.0
+        && let Some(sides) = number("depthoffield.aperture.sides")
+    {
+        object = object
+            .set("bokeh", Value::Bool(true))
+            .set("bokeh_sides", Value::Int(sides as i32));
+        if let Some(angle) = number("depthoffield.aperture.angle") {
+            object = object.set("bokeh_angle", Value::Float(angle));
+        }
     }
 
     object
@@ -4556,6 +4690,168 @@ mod tests {
         assert!(
             spec.contains("[\"lpe\"] = \"C<..'specular'>.*L\""),
             "{spec}"
+        );
+    }
+
+    /// **A second camera is named, not silently ignored.**
+    ///
+    /// One `SceneVariables` holds one camera and one output file, so a
+    /// scene with two chains wrote both into one block and the last
+    /// won -- rendered at the *first* screen's resolution, with
+    /// nothing said. MoonRay renders one camera per frame and the
+    /// interface does not promise that, so what is dropped is named.
+    #[test]
+    fn a_second_camera_is_reported() {
+        let mut scene = triangle();
+
+        // A second camera, screen, layer and driver.
+        scene.create("cam2", "perspectivecamera").unwrap();
+        scene.connect("cam2", None, ".root", "objects").unwrap();
+        scene.create("screen2", "screen").unwrap();
+        scene
+            .set_attribute(
+                "screen2",
+                vec![arg(
+                    "resolution",
+                    Type::I32,
+                    OwnedData::I32(vec![64, 64]),
+                )],
+            )
+            .unwrap();
+        scene.connect("screen2", None, "cam2", "screens").unwrap();
+        scene.create("beauty2", "outputlayer").unwrap();
+        scene
+            .connect("beauty2", None, "screen2", "outputlayers")
+            .unwrap();
+        scene.create("driver2", "outputdriver").unwrap();
+        scene
+            .set_attribute(
+                "driver2",
+                vec![arg(
+                    "imagefilename",
+                    Type::String,
+                    OwnedData::String(vec![b"second.exr".to_vec()]),
+                )],
+            )
+            .unwrap();
+        scene
+            .connect("driver2", None, "beauty2", "outputdrivers")
+            .unwrap();
+
+        let flushed = flush(&scene);
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("one camera per frame")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// **Depth of field crosses, with the one conversion written out.**
+    ///
+    /// The interface describes a lens as a photographer does and
+    /// MoonRay wants an aperture radius in world units, so
+    /// `focal / (2 * fstop)` is the whole mapping -- and
+    /// `unitlengthmillimeters` is what puts it in the scene's units. A
+    /// scene in metres left at the default renders as pure blur, so
+    /// the absence of that attribute is reported rather than assumed
+    /// away.
+    #[test]
+    fn depth_of_field_becomes_an_aperture_radius() {
+        let mut scene = triangle();
+        scene
+            .set_attribute(
+                "cam",
+                vec![
+                    arg(
+                        "depthoffield.enable",
+                        Type::I32,
+                        OwnedData::I32(vec![1]),
+                    ),
+                    // A 50 mm lens at f/2 is a 12.5 mm radius.
+                    arg(
+                        "depthoffield.focallength",
+                        Type::F32,
+                        OwnedData::F32(vec![50.0]),
+                    ),
+                    arg(
+                        "depthoffield.fstop",
+                        Type::F32,
+                        OwnedData::F32(vec![2.0]),
+                    ),
+                    arg(
+                        "depthoffield.focaldistance",
+                        Type::F32,
+                        OwnedData::F32(vec![7.5]),
+                    ),
+                    // One unit is ten millimetres, so the radius is
+                    // 1.25 scene units.
+                    arg(
+                        "unitlengthmillimeters",
+                        Type::F32,
+                        OwnedData::F32(vec![10.0]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("[\"dof\"] = true"), "{rdla}");
+        assert!(rdla.contains("[\"dof_aperture\"] = 1.25"), "{rdla}");
+        assert!(rdla.contains("[\"dof_focus_distance\"] = 7.5"), "{rdla}");
+        assert!(
+            !flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("unitlengthmillimeters")),
+            "the scene said, so nothing is assumed: {:?}",
+            flushed.limitations
+        );
+    }
+
+    /// Without `unitlengthmillimeters` the lens is read as one
+    /// millimetre per unit, which is the interface's default and is
+    /// wrong for any scene modelled in metres -- so it is said.
+    #[test]
+    fn depth_of_field_without_a_unit_length_is_reported() {
+        let mut scene = triangle();
+        scene
+            .set_attribute(
+                "cam",
+                vec![
+                    arg(
+                        "depthoffield.enable",
+                        Type::I32,
+                        OwnedData::I32(vec![1]),
+                    ),
+                    arg(
+                        "depthoffield.focallength",
+                        Type::F32,
+                        OwnedData::F32(vec![50.0]),
+                    ),
+                    arg(
+                        "depthoffield.fstop",
+                        Type::F32,
+                        OwnedData::F32(vec![2.0]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+
+        let flushed = flush(&scene);
+
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("unitlengthmillimeters")),
+            "{:?}",
+            flushed.limitations
         );
     }
 
