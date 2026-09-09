@@ -1945,6 +1945,7 @@ const CONSUMED: &[(&str, &[&str])] = &[
             "layername",
             "layertype",
             "scalarformat",
+            "lightdepth",
         ],
     ),
     ("outputdriver", &["imagefilename"]),
@@ -3216,8 +3217,15 @@ fn render_output(
     // told for a primitive attribute -- rdl2 declares the channel count
     // statically and will not work it out from the data.
     let kind = text("layertype").unwrap_or_else(|| "color".into());
-    object =
-        result(object, &source, variable.as_deref(), &kind, layer, flushed);
+    object = result(
+        object,
+        &source,
+        variable.as_deref(),
+        &kind,
+        layer,
+        node,
+        flushed,
+    );
 
     // `scalarformat` is ɴsɪ's quantization; MoonRay's `channel_format`
     // has two of the eight. The integer formats have no counterpart at
@@ -3260,11 +3268,14 @@ fn result(
     variable: Option<&str>,
     kind: &str,
     layer: &str,
+    node: Option<&Node>,
     flushed: &mut Flushed,
 ) -> Object {
     let unmapped = |flushed: &mut Flushed, why: &str| {
         flushed.limitations.push(format!(
-            "output layer {layer:?} asks for {why}, which MoonRay's              `RenderOutput` has no result for; the layer renders the beauty"
+            "output layer {layer:?} asks for {why}, which MoonRay's \
+             `RenderOutput` has no result for; the layer renders the \
+             beauty"
         ));
     };
 
@@ -3334,9 +3345,21 @@ fn result(
         // is what lets one output layer name a lobe across every shader
         // in the scene, which is what a shader AOV means.
         ("shader", Some(name)) => match lobe_label(name) {
-            Some(label) => object
-                .set("result", Value::String("light aov".into()))
-                .set("lpe", Value::String(format!("C<..'{label}'>L"))),
+            // The light depth, when the layer asks for one, is a
+            // constraint on the *path* rather than on the lobe: a
+            // direct pass is one scattering event and then a light,
+            // an indirect pass is two or more.
+            Some(label) => {
+                let expression =
+                    match node.and_then(|node| light_depth(node, name)) {
+                        Some("direct") => format!("C<..'{label}'>L"),
+                        Some("indirect") => format!("C<..'{label}'>.+L"),
+                        _ => format!("C<..'{label}'>.*L"),
+                    };
+                object
+                    .set("result", Value::String("light aov".into()))
+                    .set("lpe", Value::String(expression))
+            }
             None => {
                 unmapped(
                     flushed,
@@ -3384,11 +3407,59 @@ const SHADER_AOVS: [(&str, &str); 8] = [
 ];
 
 fn lobe_label(name: &str) -> Option<&'static str> {
+    // **`.direct` and `.indirect` are how the interface spells a light
+    // depth**, and `outputlayer.lightdepth` defaults to `"auto"`,
+    // which says to take the suffix off the variable name and apply
+    // the matching depth. Every real client relies on this: neither
+    // Gaffer nor 3Delight for Houdini ever sets `lightdepth` at all --
+    // they name layers `diffuse.direct` and `Ci.indirect` and expect
+    // it to be understood.
+    //
+    // Matching exactly meant those names matched nothing and the layer
+    // rendered the *beauty*, which is the standard AOV pass of both
+    // applications quietly coming back as a second beauty.
+    let stem = name
+        .strip_suffix(".direct")
+        .or_else(|| name.strip_suffix(".indirect"))
+        .unwrap_or(name);
+
     SHADER_AOVS
         .iter()
-        .find(|(aov, _)| *aov == name)
-        .or_else(|| SHADER_AOVS.iter().find(|(_, label)| *label == name))
+        .find(|(aov, _)| *aov == stem)
+        .or_else(|| SHADER_AOVS.iter().find(|(_, label)| *label == stem))
         .map(|(_, label)| *label)
+}
+
+/// The light depth an output layer asks for.
+///
+/// `lightdepth` is `direct`, `indirect`, `both` or `auto`, and `auto`
+/// -- the default, and the only one any client sets -- means read it
+/// off the variable name's suffix.
+fn light_depth(node: &Node, variable: &str) -> Option<&'static str> {
+    let explicit = node.effective("lightdepth").and_then(|argument| {
+        match &argument.data {
+            OwnedData::String(values) => values
+                .first()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+            _ => None,
+        }
+    });
+
+    match explicit.as_deref() {
+        Some("direct") => Some("direct"),
+        Some("indirect") => Some("indirect"),
+        Some("both") => None,
+        // `auto`, or unset.
+        _ => {
+            if variable.ends_with(".direct") {
+                Some("direct")
+            } else if variable.ends_with(".indirect") {
+                Some("indirect")
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// One ɴsɪ built-in variable, as MoonRay's `state_variable` enum.
@@ -4226,7 +4297,65 @@ mod tests {
         let spec = output(&flush(&scene).to_rdla(), "spec");
 
         assert!(spec.contains("[\"result\"] = \"light aov\""), "{spec}");
-        assert!(spec.contains("[\"lpe\"] = \"C<..'specular'>L\""), "{spec}");
+        // **`.*`, not nothing.** `C<..'specular'>L` is one scatter and
+        // then a light, which is the *direct* pass alone -- so the
+        // layer a scene asked for without naming a depth used to come
+        // back missing every bounce. Without a `.direct`/`.indirect`
+        // suffix and without an explicit `lightdepth`, the answer is
+        // both.
+        assert!(
+            spec.contains("[\"lpe\"] = \"C<..'specular'>.*L\""),
+            "{spec}"
+        );
+    }
+
+    /// **The standard AOV spelling.** `outputlayer.lightdepth` defaults
+    /// to `auto`, which says to read the depth off the variable name's
+    /// suffix -- and every real client relies on that rather than
+    /// setting `lightdepth` at all. Matching the name exactly meant
+    /// `diffuse.direct` matched nothing and the layer rendered the
+    /// beauty, which is the standard pass of both applications quietly
+    /// coming back as a second beauty.
+    #[test]
+    fn a_light_depth_suffix_reaches_the_expression() {
+        for (variable, expected) in [
+            ("diffuse.direct", "C<..'diffuse'>L"),
+            ("diffuse.indirect", "C<..'diffuse'>.+L"),
+        ] {
+            let mut scene = triangle();
+            output_layer(
+                &mut scene,
+                "pass",
+                vec![
+                    arg(
+                        "variablesource",
+                        Type::String,
+                        OwnedData::String(vec![b"shader".to_vec()]),
+                    ),
+                    arg(
+                        "variablename",
+                        Type::String,
+                        OwnedData::String(vec![variable.as_bytes().to_vec()]),
+                    ),
+                ],
+            );
+
+            let flushed = flush(&scene);
+            let pass = output(&flushed.to_rdla(), "pass");
+
+            assert!(
+                pass.contains(&format!("[\"lpe\"] = \"{expected}\"")),
+                "{variable}\n{pass}"
+            );
+            assert!(
+                !flushed
+                    .limitations
+                    .iter()
+                    .any(|line| line.contains(variable)),
+                "{variable} is understood and must not be reported: {:?}",
+                flushed.limitations
+            );
+        }
     }
 
     /// `Ci` is the beauty, which is `RenderOutput`'s own default -- so
