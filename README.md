@@ -30,9 +30,10 @@ rather than nodes of their own.
 
 Shading runs OSL. ɴsɪ *is* OSL -- a `shader` node names a compiled
 `.oso` -- so the network crosses as an OSL group specification and
-MoonRay executes it, through the `Osl` and `OslDisplacement` root
-shaders in [`dso/osl/`](dso/osl/). That needs OSL at build time:
-set `$OSL_ROOT`.
+MoonRay executes it, through the `Osl`, `OslDisplacement`, `OslMap` and
+`OslVolume` root shaders in [`dso/osl/`](dso/osl/): surfaces,
+displacement, a light's emission, and volumes. That needs OSL at build
+time, and `just setup` provides it.
 
 Without it, materials are substituted rather than translated: every ɴsɪ
 shader becomes a `UsdPreviewSurface`, MoonRay's stock PBR surface,
