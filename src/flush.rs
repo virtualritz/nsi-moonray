@@ -162,6 +162,20 @@ const OSL_DISPLACEMENT: &str = "OslDisplacement";
 /// as a `UserData` object in the mesh's `primitive_attributes`.
 const USER_DATA: &str = "UserData";
 
+/// What a `curves` node becomes.
+///
+/// MoonRay's own curve geometry, read off `RdlCurve/attributes.cc`
+/// rather than assumed: `curves_vertex_count`, `vertex_list_0` and
+/// `radius_list`, with the interpolation as an enumerated
+/// `curve_type`.
+const CURVES: &str = "RdlCurveGeometry";
+
+/// What a `particles` node becomes.
+///
+/// `RdlPointGeometry`, whose vertices are positions and whose radii are
+/// a parallel `radius_list`.
+const POINTS: &str = "RdlPointGeometry";
+
 /// What a `volume` node becomes.
 ///
 /// The interface's `volume` node is *defined* as OpenVDB -- a file and
@@ -457,6 +471,28 @@ pub fn flush_with(
                     handle,
                     material(scene, handle, shading, &mut flushed),
                     displacement(scene, handle, shading, &mut flushed),
+                ));
+            }
+
+            "curves" => {
+                objects.push(curves(scene, handle, shutter, &mut flushed));
+                geometries.push(Reference::new(CURVES, handle));
+                bindings.push((
+                    CURVES,
+                    handle,
+                    material(scene, handle, shading, &mut flushed),
+                    None,
+                ));
+            }
+
+            "particles" => {
+                objects.push(particles(scene, handle, shutter, &mut flushed));
+                geometries.push(Reference::new(POINTS, handle));
+                bindings.push((
+                    POINTS,
+                    handle,
+                    material(scene, handle, shading, &mut flushed),
+                    None,
                 ));
             }
 
@@ -1925,6 +1961,8 @@ const CONSUMED: &[(&str, &[&str])] = &[
             "subdivision.creasesharpness",
         ],
     ),
+    ("curves", &["P", "P.", "nvertices", "width", "basis"]),
+    ("particles", &["P", "P.", "width", "id"]),
     (
         "volume",
         &[
@@ -3097,6 +3135,180 @@ fn focal(fov_degrees: f32, resolution: (i32, i32)) -> f32 {
     let half = (fov_degrees.to_radians() * 0.5).tan();
 
     FILM_WIDTH_APERTURE * 0.5 * aspect / half
+}
+
+/// One `curves` node, as a `RdlCurveGeometry`.
+///
+/// The interface gives a vertex count per curve, a flat `P`, a `width`
+/// and a basis; MoonRay wants the same three lists and an enumerated
+/// type. **`width` is a diameter and `radius_list` is a radius**, so
+/// the halving is the one arithmetic step and getting it wrong renders
+/// hair twice as thick with nothing to say so.
+fn curves(
+    scene: &Scene,
+    handle: &str,
+    shutter: Option<[f64; 2]>,
+    flushed: &mut Flushed,
+) -> Object {
+    let mut object = Object::new(CURVES, handle);
+    object = with_transform(object, scene, handle, shutter, flushed);
+
+    let Some(node) = scene.node(handle) else {
+        return object;
+    };
+
+    if let Some(OwnedData::I32(counts)) =
+        node.effective("nvertices").map(|arg| &arg.data)
+    {
+        object = object.set(
+            "curves_vertex_count",
+            Value::Vector(
+                counts.iter().map(|count| Value::Int(*count)).collect(),
+            ),
+        );
+    }
+
+    if let Some(points) = positions(node, "P") {
+        object = object.set("vertex_list_0", Value::Vector(points));
+    }
+
+    // The interface's `width` is a diameter, constant or per vertex.
+    match node.effective("width").map(|arg| &arg.data) {
+        Some(OwnedData::F32(widths)) => {
+            object = object.set(
+                "radius_list",
+                Value::Vector(
+                    widths
+                        .iter()
+                        .map(|width| Value::Float(width * 0.5))
+                        .collect(),
+                ),
+            );
+        }
+        Some(OwnedData::F64(widths)) => {
+            object = object.set(
+                "radius_list",
+                Value::Vector(
+                    widths
+                        .iter()
+                        .map(|width| Value::Float((*width as f32) * 0.5))
+                        .collect(),
+                ),
+            );
+        }
+        _ => {}
+    }
+
+    // `basis` is the interface's spelling of the interpolation.
+    let basis = match node.effective("basis").map(|arg| &arg.data) {
+        Some(OwnedData::String(values)) => values
+            .first()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+        _ => None,
+    };
+    let curve_type = match basis.as_deref() {
+        None | Some("linear") => Some(0),
+        Some("bezier") => Some(1),
+        Some("b-spline") | Some("bspline") => Some(2),
+        Some(other) => {
+            flushed.limitations.push(format!(
+                "curves {handle:?} use basis {other:?}, which MoonRay's \
+                 curve geometry has no interpolation for; it renders \
+                 linear"
+            ));
+            None
+        }
+    };
+    if let Some(curve_type) = curve_type {
+        object = object.set("curve_type", Value::Int(curve_type));
+    }
+
+    if node.effective("extrapolate").is_some() {
+        flushed.limitations.push(format!(
+            "curves {handle:?} ask for `extrapolate`, which MoonRay has \
+             no counterpart for; the curve ends where its vertices do"
+        ));
+    }
+
+    object
+}
+
+/// One `particles` node, as a `RdlPointGeometry`.
+///
+/// Positions and radii, and nothing else crosses: MoonRay's points are
+/// spheres, so a per-particle normal or orientation has nothing to
+/// orient.
+fn particles(
+    scene: &Scene,
+    handle: &str,
+    shutter: Option<[f64; 2]>,
+    flushed: &mut Flushed,
+) -> Object {
+    let mut object = Object::new(POINTS, handle);
+    object = with_transform(object, scene, handle, shutter, flushed);
+
+    let Some(node) = scene.node(handle) else {
+        return object;
+    };
+
+    if let Some(points) = positions(node, "P") {
+        object = object.set("vertex_list_0", Value::Vector(points));
+    }
+
+    match node.effective("width").map(|arg| &arg.data) {
+        Some(OwnedData::F32(widths)) => {
+            object = object.set(
+                "radius_list",
+                Value::Vector(
+                    widths
+                        .iter()
+                        .map(|width| Value::Float(width * 0.5))
+                        .collect(),
+                ),
+            );
+        }
+        Some(OwnedData::F64(widths)) => {
+            object = object.set(
+                "radius_list",
+                Value::Vector(
+                    widths
+                        .iter()
+                        .map(|width| Value::Float((*width as f32) * 0.5))
+                        .collect(),
+                ),
+            );
+        }
+        _ => {}
+    }
+
+    if node.effective("N").is_some() {
+        flushed.limitations.push(format!(
+            "particles {handle:?} carry `N`; MoonRay renders a point as \
+             a sphere, which has no orientation to give it"
+        ));
+    }
+
+    object
+}
+
+/// A node's positions as `Vec3`s.
+fn positions(node: &Node, name: &str) -> Option<Vec<Value>> {
+    let values: Vec<f32> = match node.effective(name).map(|arg| &arg.data) {
+        Some(OwnedData::F32(values)) => values.clone(),
+        Some(OwnedData::F64(values)) => {
+            values.iter().map(|value| *value as f32).collect()
+        }
+        _ => return None,
+    };
+
+    Some(
+        values
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|point| Value::Vec3f([point[0], point[1], point[2]]))
+            .collect(),
+    )
 }
 
 /// One `volume` node, as a `VdbGeometry`.
@@ -4330,6 +4542,104 @@ mod tests {
         assert!(
             spec.contains("[\"lpe\"] = \"C<..'specular'>.*L\""),
             "{spec}"
+        );
+    }
+
+    /// **A `curves` node becomes MoonRay's curve geometry.**
+    ///
+    /// Hair, fur and grass, which both applications emit and which
+    /// used to be skipped outright. `width` is a *diameter* and
+    /// `radius_list` is a radius, so the halving is the one arithmetic
+    /// step -- getting it wrong renders hair twice as thick with
+    /// nothing to say so.
+    #[test]
+    fn a_curves_node_becomes_curve_geometry() {
+        let mut scene = triangle();
+        scene.create("hair", "curves").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "hair",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, //
+                            0.0, 1.0, 0.0, //
+                            0.0, 2.0, 0.0, //
+                            0.0, 3.0, 0.0,
+                        ]),
+                    ),
+                    arg("width", Type::F32, OwnedData::F32(vec![0.2])),
+                    arg(
+                        "basis",
+                        Type::String,
+                        OwnedData::String(vec![b"b-spline".to_vec()]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("hair", None, ".root", "objects").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("RdlCurveGeometry(\"hair\") {"), "{rdla}");
+        assert!(rdla.contains("[\"curves_vertex_count\"] = { 4}"), "{rdla}");
+        // Half the width.
+        assert!(
+            rdla.contains("[\"radius_list\"] = { 0.100000001}"),
+            "{rdla}"
+        );
+        // `bspline` is 2 in MoonRay's own enum.
+        assert!(rdla.contains("[\"curve_type\"] = 2"), "{rdla}");
+    }
+
+    /// **A `particles` node becomes MoonRay's point geometry.**
+    ///
+    /// A point is a sphere, so a per-particle normal has nothing to
+    /// orient and is reported rather than dropped.
+    #[test]
+    fn a_particles_node_becomes_point_geometry() {
+        let mut scene = triangle();
+        scene
+            .create("dust", "particles")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(
+                "dust",
+                vec![
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+                    ),
+                    arg("width", Type::F32, OwnedData::F32(vec![0.5, 0.25])),
+                    arg(
+                        "N",
+                        Type::Normal,
+                        OwnedData::F32(vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("dust", None, ".root", "objects").unwrap();
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("RdlPointGeometry(\"dust\") {"), "{rdla}");
+        assert!(
+            rdla.contains("[\"radius_list\"] = { 0.25, 0.125}"),
+            "{rdla}"
+        );
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("dust") && line.contains("sphere")),
+            "{:?}",
+            flushed.limitations
         );
     }
 
