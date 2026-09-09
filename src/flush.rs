@@ -3019,18 +3019,62 @@ fn environment(
 
     object = with_transform(object, scene, handle, shutter, flushed);
 
-    if scene
+    let Some(shader) = scene
         .geometry_binding(handle)
         .ok()
         .flatten()
         .and_then(|binding| binding.surface_shader)
-        .is_some()
+    else {
+        return object;
+    };
+
+    // **The texture crosses even though the shader does not.**
+    // MoonRay's `Light` base class declares `texture`, a path to an
+    // image, so an environment map reaches the render without anything
+    // executing the shader that named it -- and an HDRI is what an
+    // environment is *for*. Losing it left a white dome, which lights a
+    // scene plausibly and wrongly.
+    //
+    // The parameter's name is the shader author's, so the spellings
+    // are the ones the shaders in practical use choose. A shader that
+    // uses another is reported by name rather than guessed at.
+    const TEXTURE_PARAMETERS: [&str; 4] =
+        ["texturename", "image", "filename", "texture"];
+
+    let node = scene.node(&shader);
+    let texture = node.and_then(|node| {
+        TEXTURE_PARAMETERS.iter().find_map(|name| {
+            match &node.effective(name)?.data {
+                OwnedData::String(values) => values
+                    .first()
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                    .filter(|path| !path.is_empty()),
+                _ => None,
+            }
+        })
+    });
+
+    match texture {
+        Some(path) => {
+            object = object.set("texture", Value::String(path));
+            flushed.limitations.push(format!(
+                "environment {handle:?} carries shader {shader:?}; its \
+                 texture crosses but the shader itself does not, so any \
+                 colour correction or projection it applies is lost"
+            ));
+        }
+        None => flushed.limitations.push(format!(
+            "environment {handle:?} carries shader {shader:?}, which \
+             MoonRay cannot run and which names no texture this backend \
+             recognises; the light is white at intensity 1"
+        )),
+    }
+
+    // An intensity, where the shader carries one.
+    if let Some(node) = node
+        && let Some(intensity) = scalar_of(node, "intensity")
     {
-        flushed.limitations.push(format!(
-            "environment {handle:?} carries a shader, which MoonRay \
-             cannot run; the light is white at intensity 1 and any \
-             environment texture is lost"
-        ));
+        object = object.set("intensity", Value::Float(intensity));
     }
 
     object
@@ -4690,6 +4734,54 @@ mod tests {
         assert!(
             spec.contains("[\"lpe\"] = \"C<..'specular'>.*L\""),
             "{spec}"
+        );
+    }
+
+    /// **An environment texture crosses even though its shader does
+    /// not.**
+    ///
+    /// MoonRay's `Light` declares `texture`, a path to an image, so an
+    /// HDRI reaches the render without anything executing the shader
+    /// that named it -- and an HDRI is what an environment is for.
+    /// Losing it left a white dome, which lights a scene plausibly and
+    /// wrongly.
+    #[test]
+    fn an_environment_texture_reaches_the_light() {
+        let mut scene = triangle();
+        scene.create("env", "environment").unwrap();
+        scene.connect("env", None, ".root", "objects").unwrap();
+        scene.create("attr", "attributes").unwrap();
+        scene.create("dome", "shader").unwrap();
+        scene
+            .set_attribute(
+                "dome",
+                vec![arg(
+                    "texturename",
+                    Type::String,
+                    OwnedData::String(vec![b"/tex/sky.tx".to_vec()]),
+                )],
+            )
+            .unwrap();
+        scene
+            .connect("attr", None, "env", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("dome", None, "attr", "surfaceshader")
+            .unwrap();
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("[\"texture\"] = \"/tex/sky.tx\""), "{rdla}");
+        // And what is still lost is said, rather than the texture
+        // crossing being taken for the whole shader crossing.
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("dome") && line.contains("lost")),
+            "{:?}",
+            flushed.limitations
         );
     }
 

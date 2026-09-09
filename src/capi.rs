@@ -435,10 +435,6 @@ fn reporter_of(arguments: &[OwnedArgument]) -> Reporter {
 ///
 /// For the places that have the id but not the borrow. Where a
 /// `&Context` is already in hand, call `context.reporter.say` directly.
-///
-/// Gated because its only caller is: a build with no linked renderer
-/// never reaches the arm that warns about not having one.
-#[cfg(all(feature = "rdl2", moonray))]
 fn report(ctx: NsiContext, level: c_int, message: &str) {
     let reporter = CONTEXTS
         .lock()
@@ -691,14 +687,53 @@ pub unsafe extern "C" fn NSIDisconnect(
 /// `params` points at `nparams` valid parameters, or is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn NSIEvaluate(
-    _ctx: NsiContext,
-    _nparams: c_int,
-    _params: *const FfiParam,
+    ctx: NsiContext,
+    nparams: c_int,
+    params: *const FfiParam,
 ) {
-    // `NSIEvaluate` replays a `.nsi` stream or runs a procedural. Both
-    // need a parser this crate does not have; see `T4.3`. Ignoring it
-    // loses the stream's contents, which is why it is listed as a
-    // limitation rather than quietly treated as a no-op success.
+    // **This was an empty body whose comment claimed it reported a
+    // limitation.** It reported nothing: an application handing over an
+    // archive, a Lua script or a procedural got silence and a render
+    // without it. Everything an `NSIEvaluate` would have created is
+    // simply absent from the image, and absent geometry looks like
+    // geometry that was never authored.
+    //
+    // SAFETY: the caller guarantees `nparams` valid parameters.
+    let arguments = unsafe { arguments(params, nparams) };
+
+    let text = |name: &str| {
+        arguments
+            .iter()
+            .find(|argument| argument.name == name)
+            .and_then(|argument| match &argument.data {
+                OwnedData::String(values) => values
+                    .first()
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                _ => None,
+            })
+    };
+
+    let kind = text("type").unwrap_or_else(|| "apistream".into());
+    let source = text("filename")
+        .or_else(|| text("script"))
+        .unwrap_or_else(|| "an inline buffer".into());
+
+    // **A full implementation needs a merge this crate cannot do.**
+    // `nsi-parse` reads a stream into a `Recorder`, and a `Recorder`
+    // owns its own `Scene`; there is no way to replay one scene into
+    // another, and writing that walk here would re-derive ɴsɪ's own
+    // semantics in a backend -- which is the duplication
+    // `nsi-intermediate` exists to prevent. It belongs upstream, as
+    // `Scene::merge`.
+    report(
+        ctx,
+        LEVEL_WARNING,
+        &format!(
+            "NSIEvaluate of {kind:?} from {source:?} is not run, so \
+             everything it would have created is missing from the \
+             render rather than wrong in it"
+        ),
+    );
 }
 
 /// # Safety
