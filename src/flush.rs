@@ -440,7 +440,12 @@ pub fn flush_with(
                     }
                     objects.push(hidden(shape));
                 } else {
-                    objects.push(shape);
+                    objects.push(with_visibility(
+                        shape,
+                        scene,
+                        handle,
+                        &mut flushed,
+                    ));
                 }
                 geometries.push(Reference::new(MESH, handle));
 
@@ -1353,6 +1358,93 @@ fn hidden(object: Object) -> Object {
     })
 }
 
+/// The interface's per-ray visibility, as MoonRay's nine flags.
+///
+/// **This is Gaffer's entire per-object vocabulary** -- seven
+/// visibility flags and matte -- and until now every one of them was
+/// dropped without a word. The resolution is upstream's
+/// (`Scene::attribute_value` walks the path, applies priority, breaks
+/// ties by proximity), so what is left here is the rename.
+///
+/// The interface's ray classes are coarser than rdl2's, which splits
+/// reflection and transmission and again by lobe. The mapping is
+/// one-to-many, and the specific spelling wins over the general
+/// `visibility`, which upstream reports through
+/// [`AttributeValue::name`].
+const RAY_VISIBILITY: [(&str, &[&str]); 6] = [
+    ("visibility.camera", &["visible_in_camera"]),
+    ("visibility.shadow", &["visible_shadow"]),
+    (
+        "visibility.diffuse",
+        &["visible_diffuse_reflection", "visible_diffuse_transmission"],
+    ),
+    (
+        "visibility.specular",
+        &["visible_glossy_reflection", "visible_glossy_transmission"],
+    ),
+    ("visibility.reflection", &["visible_mirror_reflection"]),
+    ("visibility.refraction", &["visible_mirror_transmission"]),
+];
+
+/// Apply the interface's visibility to one shape.
+///
+/// A bare `visibility` covers every ray class, and the interface says
+/// the specific spelling wins; upstream's resolver already answers
+/// which one did, so this only has to honour the answer.
+fn with_visibility(
+    mut object: Object,
+    scene: &Scene,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Object {
+    for (nsi, rdl2) in RAY_VISIBILITY {
+        let Ok(Some(value)) = scene.attribute_value(handle, nsi) else {
+            continue;
+        };
+
+        // A lone `<attr>.priority` names the winner and leaves the
+        // value at the interface's default, which for visibility is
+        // "visible" -- so there is nothing to change.
+        let Some(argument) = value.arg else {
+            continue;
+        };
+
+        let visible = match &argument.data {
+            OwnedData::I32(values) => values.first().copied().unwrap_or(1) != 0,
+            OwnedData::F32(values) => {
+                values.first().copied().unwrap_or(1.0) != 0.0
+            }
+            _ => continue,
+        };
+
+        for flag in rdl2 {
+            object = object.set(*flag, Value::Bool(visible));
+        }
+    }
+
+    // **`matte` has no MoonRay counterpart**, and a holdout that
+    // renders as an ordinary object is the worst possible answer: the
+    // shape appears where the compositor expected a hole.
+    if let Ok(Some(value)) = scene.attribute_value(handle, "matte")
+        && value
+            .arg
+            .and_then(|argument| match &argument.data {
+                OwnedData::I32(values) => values.first().copied(),
+                _ => None,
+            })
+            .unwrap_or(0)
+            != 0
+    {
+        flushed.limitations.push(format!(
+            "{handle:?} is a matte (holdout) object; MoonRay has no \
+             equivalent, so it renders as ordinary geometry and will \
+             appear where a hole was wanted"
+        ));
+    }
+
+    object
+}
+
 /// A light that is not in the scene, switched off rather than left out.
 ///
 /// `Light.cc` declares `on` on the base class, so this is one attribute
@@ -1784,7 +1876,25 @@ const CONSUMED: &[(&str, &[&str])] = &[
     ),
     ("sphericalcamera", &["clippingrange", "shutterrange"]),
     ("cylindricalcamera", &["clippingrange", "shutterrange"]),
-    ("attributes", &[]),
+    (
+        "attributes",
+        &[
+            // The shader slots, consumed through `geometry_binding`.
+            "surfaceshader",
+            "displacementshader",
+            "volumeshader",
+            // Visibility, consumed through `with_visibility`.
+            "visibility",
+            "visibility.camera",
+            "visibility.shadow",
+            "visibility.diffuse",
+            "visibility.specular",
+            "visibility.reflection",
+            "visibility.refraction",
+            // Reported in its own words rather than by the sweep.
+            "matte",
+        ],
+    ),
     ("set", &[]),
 ];
 
@@ -4089,12 +4199,31 @@ mod tests {
         let flushed = flush(&scene);
         let said = flushed.limitations.join("\n");
 
-        for name in ["visibility.camera", "matte", "crop", "oversampling"] {
+        // Genuinely unread, and named.
+        for name in ["crop", "oversampling"] {
             assert!(
                 said.contains(name),
                 "{name:?} was dropped without a word\n{said}"
             );
         }
+
+        // Visibility is carried now, so reporting it would cry wolf --
+        // and it must reach the shape.
+        assert!(
+            !said.contains("visibility.camera"),
+            "visibility is carried\n{said}"
+        );
+        assert!(
+            flushed
+                .to_rdla()
+                .contains("[\"visible_in_camera\"] = false"),
+            "{}",
+            flushed.to_rdla()
+        );
+
+        // A matte has no MoonRay counterpart and says so in its own
+        // words rather than through the sweep.
+        assert!(said.contains("matte"), "{said}");
     }
 
     /// A mesh's non-structural attributes are primitive variables and
