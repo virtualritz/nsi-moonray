@@ -3283,6 +3283,30 @@ fn result(
         // The beauty, however it was spelled.
         ("shader", None | Some("Ci")) => object,
 
+        // **`id.*` is how object IDs and Cryptomatte are actually
+        // asked for.** No client sets `cryptomatte.enable`; all three
+        // emit plain layers with `variablesource "builtin"` named
+        // `id.geometry`, `id.scenepath` and `id.surfaceshader`. Those
+        // matched no state variable, so all three rendered the beauty
+        // and Cryptomatte was unreachable.
+        //
+        // MoonRay's answer is one result, `cryptomatte`, whose label
+        // string is read off `RenderOutput.cc` rather than guessed. It
+        // carries the object identity for the whole layer, so the
+        // three interface spellings are one MoonRay output and the
+        // difference between them -- geometry, scene path, shader --
+        // is not one MoonRay makes.
+        ("builtin", Some(name)) if name.starts_with("id.") => {
+            flushed.limitations.push(format!(
+                "output layer {layer:?} asks for {name:?}; MoonRay has \
+                 one Cryptomatte output rather than an identity per \
+                 kind, so it carries object identity and not \
+                 specifically {:?}",
+                name.trim_start_matches("id.")
+            ));
+            object.set("result", Value::String("cryptomatte".into()))
+        }
+
         ("builtin", Some(name)) => match name {
             "alpha" => object.set("result", Value::String("alpha".into())),
             // ɴsɪ's `z` is camera-space depth, which is exactly what
@@ -4306,6 +4330,48 @@ mod tests {
         assert!(
             spec.contains("[\"lpe\"] = \"C<..'specular'>.*L\""),
             "{spec}"
+        );
+    }
+
+    /// **`id.*` becomes MoonRay's Cryptomatte.**
+    ///
+    /// No client sets `cryptomatte.enable`; all three emit plain
+    /// builtin layers named `id.geometry`, `id.scenepath` and
+    /// `id.surfaceshader`. Those matched no state variable, so every
+    /// one rendered the beauty and Cryptomatte was unreachable.
+    #[test]
+    fn an_id_output_layer_becomes_cryptomatte() {
+        let mut scene = triangle();
+        output_layer(
+            &mut scene,
+            "ids",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"builtin".to_vec()]),
+                ),
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"id.geometry".to_vec()]),
+                ),
+            ],
+        );
+
+        let flushed = flush(&scene);
+        let ids = output(&flushed.to_rdla(), "ids");
+
+        assert!(ids.contains("[\"result\"] = \"cryptomatte\""), "{ids}");
+        // And the difference between the three spellings is one
+        // MoonRay does not make, so it is said rather than implied.
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("id.geometry")),
+            "{:?}",
+            flushed.limitations
         );
     }
 
