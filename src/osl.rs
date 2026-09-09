@@ -371,6 +371,109 @@ fn open(scene: &Scene, handle: &str) -> Option<OslQuery> {
     OslQuery::open_with_searchpath(&name, &search).ok()
 }
 
+/// Whether a compiled shader produces an `emission()` closure.
+///
+/// **The interface has no light nodes.** Section 4.5 says a light is
+/// geometry whose surface shader emits, so recognising one means
+/// knowing what a shader *does* -- and this backend has been answering
+/// that with a table of six names, which makes every other emitter
+/// render dark.
+///
+/// `.oso` is a text format, and OSL compiles a closure call into a
+/// string constant naming the closure plus a `closure` instruction
+/// using it:
+///
+/// ```text
+/// const   string  $const1 "emission"
+///         closure     $tmp1 $const1
+/// ```
+///
+/// So both halves are checked. **A parameter called `emission_color`
+/// is not an emitter** -- it compiles to a `param` line and no
+/// constant -- and requiring the instruction as well means a shader
+/// that merely holds the *word* somewhere is not promoted either.
+///
+/// That direction matters. A mesh wrongly left as geometry renders
+/// dark and visible, which looks like what it is; a mesh wrongly
+/// promoted to a light leaves the render layer and **disappears from
+/// the frame**, so a false positive is much the worse mistake.
+fn emits_from_oso(source: &str) -> bool {
+    let mut emission_constants = Vec::new();
+
+    for line in source.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // `const  string  $const1  "emission"`
+        if fields.len() >= 4
+            && fields[0] == "const"
+            && fields[1] == "string"
+            && fields[3] == "\"emission\""
+        {
+            emission_constants.push(fields[2]);
+        }
+    }
+
+    if emission_constants.is_empty() {
+        return false;
+    }
+
+    source.lines().any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        fields.first() == Some(&"closure")
+            && fields
+                .iter()
+                .any(|field| emission_constants.contains(field))
+    })
+}
+
+/// Whether the shader an ɴsɪ node names emits.
+///
+/// `None` when the compiled shader cannot be found, which is not a
+/// failure: the flush is a pure transformation and may run on a
+/// machine that has no shaders at all. What cannot be checked is left
+/// to the name table.
+pub fn emits(scene: &Scene, handle: &str) -> Option<bool> {
+    let path = oso_path(scene, handle)?;
+    let source = std::fs::read_to_string(path).ok()?;
+    Some(emits_from_oso(&source))
+}
+
+/// Where the compiled shader actually is.
+///
+/// The same resolution `open` performs -- a name or a path, against
+/// OSL's own search path -- but yielding the file rather than its
+/// declarations, because what is wanted here is the instruction stream
+/// and `oslquery-petite` reads only the interface.
+fn oso_path(scene: &Scene, handle: &str) -> Option<std::path::PathBuf> {
+    let node = scene.node(handle)?;
+    let OwnedData::String(names) = &node.effective("shaderfilename")?.data
+    else {
+        return None;
+    };
+
+    let name = String::from_utf8_lossy(names.first()?).into_owned();
+    let with_extension = if name.ends_with(".oso") {
+        name.clone()
+    } else {
+        format!("{name}.oso")
+    };
+
+    let direct = std::path::PathBuf::from(&with_extension);
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    // A bare name, against OSL's own search path.
+    let search = std::env::var(SHADER_PATH).unwrap_or_default();
+    for directory in search.split(':').filter(|entry| !entry.is_empty()) {
+        let candidate = std::path::Path::new(directory).join(&with_extension);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
 /// Whether a shader node names a shader OSL could run.
 ///
 /// The one thing that decides whether the network is usable at all: a
@@ -415,6 +518,109 @@ fn layer_name(handle: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// **A light is a shader that emits, not a shader with a known
+    /// name.** The interface says so in as many words, and a table of
+    /// six names answers it for six shaders.
+    #[test]
+    fn an_emission_closure_is_found_in_a_compiled_shader() {
+        // What `oslc` produces for `Ci = emission()`.
+        let emitting = "\
+surface emits
+global\tclosure color\tCi
+temp\tclosure color\t$tmp1
+const\tstring\t$const1\t\"emission\"
+code ___main___
+\tclosure\t\t$tmp1 $const1
+\tend
+";
+        assert!(emits_from_oso(emitting));
+    }
+
+    /// **A parameter called `emission_color` is not an emitter.**
+    ///
+    /// It compiles to a `param` line and no string constant, and this
+    /// is the direction that matters: a mesh wrongly promoted to a
+    /// light leaves the render layer and disappears from the frame,
+    /// where one wrongly left as geometry merely renders dark.
+    #[test]
+    fn a_parameter_named_for_emission_is_not_an_emitter() {
+        let plain = "\
+surface param
+param\tcolor\temission_color\t0 0 0
+code ___main___
+\tmul\t\tCi $tmp1 emission_color
+\tend
+";
+        assert!(!emits_from_oso(plain));
+    }
+
+    /// **Against `oslc`'s own output**, because the three tests above
+    /// assert on text this file wrote. A compiler that changes how it
+    /// spells a closure would pass all of them and break the feature.
+    ///
+    /// Needs `$OSL_ROOT`, like the other tests that compile a shader.
+    #[cfg(osl)]
+    #[test]
+    fn oslc_agrees_about_what_emits() {
+        let directory = std::env::temp_dir()
+            .join(format!("nsi-moonray-emits-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("a directory");
+
+        let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+
+        for (name, source, expected) in [
+            (
+                "emits",
+                "surface emits() { Ci = emission() * color(1, 1, 1); }",
+                true,
+            ),
+            ("plain", "surface plain() { Ci = diffuse(N); }", false),
+            (
+                "named",
+                "surface named(color emission_color = 0) \
+                 { Ci = diffuse(N) * emission_color; }",
+                false,
+            ),
+        ] {
+            let osl = directory.join(format!("{name}.osl"));
+            let oso = directory.join(format!("{name}.oso"));
+            std::fs::write(&osl, source).expect("the shader is written");
+
+            let compiled = std::process::Command::new(&oslc)
+                .arg("-o")
+                .arg(&oso)
+                .arg(&osl)
+                .output()
+                .expect("oslc runs");
+            assert!(
+                compiled.status.success(),
+                "oslc failed for {name}: {}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+
+            let text = std::fs::read_to_string(&oso).expect("the .oso");
+            assert_eq!(
+                emits_from_oso(&text),
+                expected,
+                "{name} was read wrongly"
+            );
+        }
+    }
+
+    /// A shader that merely holds the word, with no closure built from
+    /// it, is not an emitter either.
+    #[test]
+    fn a_string_constant_alone_is_not_an_emitter() {
+        let held = "\
+surface holds
+const\tstring\t$const1\t\"emission\"
+code ___main___
+\tprintf\t\t$const1
+\tend
+";
+        assert!(!emits_from_oso(held));
+    }
+
     use super::*;
     use nsi_intermediate::OwnedArgument;
 

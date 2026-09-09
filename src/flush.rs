@@ -2824,10 +2824,26 @@ const DISTANT_LIGHT: &str = "DistantLight";
 fn light_class(scene: &Scene, shader: &str) -> Option<&'static str> {
     let stem = shader_stem(scene.node(shader)?)?;
 
-    LIGHTS
-        .iter()
-        .find(|(name, _)| *name == stem)
-        .map(|(_, class)| *class)
+    if let Some((_, class)) = LIGHTS.iter().find(|(name, _)| *name == stem) {
+        return Some(class);
+    }
+
+    // **Ask the shader rather than its name.** The interface says a
+    // light is geometry whose surface shader produces an `emission()`
+    // closure, and a table of six names answers that for six shaders
+    // and leaves every other emitter rendering dark. `.oso` is a text
+    // format, so the question is answerable: `osl::emits` looks for
+    // the closure itself.
+    //
+    // `MeshLight` because the geometry is arbitrary -- which is what
+    // the interface means by a light -- and because it samples the
+    // real mesh rather than approximating it.
+    //
+    // A shader that cannot be found is left to the table, since the
+    // flush may run on a machine with no shaders on it at all.
+    crate::osl::emits(scene, shader)
+        .unwrap_or(false)
+        .then_some(MESH_LIGHT)
 }
 
 /// The shader an ɴsɪ node's geometry wears, if it wears one.
