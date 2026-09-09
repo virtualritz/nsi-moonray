@@ -668,6 +668,9 @@ pub fn flush_with(
     // *first* screen's resolution, and nothing said so. MoonRay renders
     // one camera per frame; the interface does not promise that, so
     // what is dropped is named.
+    // Lights that an output layer restricted itself to, and the group
+    // name each was labelled with.
+    let mut light_labels: Vec<(String, String)> = Vec::new();
     let outputs = scene.render_outputs();
     if outputs.len() > 1 {
         let ignored: Vec<&str> = outputs
@@ -696,6 +699,7 @@ pub fn flush_with(
                 scene,
                 &layer.handle,
                 &layer.drivers,
+                &mut light_labels,
                 &mut flushed,
             ));
         }
@@ -834,6 +838,29 @@ pub fn flush_with(
             name: Some(Name::new("/nsi/geometries")),
             body: Body::Set(geometries),
         });
+    }
+
+    // **Label each light an output layer restricted itself to.**
+    // MoonRay has no per-output light set, so a light group is a label
+    // on the light plus an `<L.'group'>` in the expression -- and the
+    // label has to go on after every light object exists, because it is
+    // an edit to one this loop already produced.
+    if !light_labels.is_empty() {
+        for object in &mut objects {
+            let Some(name) = object.name.as_ref() else {
+                continue;
+            };
+            let Some((_, group)) = light_labels
+                .iter()
+                .find(|(light, _)| light_handle(light) == name.as_str())
+            else {
+                continue;
+            };
+            if let Body::Attributes(attributes) = &mut object.body {
+                attributes
+                    .push((Name::new("label"), Value::String(group.clone())));
+            }
+        }
     }
 
     objects.push(Object {
@@ -2060,6 +2087,7 @@ const CONSUMED: &[(&str, &[&str])] = &[
             "layertype",
             "scalarformat",
             "lightdepth",
+            "lightsetname",
         ],
     ),
     ("outputdriver", &["imagefilename", "drivername"]),
@@ -3719,6 +3747,7 @@ fn render_output(
     scene: &Scene,
     layer: &str,
     drivers: &[String],
+    light_labels: &mut Vec<(String, String)>,
     flushed: &mut Flushed,
 ) -> Object {
     let mut object = Object::new("RenderOutput", layer);
@@ -3750,13 +3779,30 @@ fn render_output(
     // told for a primitive attribute -- rdl2 declares the channel count
     // statically and will not work it out from the data.
     let kind = text("layertype").unwrap_or_else(|| "color".into());
+    // **A light group, if the layer restricts itself to some lights.**
+    // The group's name is the layer's own `lightsetname` where it has
+    // one, because that is what an application shows the user, and the
+    // layer handle otherwise.
+    let lights = light_set_members(scene, layer);
+    let group = (!lights.is_empty())
+        .then(|| text("lightsetname").unwrap_or_else(|| layer.to_owned()));
+
+    // Label each light in the set, so the expression can name them.
+    for light in &lights {
+        light_labels
+            .push(((*light).to_owned(), group.clone().unwrap_or_default()));
+    }
+
     object = result(
         object,
-        &source,
-        variable.as_deref(),
-        &kind,
-        layer,
-        node,
+        &Request {
+            source: &source,
+            variable: variable.as_deref(),
+            kind: &kind,
+            layer,
+            node,
+            light_group: group.as_deref(),
+        },
         flushed,
     );
 
@@ -3795,15 +3841,30 @@ fn render_output(
 /// per case. The two do not cover each other, and what does not cross
 /// is named rather than defaulted to the beauty -- an AOV that renders
 /// the beauty under another name is worse than a missing one.
+/// What one output layer asks for, gathered so `result` takes a
+/// request rather than eight arguments.
+struct Request<'a> {
+    source: &'a str,
+    variable: Option<&'a str>,
+    kind: &'a str,
+    layer: &'a str,
+    node: Option<&'a Node>,
+    light_group: Option<&'a str>,
+}
+
 fn result(
     object: Object,
-    source: &str,
-    variable: Option<&str>,
-    kind: &str,
-    layer: &str,
-    node: Option<&Node>,
+    request: &Request<'_>,
     flushed: &mut Flushed,
 ) -> Object {
+    let Request {
+        source,
+        variable,
+        kind,
+        layer,
+        node,
+        light_group,
+    } = *request;
     let unmapped = |flushed: &mut Flushed, why: &str| {
         flushed.limitations.push(format!(
             "output layer {layer:?} asks for {why}, which MoonRay's \
@@ -3907,11 +3968,24 @@ fn result(
             // direct pass is one scattering event and then a light,
             // an indirect pass is two or more.
             Some(label) => {
+                // **A light group is a label on the light, named by
+                // the expression.** MoonRay has no per-output light
+                // set, so the interface's `lightset` connection
+                // becomes a label this backend puts on each light in
+                // the set and an `<L.'group'>` at the end of the path
+                // expression, which is how MoonRay's own light-path
+                // engine spells "only these lights".
+                let lights = match light_group {
+                    Some(group) => format!("<L.'{group}'>"),
+                    None => "L".to_owned(),
+                };
                 let expression =
                     match node.and_then(|node| light_depth(node, name)) {
-                        Some("direct") => format!("C<..'{label}'>L"),
-                        Some("indirect") => format!("C<..'{label}'>.+L"),
-                        _ => format!("C<..'{label}'>.*L"),
+                        Some("direct") => format!("C<..'{label}'>{lights}"),
+                        Some("indirect") => {
+                            format!("C<..'{label}'>.+{lights}")
+                        }
+                        _ => format!("C<..'{label}'>.*{lights}"),
                     };
                 object
                     .set("result", Value::String("light aov".into()))
@@ -3985,6 +4059,41 @@ fn lobe_label(name: &str) -> Option<&'static str> {
         .find(|(aov, _)| *aov == stem)
         .or_else(|| SHADER_AOVS.iter().find(|(_, label)| *label == stem))
         .map(|(_, label)| *label)
+}
+
+/// The lights an output layer restricts itself to, if any.
+///
+/// The interface connects lights, or `set` nodes of lights, to an
+/// output layer's `lightset`; nothing connected means every light.
+/// This flattens one level of `set`, which is the shape every client
+/// builds -- 3Delight for Houdini makes one `set` per light bundle.
+fn light_set_members<'a>(scene: &'a Scene, layer: &str) -> Vec<&'a str> {
+    let direct: Vec<&str> = scene
+        .edges()
+        .filter(|edge| edge.kind == EdgeKind::LightSet && edge.to() == layer)
+        .map(|edge| edge.from())
+        .collect();
+
+    let mut lights = Vec::new();
+    for handle in direct {
+        let is_set = scene
+            .node(handle)
+            .is_some_and(|node| node.node_type() == "set");
+
+        if is_set {
+            // A `set` holds its members as ordinary scene membership.
+            lights.extend(
+                scene
+                    .edges()
+                    .filter(|edge| edge.to() == handle)
+                    .map(|edge| edge.from()),
+            );
+        } else {
+            lights.push(handle);
+        }
+    }
+
+    lights
 }
 
 /// The light depth an output layer asks for.
@@ -4878,6 +4987,71 @@ mod tests {
             spec.contains("[\"lpe\"] = \"C<..'specular'>.*L\""),
             "{spec}"
         );
+    }
+
+    /// **A light group restricts an output layer to some lights.**
+    ///
+    /// MoonRay has no per-output light set, so the interface's
+    /// `lightset` connection becomes a label on each light in the set
+    /// and an `<L.'group'>` at the end of the path expression, which is
+    /// how MoonRay's own engine spells "only these lights". Houdini
+    /// builds one `set` per light bundle and takes the cross product
+    /// with its AOVs, so this is the shape that matters.
+    #[test]
+    fn a_light_set_becomes_a_labelled_group() {
+        let mut scene = triangle();
+
+        // A recognised emitter, so it becomes a light at all.
+        scene.create("key", "mesh").unwrap();
+        scene.connect("key", None, ".root", "objects").unwrap();
+        scene.create("attr", "attributes").unwrap();
+        scene.create("emit", "shader").unwrap();
+        scene
+            .set_attribute(
+                "emit",
+                vec![arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![b"/osl/pointLight.oso".to_vec()]),
+                )],
+            )
+            .unwrap();
+        scene
+            .connect("attr", None, "key", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("emit", None, "attr", "surfaceshader")
+            .unwrap();
+
+        output_layer(
+            &mut scene,
+            "keypass",
+            vec![
+                arg(
+                    "variablesource",
+                    Type::String,
+                    OwnedData::String(vec![b"shader".to_vec()]),
+                ),
+                arg(
+                    "variablename",
+                    Type::String,
+                    OwnedData::String(vec![b"diffuse".to_vec()]),
+                ),
+                arg(
+                    "lightsetname",
+                    Type::String,
+                    OwnedData::String(vec![b"key_group".to_vec()]),
+                ),
+            ],
+        );
+        scene.connect("key", None, "keypass", "lightset").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        // The expression names the group rather than every light.
+        assert!(rdla.contains("C<..'diffuse'>.*<L.'key_group'>"), "{rdla}");
+        // And the light carries the label the expression names.
+        assert!(rdla.contains("[\"label\"] = \"key_group\""), "{rdla}");
     }
 
     /// **A face set becomes a MoonRay part, with its own layer row.**
