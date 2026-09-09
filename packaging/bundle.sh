@@ -75,6 +75,12 @@ case "$(uname -s)" in
     *)      DSO_EXT="so";    RENDERER="$PREFIX/bin/moonray" ;;
 esac
 
+# The checkout's pixi environment, if it has one. Its libraries are in
+# the bundle by way of the dependency walk, so its licences belong in
+# the bundle too.
+PIXI_ENV="$PWD/.pixi/envs/default"
+[ -d "$PIXI_ENV" ] || PIXI_ENV=""
+
 [ -x "$RENDERER" ] || die "$RENDERER is not executable; it is the \
 fallback for any host that cannot link the renderer, and ɴsɪ always \
 returns an image"
@@ -205,6 +211,38 @@ relocatable -- this bundle works only where it was built" >&2
 fi
 
 cp -pL README.md "$OUT/share/nsi-moonray/" 2>/dev/null || true
+for notice in LICENSE.md LICENSE-MIT LICENSE-APACHE LICENSE-ZLIB; do
+    [ -f "$notice" ] && cp -pL "$notice" "$OUT/share/nsi-moonray/"
+done
+
+# **Other people's software travels with other people's notices.** A
+# bundle carries MoonRay, Embree, OpenVDB, OpenImageIO, OSL and a dozen
+# more, and redistributing a library means redistributing its licence.
+# This is a best effort over the places the sources put them -- it is
+# not a legal opinion, and `LICENSE.md` says so.
+LICENCES="$OUT/share/nsi-moonray/licences"
+mkdir -p "$LICENCES"
+found=0
+for root in "$PREFIX" "$PIXI_ENV"; do
+    [ -n "$root" ] && [ -d "$root" ] || continue
+    # conda writes `share/info/licenses` per package; a `make install`
+    # tends to drop them in `share/doc/<name>`.
+    for candidate in "$root"/share/info/licenses/* "$root"/share/doc/*; do
+        [ -e "$candidate" ] || continue
+        name="$(basename "$candidate")"
+        [ -e "$LICENCES/$name" ] && continue
+        cp -RpL "$candidate" "$LICENCES/$name" 2>/dev/null || continue
+        found=$((found + 1))
+    done
+done
+
+if [ "$found" -eq 0 ]; then
+    echo "bundle: no third-party licences were found to copy. A bundle \
+redistributes MoonRay and its dependencies, so this needs checking by \
+hand before the build goes anywhere." >&2
+else
+    echo "bundle: $found third-party licence directories collected"
+fi
 
 echo "bundle: $OUT"
 echo "bundle: $(find "$OUT/lib/rdl2dso" -type f | wc -l | tr -d ' ') \
