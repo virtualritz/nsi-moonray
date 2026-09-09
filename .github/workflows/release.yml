@@ -1,0 +1,156 @@
+name: Release
+
+# A draft release, one job per platform, each producing an installer
+# that carries MoonRay with it.
+#
+# **The renderer is the whole cost.** Building MoonRay takes the better
+# part of an hour, and nothing about a release changes it from run to
+# run -- so it is cached against the refs `packaging/renderer.sh` pins.
+# A release that does not bump those refs restores the prefix and
+# finishes in minutes; one that does pays the hour once.
+#
+# **Linux and macOS only.** MoonRay's CMake handles Unix and Darwin and
+# has no MSVC path anywhere, so a Windows package would carry this
+# crate's emitter and no renderer. That is a different product and
+# `specs/005-packaging/spec.md` says why it is not shipped as this one.
+#
+# **Not yet run.** Written after `T0.7` closed and CI became possible
+# at all; every step is modelled on `virtualritz/akatela`'s release
+# workflow, which does run. Two things are known to be missing and are
+# called out at the step that needs them: code signing on macOS, and a
+# checksum for the assets.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  draft:
+    name: Draft the release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Take the version from the manifest
+        id: tag
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          draft: true
+          generate_release_notes: true
+
+  package:
+    name: ${{ matrix.name }}
+    needs: draft
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux (DEB + AppImage)
+            formats: deb,appimage
+          - os: macos-latest
+            name: macOS (DMG)
+            formats: dmg
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install just, nextest and cargo-packager
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest,cargo-packager
+
+      - name: Install pixi
+        run: cargo binstall --no-confirm --git https://github.com/prefix-dev/pixi pixi
+        # `--git`, not the plain name: crates.io still carries 0.15.2
+        # while the current release is 0.80. See `pixi.toml`.
+
+      - name: The dependency environment
+        run: just pixi-install
+
+      # **Keyed on what actually determines the build.** The pinned
+      # refs in `renderer.sh` and the resolved dependency set, so a
+      # change to either rebuilds and nothing else does.
+      - name: Restore the renderer
+        id: renderer-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/moonray
+            ~/Library/Application Support/MoonRay
+          key: moonray-${{ matrix.os }}-${{ hashFiles('packaging/renderer.sh', 'pixi.lock') }}
+
+      - name: Build the renderer
+        if: steps.renderer-cache.outputs.cache-hit != 'true'
+        run: just renderer
+        # About an hour. Everything else in this job is minutes.
+
+      - name: Install patchelf
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y patchelf
+        # Without it the bundle keeps the absolute rpaths it was linked
+        # with and works only on the runner. The script says so on
+        # stderr rather than shipping one quietly.
+
+      - name: Run the renderer tests
+        run: just test-rdl2
+        # The release is the one place these run in CI. They need the
+        # renderer this job has just built or restored, so running them
+        # anywhere else would mean building it twice.
+
+      - name: Assemble the bundle
+        run: just bundle
+
+      - name: Build the installers
+        run: just package
+        # **Unsigned on macOS.** Gatekeeper refuses an unsigned `.dmg`
+        # downloaded from the internet, so this asset is usable by
+        # someone who clears the quarantine attribute and by nobody
+        # else. Signing needs an Apple Developer ID in the repository
+        # secrets and `xcrun notarytool` after the packager; neither
+        # exists yet. `specs/005-packaging/spec.md`.
+
+      - name: Name the assets for the tag
+        shell: bash
+        run: |
+          set -eu
+          TAG="${{ needs.draft.outputs.tag }}"
+          ARCH="$(uname -m)"
+          OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          for file in target/release/*.deb target/release/*.AppImage \
+                      target/release/*.dmg; do
+            [ -e "$file" ] || continue
+            mv -f "$file" \
+              "target/release/nsi-moonray-${TAG}-${ARCH}-${OS}.${file##*.}"
+          done
+          ls -la target/release/ | grep -E "deb|AppImage|dmg" || true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.draft.outputs.tag }}
+          files: |
+            target/release/*.deb
+            target/release/*.AppImage
+            target/release/*.dmg

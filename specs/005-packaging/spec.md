@@ -97,13 +97,33 @@ on four cores, plus OpenSubdiv and OpenImageDenoise, and
 prefix per platform, rebuilt on a MoonRay version bump rather than per
 commit, is what makes a release job finish in minutes.
 
+## Written, not yet run
+
+`.github/workflows/ci.yml` runs the renderer-free half on Linux and
+macOS -- a minute, no MoonRay. `release.yml` drafts a release, builds
+or restores a cached renderer per platform, runs the renderer tests,
+bundles and packages.
+
+The cache key is `packaging/renderer.sh` plus `pixi.lock`, which is
+what actually determines the build: a release that does not move the
+pinned refs or the dependency set restores the prefix and finishes in
+minutes, and one that does pays the hour once.
+
+Neither has run. Both are modelled on `virtualritz/akatela`'s, which
+does.
+
 ## Not done
 
-- The release workflow, for the reason above.
-- Code signing and notarisation. macOS will refuse an unsigned `.dmg`
-  from the internet, and saying so in a README is not a substitute.
-- A licence file. `Cargo.toml` says `MIT OR Apache-2.0 OR Zlib` and
-  the repository has no `LICENSE`, so the packager has none to embed.
-- MoonRay's own licence and those of everything the bundle carries.
-  Shipping Embree, OpenVDB, OpenImageIO and TBB means shipping their
-  notices, and `share/nsi-moonray/` is where they go.
+- **Code signing and notarisation.** Gatekeeper refuses an unsigned
+  `.dmg` downloaded from the internet, so the macOS asset is usable by
+  someone who clears the quarantine attribute and by nobody else. It
+  needs an Apple Developer ID in the repository secrets and
+  `xcrun notarytool` after the packager. The release workflow says so
+  at the step that would do it.
+- **Checksums for the release assets.**
+- **macOS has never been exercised.** The dependency environment
+  resolves for `osx-arm64` and the scripts have Darwin paths
+  throughout -- `install_name_tool` rather than `patchelf`, the
+  `arm64.macos` OpenImageDenoise build, `log4cplus` from source because
+  conda-forge has no `osx-arm64` build of it. None of that has run.
+  Treat the first macOS release as a bring-up.

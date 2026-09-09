@@ -1,0 +1,60 @@
+name: CI
+
+# The renderer-free half, which is most of the crate: the emitter, the
+# flush, the format oracle and the document tests. No MoonRay, no
+# `scene_rdl2`, nothing to build from source -- that is the whole point
+# of the `rdl2` feature being off by default, and it is what makes this
+# job finish in a minute rather than an hour.
+#
+# The renderer half is exercised by `release.yml`, which has to build
+# MoonRay anyway.
+#
+# **This workflow was impossible until 2026-09-08.** `nsi-intermediate`
+# was a path dependency on a sibling checkout, so there was nothing a
+# runner could clone that would build. `T0.7`.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two platforms MoonRay builds on. Windows is absent on
+        # purpose: its CMake has no MSVC path, so a Windows build of
+        # this crate could never link a renderer.
+        # `specs/005-packaging/spec.md` has the evidence.
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal \
+            --component rustfmt clippy
+          rustup default nightly
+        # Nightly for `rustfmt.toml`: `imports_granularity` and
+        # `format_code_in_doc_comments` are nightly-only, and on stable
+        # they are ignored rather than applied -- so `fmt-check` would
+        # pass on a tree stable had formatted differently.
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install just and nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest
+
+      - name: Run everything CI runs
+        run: just ci
