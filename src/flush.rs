@@ -24,7 +24,7 @@ use nsi_intermediate::{
     EdgeKind, IDENTITY, Node, OwnedArgument, OwnedData, Scene,
 };
 use nsi_trait::Type;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// MoonRay's mesh geometry, whose DSO is `moonray/dso/geometry/RdlMesh`.
 const MESH: &str = "RdlMeshGeometry";
@@ -761,7 +761,7 @@ pub fn flush_with(
     // own words; this is the sweep for what nothing looked at.
     report_unread(scene, &mut flushed);
 
-    flushed.document.push(variables);
+    flushed.document.push(with_globals(variables, scene));
     for object in objects {
         flushed.document.push(object);
     }
@@ -1798,6 +1798,99 @@ const STRUCTURE: [&str; 15] = [
     "subdivision.smoothcreasecorners",
 ];
 
+/// The `.global` attributes that have a MoonRay counterpart.
+///
+/// **Not a guess.** Each rdl2 name was checked against the installed
+/// `libscene_rdl2`; the interface's names come from its own `global`
+/// node reference. What is absent from this table has no counterpart,
+/// and the sweep names it rather than dropping it.
+///
+/// The scale differs where the two disagree about units, so each entry
+/// carries how to convert.
+const GLOBALS: &[(&str, &str, GlobalKind)] = &[
+    // Shading samples are per light and per BSDF in MoonRay, and one
+    // number in the interface. Both take it: asking for eight and
+    // getting eight of one and one of the other is not what was asked.
+    ("quality.shadingsamples", "light_samples", GlobalKind::Int),
+    ("quality.shadingsamples", "bsdf_samples", GlobalKind::Int),
+    (
+        "maximumraydepth.diffuse",
+        "max_diffuse_depth",
+        GlobalKind::Int,
+    ),
+    // The interface splits reflection and refraction where MoonRay has
+    // one glossy depth, so the deeper of the two wins -- clamping to
+    // the shallower would lose paths the scene asked for.
+    (
+        "maximumraydepth.reflection",
+        "max_glossy_depth",
+        GlobalKind::IntMax,
+    ),
+    (
+        "maximumraydepth.refraction",
+        "max_glossy_depth",
+        GlobalKind::IntMax,
+    ),
+    ("maximumraydepth.hair", "max_hair_depth", GlobalKind::Int),
+    (
+        "maximumraydepth.volume",
+        "max_volume_depth",
+        GlobalKind::Int,
+    ),
+    // Megabytes both sides.
+    ("texturememory", "texture_cache_size", GlobalKind::Int),
+    ("numberofthreads", "threads", GlobalKind::Int),
+];
+
+/// How a global's value converts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GlobalKind {
+    Int,
+    /// Two interface attributes share one rdl2 one; keep the larger.
+    IntMax,
+}
+
+/// Carry `.global` onto `SceneVariables`.
+///
+/// Until this existed the node was read not at all -- zero of its
+/// forty-three attributes -- so a host could not set sample counts,
+/// ray depths or the thread count, and Gaffer's entire render-quality
+/// interface was inert. What still has no counterpart is named by the
+/// sweep rather than dropped.
+fn with_globals(mut variables: Object, scene: &Scene) -> Object {
+    let Some(node) = scene.node(".global") else {
+        return variables;
+    };
+
+    let mut carried: HashMap<&str, i32> = HashMap::new();
+    for (nsi, rdl2, kind) in GLOBALS {
+        let Some(value) =
+            node.effective(nsi)
+                .and_then(|argument| match &argument.data {
+                    OwnedData::I32(values) => values.first().copied(),
+                    OwnedData::F32(values) => values.first().map(|v| *v as i32),
+                    OwnedData::F64(values) => values.first().map(|v| *v as i32),
+                    _ => None,
+                })
+        else {
+            continue;
+        };
+
+        let entry = carried.entry(rdl2).or_insert(value);
+        if *kind == GlobalKind::IntMax {
+            *entry = (*entry).max(value);
+        } else {
+            *entry = value;
+        }
+    }
+
+    for (rdl2, value) in carried {
+        variables = variables.set(rdl2, Value::Int(value));
+    }
+
+    variables
+}
+
 /// What the flush actually reads, per node type.
 ///
 /// **This table exists to make silence impossible.** Everything the
@@ -1972,15 +2065,24 @@ fn report_unread_global(handle: &str, node: &Node, flushed: &mut Flushed) {
         return;
     }
 
-    let mut set: Vec<&str> = node.attributes().map(|(n, _)| n).collect();
+    let mut set: Vec<&str> = node
+        .attributes()
+        .map(|(name, _)| name)
+        .filter(|name| !GLOBALS.iter().any(|(nsi, _, _)| nsi == name))
+        .collect();
     if set.is_empty() {
         return;
     }
     set.sort_unstable();
 
     flushed.limitations.push(format!(
-        "the `.global` node is not read, so the render configuration it \
-         carries is MoonRay's own rather than the scene's: {}",
+        "the `.global` node sets {} with no MoonRay counterpart, so the \
+         render uses MoonRay's own: {}",
+        if set.len() == 1 {
+            "an attribute"
+        } else {
+            "attributes"
+        },
         set.join(", ")
     ));
 }
@@ -4252,11 +4354,15 @@ mod tests {
         );
     }
 
-    /// The `.global` node carries the whole render configuration and
-    /// none of it is read, so one line names what was set rather than
-    /// forty-three silences.
+    /// **`.global` reaches `SceneVariables` where MoonRay has a
+    /// counterpart, and is named where it does not.**
+    ///
+    /// Zero of its forty-three attributes were read, so a host could
+    /// not set sample counts, ray depths or the thread count at all,
+    /// and an application's entire render-quality interface was inert
+    /// without a word.
     #[test]
-    fn the_global_node_being_unread_is_reported() {
+    fn the_global_node_reaches_the_scene_variables() {
         let mut scene = triangle();
         scene
             .set_attribute(
@@ -4272,16 +4378,47 @@ mod tests {
                         Type::I32,
                         OwnedData::I32(vec![3]),
                     ),
+                    // Two attributes over one rdl2 depth: the deeper
+                    // wins, because clamping to the shallower loses
+                    // paths the scene asked for.
+                    arg(
+                        "maximumraydepth.reflection",
+                        Type::I32,
+                        OwnedData::I32(vec![2]),
+                    ),
+                    arg(
+                        "maximumraydepth.refraction",
+                        Type::I32,
+                        OwnedData::I32(vec![5]),
+                    ),
+                    // No counterpart, so it is named rather than
+                    // dropped.
+                    arg(
+                        "bucketorder",
+                        Type::String,
+                        OwnedData::String(vec![b"spiral".to_vec()]),
+                    ),
                 ],
             )
             .expect("a recordable edit");
 
         let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
         let said = flushed.limitations.join("\n");
 
-        assert!(said.contains("`.global`"), "{said}");
-        assert!(said.contains("quality.shadingsamples"), "{said}");
-        assert!(said.contains("maximumraydepth.diffuse"), "{said}");
+        assert!(rdla.contains("[\"light_samples\"] = 8"), "{rdla}");
+        assert!(rdla.contains("[\"bsdf_samples\"] = 8"), "{rdla}");
+        assert!(rdla.contains("[\"max_diffuse_depth\"] = 3"), "{rdla}");
+        assert!(
+            rdla.contains("[\"max_glossy_depth\"] = 5"),
+            "the deeper of reflection and refraction wins\n{rdla}"
+        );
+
+        assert!(said.contains("bucketorder"), "{said}");
+        assert!(
+            !said.contains("shadingsamples"),
+            "what is carried must not be reported\n{said}"
+        );
     }
 
     /// **A bound `volumeshader` crosses as an `OslVolume`.**
