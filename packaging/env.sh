@@ -43,6 +43,18 @@ export SCENE_RDL2_ROOT="${SCENE_RDL2_ROOT:-$PREFIX}"
 export MOONRAY_ROOT="${MOONRAY_ROOT:-$PREFIX}"
 export NSI_MOONRAY_DSO="${NSI_MOONRAY_DSO:-$PREFIX/rdl2dso}"
 
+# **Where a host looks for this backend**, the way `$DELIGHT` is where
+# it looks for 3Delight: a prefix whose `lib` holds the ɴsɪ library.
+# The `nsi` crate reads it when a `Context` asks for the renderer named
+# `"moonray"`, so setting it is what makes a checkout selectable from
+# an application without installing anything.
+#
+# Deliberately **not** `$MOONRAY_ROOT`, which names DreamWorks'
+# renderer. This is the ɴsɪ front end onto it, they are installed
+# separately often enough, and one variable for both would make "which
+# MoonRay is this" unanswerable.
+export NSI_MOONRAY="${NSI_MOONRAY:-$PWD/target/debug}"
+
 # The pixi environment, if this checkout has one.
 #
 # **`$OSL_ROOT` is what turns OSL on.** Without it `build.rs` skips the

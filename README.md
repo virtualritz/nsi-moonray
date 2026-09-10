@@ -126,30 +126,41 @@ which path it took.
 `examples/polyhedron` builds a polyhedron with
 [`polyhedron-ops`](https://github.com/virtualritz/polyhedron-ops), hands
 it to the ɴsɪ context that crate already talks to, and renders it with
-MoonRay. Nothing in it mentions MoonRay: `nsi-core` resolves a renderer
-at run time, and pointing that resolution at `libnsi_moonray.so` is the
-whole trick.
+MoonRay. Nothing in it mentions MoonRay beyond the name: the `nsi`
+crate resolves a renderer at run time, and asking it for `"moonray"`
+is the whole trick.
 
 ## As A Drop-In Renderer
 
 The crate also builds as `libnsi_moonray.so`, exporting the ɴsɪ C entry
-points. `nsi-ffi-wrap` reaches a renderer by `dlopen` -- the library name
-and the environment variable that finds it are parameters of its
-`define_nsi_renderer!` macro, not constants -- so an ɴsɪ application can
-load MoonRay exactly where it loads 3Delight:
+points -- the same thirteen 3Delight exports, so it is loadable
+wherever 3Delight is. The [`nsi`](https://github.com/virtualritz/nsi)
+crate picks a renderer by name, at run time:
 
 ```rust
-nsi_ffi_wrap::define_nsi_renderer! {
-    name: MoonRay,
-    dynamic: {
-        linux: "libnsi_moonray.so",
-        macos: "libnsi_moonray.dylib",
-        windows: "nsi_moonray.dll",
-    },
-    env_var: "MOONRAY_NSI",
-    link_feature: "link_moonray",
-}
+let context = nsi::Context::new(Some(&[
+    nsi::string!("renderer", "moonray"),
+]));
 ```
+
+Two contexts in one process may name two different renderers. Without
+the argument, `$NSI_RENDERER` decides.
+
+`$NSI_MOONRAY` is where a host looks for this backend, the way
+`$DELIGHT` is where it looks for 3Delight: a prefix whose `lib` holds
+the library, or the directory the library is in, so a checkout's
+`target/release` works as-is. `packaging/env.sh` sets it, and a bundle
+is found without it.
+
+**Not `$MOONRAY_ROOT`,** which names DreamWorks' renderer. This is the
+ɴsɪ front end onto it, they are installed separately often enough, and
+one variable for both would make "which MoonRay is this" unanswerable.
+
+**Render an OSL scene with `-exec_mode scalar`** if you take a `.rdla`
+dump to the stock `moonray` binary. OSL shades one point at a time and
+has no vectorized path, and MoonRay's default mode skips what it
+cannot call, without a word. The linked and spawned renderers here
+force it; a dump cannot, so the flush says so.
 
 `NSIRenderControl "start"` builds the scene into a live renderer and
 starts a frame; with `"interactive"` it stays up, and `"synchronize"`
