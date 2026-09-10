@@ -39,14 +39,19 @@
 //! one at a time. ɴsɪ always returns an image, so an application that
 //! cannot have the fast path still gets its render.
 //!
+//! `"start"` with `"interactive"` returns while the frame converges,
+//! `"synchronize"` crosses an edit into the live scene, and `"stop"`
+//! drops the renderer -- which is also what frees MoonRay's global
+//! driver state for the next one. `"suspend"` and `"resume"` are
+//! deliberately unmapped: MoonRay's `stopFrame`/`startFrame` loses the
+//! samples taken so far, which is not what suspending means.
+//!
 //! # What this is not, yet
 //!
-//! Interactive. The frame is rendered to completion, so
-//! `"synchronize"`, `"suspend"` and `"resume"` still have nothing to
-//! act on -- applying an *edit* to a live scene is
-//! `specs/002-interactive-updates` `I1`-`I6`. The machinery it needs
-//! now exists: a live `SceneContext` to edit and a `RenderContext` to
-//! restart.
+//! `NSIEvaluate` does not run what it is given. It reports that
+//! everything a procedural, archive or delayed load would have created
+//! is missing from the render rather than wrong in it; running one
+//! needs a `Scene::merge` upstream.
 //!
 //! # Safety
 //!
