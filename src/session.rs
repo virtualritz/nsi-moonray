@@ -201,13 +201,57 @@ impl Session {
     /// render: it converges and then writes the files the scene names,
     /// through MoonRay's own output machinery.
     pub fn wait(&mut self) -> Option<Stopped> {
-        let driver = self
+        let driving: Vec<&str> = self
             .scene
             .nodes()
             .filter(|(_, node)| node.node_type() == "outputdriver")
-            .find_map(|(handle, _)| {
-                Some((handle, Callbacks::of(&self.scene, handle)?))
-            });
+            .filter(|(handle, _)| Callbacks::of(&self.scene, handle).is_some())
+            .map(|(handle, _)| handle)
+            .collect();
+
+        // **A viewport gets one driver and one RGBA layer.** The
+        // stream snapshots MoonRay's render buffer, which is beauty in
+        // four channels; a scene naming a second driver, or asking for
+        // depth or a lobe AOV live, gets neither and would otherwise
+        // get no message either -- a viewport that shows a picture is
+        // not obviously a viewport missing three passes.
+        if driving.len() > 1 {
+            eprintln!(
+                "nsi-moonray: {} output drivers carry callbacks and the \
+                 interactive stream feeds one, so {:?} receives pixels \
+                 and {} do not: {}",
+                driving.len(),
+                driving[0],
+                driving.len() - 1,
+                driving[1..]
+                    .iter()
+                    .map(|handle| format!("{handle:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        let layers = self
+            .scene
+            .nodes()
+            .filter(|(_, node)| node.node_type() == "outputlayer")
+            .count();
+        if !driving.is_empty() && layers > 1 {
+            eprintln!(
+                "nsi-moonray: the scene names {layers} output layers and \
+                 the interactive stream carries one RGBA beauty, so the \
+                 rest arrive only in a batch render"
+            );
+        }
+
+        let driver = driving.first().and_then(|handle| {
+            self.scene
+                .nodes()
+                .find(|(candidate, _)| candidate == handle)
+                .and_then(|(handle, _)| {
+                    Some((handle, Callbacks::of(&self.scene, handle)?))
+                })
+        });
 
         match driver {
             Some((handle, callbacks)) => {

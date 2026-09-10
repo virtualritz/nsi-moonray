@@ -539,7 +539,13 @@ pub fn flush_with(
             }
 
             "curves" => {
-                objects.push(curves(scene, handle, shutter, &mut flushed));
+                let shape = curves(scene, handle, shutter, &mut flushed);
+                let Some(shape) =
+                    placed(shape, scene, handle, purpose, &mut flushed)
+                else {
+                    continue;
+                };
+                objects.push(shape);
                 geometries.push(Reference::new(CURVES, handle));
                 bindings.push((
                     CURVES,
@@ -550,7 +556,13 @@ pub fn flush_with(
             }
 
             "particles" => {
-                objects.push(particles(scene, handle, shutter, &mut flushed));
+                let shape = particles(scene, handle, shutter, &mut flushed);
+                let Some(shape) =
+                    placed(shape, scene, handle, purpose, &mut flushed)
+                else {
+                    continue;
+                };
+                objects.push(shape);
                 geometries.push(Reference::new(POINTS, handle));
                 bindings.push((
                     POINTS,
@@ -561,7 +573,13 @@ pub fn flush_with(
             }
 
             "volume" => {
-                objects.push(volume(scene, handle, shutter, &mut flushed));
+                let shape = volume(scene, handle, shutter, &mut flushed);
+                let Some(shape) =
+                    placed(shape, scene, handle, purpose, &mut flushed)
+                else {
+                    continue;
+                };
+                objects.push(shape);
                 geometries.push(Reference::new(VOLUME, handle));
                 // A volume's row carries a *volume shader* rather than
                 // a material, and the two columns are not
@@ -643,7 +661,19 @@ pub fn flush_with(
             }
 
             // Resolved away upstream, or carried by another node.
-            "transform" | "attributes" | "screen" | "root" => {}
+            // Consumed somewhere other than this dispatch, so there
+            // is nothing to create *and* nothing to report. A `set` is
+            // flattened into an output layer's light set or read as a
+            // subsurface group; a `screen` gives the resolution and the
+            // screen window; an `attributes` node is dissolved into
+            // bindings upstream.
+            //
+            // **Reaching the catch-all was the bug.** A `set` used
+            // exactly as ɴsɪ's own light-layer workflow says came back
+            // as "no MoonRay mapping and was skipped" while its
+            // members were being carried, and a report that says the
+            // opposite of the truth costs more than no report.
+            "transform" | "attributes" | "screen" | "root" | "set" => {}
 
             "outputdriver" | "outputlayer" => {}
 
@@ -1048,6 +1078,29 @@ pub fn flush_with(
         )
         .set("image_width", Value::Int(resolution.0))
         .set("image_height", Value::Int(resolution.1));
+
+    // **An `.rdla` carrying OSL has to be rendered scalar.** MoonRay's
+    // default execution mode is `AUTO`, which picks vectorized, and
+    // neither an `Osl` material nor an `OslMap` has an ISPC entry
+    // point -- so the stock `moonray` binary renders a shader-less
+    // grey and a flat white light with no message from anywhere.
+    // Written up in `upstream/moonray-scalar-material-renders-black.md`.
+    //
+    // The linked and spawned renderers both force it. A *dumped*
+    // scene has no such protection, and `mnry cat` is a documented
+    // workflow, so the dump says what it needs.
+    if objects
+        .iter()
+        .any(|object| object.class.as_str().starts_with("Osl"))
+    {
+        flushed.limitations.push(
+            "this scene carries OSL, which shades one point at a time \
+             and has no vectorized path; render it with `-exec_mode \
+             scalar` or MoonRay's default picks vectorized, skips \
+             every OSL shader and light map, and says nothing"
+                .to_string(),
+        );
+    }
 
     // **Last, so it never shadows a specific report.** Everything the
     // flush looked at and could not carry has already said so in its
@@ -1747,6 +1800,35 @@ fn with_visibility(
 /// (`002` `research.md` F3).
 fn switched_off(object: Object) -> Object {
     object.set("on", Value::Bool(false))
+}
+/// A shape's ɴsɪ visibility, whether it is in the scene at all, and
+/// what to do when it is not.
+///
+/// **What the mesh arm does, for every other kind of shape.** Curves,
+/// particles and volumes went into the layer with no visibility flags
+/// and no detached check at all, so hiding a hair groom from camera
+/// left it visible and disconnecting a point cloud from `.root` still
+/// rendered it -- a plausible frame containing something the ɴsɪ scene
+/// says is not there, and no message from anywhere.
+///
+/// They are all `rdl2::Geometry` subclasses and carry the same nine
+/// flags off the base class, so there was never a reason for the mesh
+/// to be the only one that got them.
+/// `None` when the shape is out of the scene and nothing will put it
+/// back -- a batch has no second frame, so it is not worth carrying.
+/// An interactive host keeps it, hidden, so reconnecting it does not
+/// have to rebuild the shape.
+fn placed(
+    object: Object,
+    scene: &Scene,
+    handle: &str,
+    purpose: Purpose,
+    flushed: &mut Flushed,
+) -> Option<Object> {
+    if detached(scene, handle) {
+        return (purpose != Purpose::Batch).then(|| hidden(object));
+    }
+    Some(with_visibility(object, scene, handle, flushed))
 }
 
 /// Whether a node reaches `.root`, and so is in the scene at all.
@@ -7083,6 +7165,201 @@ mod tests {
             "{:?}",
             flushed.limitations
         );
+    }
+
+    /// **The catch-all must not cry wolf.**
+    ///
+    /// Node types the flush consumes somewhere other than the dispatch
+    /// -- an `outputlayer` read through `render_outputs`, a `set`
+    /// flattened into a light set -- would otherwise be reported as
+    /// having "no MoonRay mapping", which is the opposite of true. A
+    /// scene of the ordinary kind must produce no such line.
+    #[test]
+    fn a_consumed_node_type_is_not_reported_as_unmapped() {
+        let mut scene = triangle();
+
+        // A light, a set holding it, and an output layer restricted to
+        // that set -- the documented light-layer workflow, every node
+        // of which is consumed somewhere.
+        scene
+            .create("env", "environment")
+            .expect("a recordable edit");
+        scene.connect("env", None, ".root", "objects").unwrap();
+        scene.create("keys", "set").expect("a recordable edit");
+        scene.connect("env", None, "keys", "members").unwrap();
+        scene.connect("keys", None, "beauty", "lightset").unwrap();
+
+        let said = flush(&scene).limitations.join("\n");
+        assert!(
+            !said.contains("no MoonRay mapping"),
+            "a node type the flush consumes elsewhere must not be \
+             reported as unmapped\n{said}"
+        );
+    }
+
+    /// **Visibility reaches every kind of shape, not only meshes.**
+    ///
+    /// Curves, particles and volumes went into the layer with no
+    /// visibility flags and no detached check at all, so hiding a hair
+    /// groom from camera left it visible and disconnecting a point
+    /// cloud from `.root` still rendered it. They are all
+    /// `rdl2::Geometry` subclasses carrying the same nine flags off the
+    /// base class, so the mesh was never the only one that could have
+    /// them.
+    #[test]
+    fn visibility_reaches_curves_particles_and_volumes() {
+        let mut scene = triangle();
+
+        scene.create("hair", "curves").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "hair",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![2])),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+                    ),
+                    arg("width", Type::F32, OwnedData::F32(vec![0.1])),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("hair", None, ".root", "objects").unwrap();
+
+        scene
+            .create("dust", "particles")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(
+                "dust",
+                vec![
+                    arg("P", Type::Point, OwnedData::F32(vec![0.0, 0.0, 0.0])),
+                    arg("width", Type::F32, OwnedData::F32(vec![0.1])),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("dust", None, ".root", "objects").unwrap();
+
+        // Hidden from camera through an `attributes` node, which is
+        // the only way ɴsɪ says it.
+        for (shape, attributes) in [("hair", "hairattr"), ("dust", "dustattr")]
+        {
+            scene.create(attributes, "attributes").unwrap();
+            scene
+                .set_attribute(
+                    attributes,
+                    vec![arg(
+                        "visibility.camera",
+                        Type::I32,
+                        OwnedData::I32(vec![0]),
+                    )],
+                )
+                .expect("a recordable edit");
+            scene
+                .connect(attributes, None, shape, "geometryattributes")
+                .unwrap();
+        }
+
+        let rdla = flush(&scene).to_rdla();
+        for class in ["RdlCurveGeometry", "RdlPointGeometry"] {
+            let object = rdla
+                .split(&format!("{class}("))
+                .nth(1)
+                .and_then(|rest| rest.split("}\n").next())
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                object.contains("[\"visible_in_camera\"] = false"),
+                "{class} should be hidden from camera\n{object}"
+            );
+        }
+    }
+
+    /// A shape out of the scene is out of the *batch*, whatever kind of
+    /// shape it is.
+    #[test]
+    fn a_detached_curve_is_not_in_a_batch() {
+        let mut scene = triangle();
+        scene.create("hair", "curves").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "hair",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![2])),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+                    ),
+                    arg("width", Type::F32, OwnedData::F32(vec![0.1])),
+                ],
+            )
+            .expect("a recordable edit");
+        // Created, never connected to `.root`.
+
+        let batch =
+            flush_with(&scene, Purpose::Batch, Shading::default()).to_rdla();
+        assert!(
+            !batch.contains("RdlCurveGeometry"),
+            "a detached curve is not in a batch\n{batch}"
+        );
+
+        // Interactive keeps it, hidden, so reconnecting it does not
+        // have to rebuild the shape.
+        let live = flush_with(&scene, Purpose::Interactive, Shading::default())
+            .to_rdla();
+        assert!(live.contains("RdlCurveGeometry"), "{live}");
+        assert!(live.contains("[\"visible_in_camera\"] = false"), "{live}");
+    }
+
+    /// **A dumped OSL scene says it needs scalar mode.**
+    ///
+    /// MoonRay's default execution mode is `AUTO`, which picks
+    /// vectorized, and neither an `Osl` material nor an `OslMap` has an
+    /// ISPC entry point -- so the stock binary renders a shader-less
+    /// grey and a flat white light and prints nothing. The linked and
+    /// spawned renderers force scalar; a dump handed to `moonray`
+    /// cannot, and `mnry cat` is a documented workflow.
+    #[test]
+    fn an_osl_scene_says_it_needs_scalar_mode() {
+        let mut scene = triangle();
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("surf", "shader").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "surf",
+                vec![arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![
+                        b"/opt/3delight/osl/dlPrincipled.oso".to_vec(),
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("surf", None, "attr", "surfaceshader")
+            .unwrap();
+
+        let said = flush_with(&scene, Purpose::default(), Shading::Osl)
+            .limitations
+            .join("\n");
+        assert!(said.contains("exec_mode"), "{said}");
+        assert!(said.contains("scalar"), "{said}");
+
+        // A substituted scene carries no OSL and must not say it does:
+        // a warning that fires on every scene is a warning nobody
+        // reads.
+        let quiet = flush_with(&scene, Purpose::default(), Shading::Substitute)
+            .limitations
+            .join("\n");
+        assert!(!quiet.contains("exec_mode"), "{quiet}");
     }
 
     /// **A narrowed environment is a sun, and MoonRay has no cone.**
