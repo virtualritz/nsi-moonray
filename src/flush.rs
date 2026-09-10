@@ -5777,6 +5777,69 @@ mod tests {
         assert!(said.contains("matte"), "{said}");
     }
 
+    /// **An OSL shader's own parameters cross, so the sweep must not
+    /// call them dropped.**
+    ///
+    /// `CONSUMED` lists the two `shader` attributes the flush reads by
+    /// name, and under OSL every *other* attribute crosses too -- in
+    /// the group specification, which is the whole point of executing
+    /// the shader rather than recognising it. Without the exemption a
+    /// scene shading through OSL reported each of its own parameters
+    /// as silently dropped, which is not noise but a warning that says
+    /// the opposite of the truth.
+    #[test]
+    fn an_osl_shaders_parameters_are_not_reported_as_unread() {
+        let mut scene = triangle();
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene.create("surf", "shader").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "surf",
+                vec![
+                    arg(
+                        "shaderfilename",
+                        Type::String,
+                        OwnedData::String(vec![
+                            b"/opt/3delight/osl/dlPrincipled.oso".to_vec(),
+                        ]),
+                    ),
+                    // A parameter no table in this crate has heard of,
+                    // which is exactly the case that matters.
+                    arg("coat_gloss", Type::F32, OwnedData::F32(vec![0.4])),
+                ],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+        scene
+            .connect("surf", None, "attr", "surfaceshader")
+            .unwrap();
+
+        let osl = flush_with(&scene, Purpose::default(), Shading::Osl)
+            .limitations
+            .join("\n");
+        assert!(
+            !osl.contains("coat_gloss"),
+            "an OSL parameter crosses in the group specification and \
+             must not be reported unread\n{osl}"
+        );
+
+        // And the other way round: substituting *does* drop it, and
+        // the exemption must not reach that far.
+        let substituted =
+            flush_with(&scene, Purpose::default(), Shading::Substitute)
+                .limitations
+                .join("\n");
+        assert!(
+            substituted.contains("coat_gloss"),
+            "substitution drops the parameter and must say so\n\
+             {substituted}"
+        );
+    }
+
     /// A mesh's non-structural attributes are primitive variables and
     /// *do* cross, so the sweep must not cry wolf about them.
     #[test]
@@ -6696,6 +6759,60 @@ mod tests {
                 .any(|line| line.contains("cannot also wear a material")),
             "{:?}",
             flushed.limitations
+        );
+    }
+
+    /// **A mesh light is placed by its geometry, once.**
+    ///
+    /// The mesh carries the ɴsɪ transform and MoonRay composes the
+    /// light's own `node_xform` on top of the vertices it reads out of
+    /// it, so setting both puts the lamp at twice the translation. It
+    /// still renders -- black or blinding depending on where the
+    /// doubled transform happens to land -- and nothing anywhere says
+    /// a light moved, which is why this is asserted as text.
+    #[test]
+    fn a_mesh_light_is_not_transformed_twice() {
+        let mut scene = emissive("areaLight", &[]);
+
+        scene
+            .create("lampxf", "transform")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(
+                "lampxf",
+                vec![arg(
+                    "transformationmatrix",
+                    Type::MatrixF64,
+                    OwnedData::F64(vec![
+                        1.0, 0.0, 0.0, 0.0, //
+                        0.0, 1.0, 0.0, 0.0, //
+                        0.0, 0.0, 1.0, 0.0, //
+                        3.0, 0.0, -4.0, 1.0,
+                    ]),
+                )],
+            )
+            .expect("a recordable edit");
+        scene.disconnect("tri", None, ".root", "objects").unwrap();
+        scene.connect("lampxf", None, ".root", "objects").unwrap();
+        scene.connect("tri", None, "lampxf", "objects").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        // The mesh is placed.
+        assert!(
+            rdla.contains("RdlMeshGeometry(\"tri\") {\n    [\"node_xform\"]"),
+            "the geometry carries the transform\n{rdla}"
+        );
+
+        // The light is not placed again.
+        let light = rdla
+            .split("MeshLight(\"tri/light\") {")
+            .nth(1)
+            .and_then(|rest| rest.split("}\n").next())
+            .unwrap_or_default();
+        assert!(
+            !light.contains("node_xform"),
+            "a mesh light is placed by its geometry alone\n{light}"
         );
     }
 

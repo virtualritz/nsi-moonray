@@ -27,7 +27,7 @@
 //! - [`value`] — how rdl2 prints each attribute type.
 //! - [`document`] — the file: objects, sets and the `Layer` table.
 //!
-//! - [`flush`] — turning a [`nsi_intermediate::Scene`] into one of those
+//! - [`mod@flush`] — turning a [`nsi_intermediate::Scene`] into one of those
 //!   documents.
 //! - [`render`] — handing the result to MoonRay's own renderer binary,
 //!   which is the fallback path of the `mnry` command and what a build

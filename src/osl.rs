@@ -484,7 +484,7 @@ pub fn emits(scene: &Scene, handle: &str) -> Option<bool> {
 /// Whether the shader an ɴsɪ node names also *shades* -- that is,
 /// builds any closure besides emission.
 ///
-/// See [`shades_from_oso`] for why this decides the mapping.
+/// See `shades_from_oso` for why this decides the mapping.
 pub fn shades(scene: &Scene, handle: &str) -> Option<bool> {
     let path = oso_path(scene, handle)?;
     let source = std::fs::read_to_string(path).ok()?;
