@@ -748,6 +748,25 @@ pub unsafe extern "C" fn NSIRenderControl(
     let arguments = unsafe { arguments(params, nparams) };
     let action = argument_string(&arguments, "action").unwrap_or_default();
 
+    // **A callback nothing calls is worse than one nothing accepts.**
+    // ɴsɪ's `stoppedcallback` is how a host learns a render finished
+    // without polling, and a viewport that registered one and never
+    // hears back waits forever on a frame that is already done. It is
+    // not wired here, so say so once, at the call that would have
+    // armed it.
+    if arguments
+        .iter()
+        .any(|argument| argument.name == "stoppedcallback")
+    {
+        report(
+            ctx,
+            LEVEL_WARNING,
+            "\"stoppedcallback\" is not called by this backend; poll \
+             with \"action\" \"wait\" instead, or the callback will \
+             never arrive",
+        );
+    }
+
     #[cfg(all(feature = "rdl2", moonray))]
     {
         // ɴsɪ's own flag: a render that returns while it converges,

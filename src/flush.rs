@@ -2274,7 +2274,10 @@ const CONSUMED: &[(&str, &[&str])] = &[
             "disabledinstances",
         ],
     ),
-    ("environment", &[]),
+    // `angle` is read -- to report that MoonRay has no cone, in
+    // `environment`'s own words. Listed so the sweep does not say it a
+    // second time and less usefully.
+    ("environment", &["angle"]),
     (
         "perspectivecamera",
         &[
@@ -3569,6 +3572,29 @@ fn environment(
     let mut object = Object::new(ENVIRONMENT_LIGHT, handle);
 
     object = with_transform(object, scene, handle, shutter, flushed);
+
+    // **`angle` narrows the environment to a cone**, which is how ɴsɪ
+    // spells a sun: 360 is the whole sphere and anything less is a
+    // disc of that angular diameter. MoonRay's `EnvLight` has no cone
+    // -- `sample_upper_hemisphere_only` is the only restriction it
+    // offers, and its axis is the light's, not the cone's, so mapping
+    // 180 onto it would be right only when the two happen to agree.
+    //
+    // Not mapped, then, and said in its own words rather than left to
+    // the sweep: a sun rendering as a full sky is a plausible frame,
+    // and the difference is the whole look.
+    if let Some(angle) = scene
+        .node(handle)
+        .and_then(|node| scalar_of(node, "angle"))
+        .filter(|angle| (*angle - 360.0).abs() > 1e-3)
+    {
+        flushed.limitations.push(format!(
+            "{handle:?} (environment) restricts its light to a \
+             {angle}-degree cone, which MoonRay's {ENVIRONMENT_LIGHT} \
+             cannot express; it lights the scene from every direction \
+             instead, so a sun renders as a full sky"
+        ));
+    }
 
     let Some(shader) = scene
         .geometry_binding(handle)
@@ -7057,6 +7083,60 @@ mod tests {
             "{:?}",
             flushed.limitations
         );
+    }
+
+    /// **A narrowed environment is a sun, and MoonRay has no cone.**
+    ///
+    /// ɴsɪ's `environment.angle` is 360 for the whole sphere and less
+    /// for a disc of that angular diameter. `EnvLight` offers only
+    /// `sample_upper_hemisphere_only`, whose axis is the light's
+    /// rather than the cone's, so nothing is mapped -- and a sun
+    /// rendering as a full sky is a believable frame, which is exactly
+    /// when a report earns its keep.
+    #[test]
+    fn a_narrowed_environment_says_it_lost_its_cone() {
+        let mut scene = triangle();
+        scene
+            .create("env", "environment")
+            .expect("a recordable edit");
+        scene.connect("env", None, ".root", "objects").unwrap();
+        scene
+            .set_attribute(
+                "env",
+                vec![arg("angle", Type::F32, OwnedData::F32(vec![0.53]))],
+            )
+            .expect("a recordable edit");
+
+        let said = flush(&scene).limitations.join("\n");
+        assert!(said.contains("cone"), "{said}");
+        assert!(said.contains("full sky"), "{said}");
+        // Once, in its own words, rather than twice -- the second time
+        // as an anonymous "attribute this backend does not read".
+        assert_eq!(
+            said.matches("cone").count(),
+            1,
+            "the cone is reported once\n{said}"
+        );
+        assert!(
+            !said.contains("does not read"),
+            "and not a second time as an anonymous dropped \
+             attribute\n{said}"
+        );
+
+        // And the default sphere says nothing at all.
+        let mut whole = triangle();
+        whole
+            .create("env", "environment")
+            .expect("a recordable edit");
+        whole.connect("env", None, ".root", "objects").unwrap();
+        whole
+            .set_attribute(
+                "env",
+                vec![arg("angle", Type::F32, OwnedData::F32(vec![360.0]))],
+            )
+            .expect("a recordable edit");
+        let quiet = flush(&whole).limitations.join("\n");
+        assert!(!quiet.contains("cone"), "{quiet}");
     }
 
     /// **ɴsɪ light linking, which the interface has no attribute
