@@ -12,7 +12,7 @@ Feature specs live here. The active feature directory is
 | [003](003-osl/) | OSL under MoonRay | Delivered. Shading, displacement and lights run OSL through the root shaders in [`dso/osl/`](../dso/osl/); the substitution table is the fallback for a build without `$OSL_ROOT`. Open questions are at the end of its `research.md` |
 | [004](004-osl-intermediate/) | `osl-intermediate` | A sketch, for someone else to start from. Proposes the crate the 003 work kept wanting; nothing in this repository depends on it |
 | [005](005-packaging/) | Packaging | An install finds its own scene classes and `just bundle` assembles a relocatable tree; CI and a release workflow are written and unrun. Windows gets no renderer, and the spec says why |
-| [006](006-dcc-parity/) | DCC parity | A gap analysis, not a plan: what stands between this backend and replacing 3Delight in Houdini or Gaffer, ranked. The two cheapest fixes are an error handler and passing `NSIConnect`'s arguments through |
+| [006](006-dcc-parity/) | DCC parity | Written as a gap analysis, kept as a record: sixteen ranked blockers, twelve closed, three closed as far as this repository can close them and now loud rather than silent, one written but never driven through a real DCC viewport |
 
 ## Scope Of This Repository
 
