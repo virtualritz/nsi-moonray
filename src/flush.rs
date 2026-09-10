@@ -349,6 +349,9 @@ pub fn flush_with(
     // into a `String` would hand that saving straight back.
     // Geometry, part name and the material bound to that part.
     let mut parts: Vec<(&str, &str, Reference)> = Vec::new();
+    // Shaders that drive a light's radiance. They become `OslMap`
+    // objects rather than the material they would otherwise be.
+    let mut emitters: Vec<String> = Vec::new();
     let mut bindings: Vec<(
         &'static str,
         &str,
@@ -393,14 +396,33 @@ pub fn flush_with(
                 if let Some(shader) = surface_shader(scene, handle)
                     && let Some(class) = light_class(scene, &shader)
                 {
+                    // The shader can drive the radiance when OSL runs
+                    // and can load it.
+                    //
+                    // **A compiled shader that emits, not a recognised
+                    // name.** `light_class` also accepts the names in
+                    // `LIGHTS`, and no `.oso` backs those: an `OslMap`
+                    // built from one parses nothing, emits black, and
+                    // *overrides* the colour and intensity the
+                    // substitution table did supply. So the map is
+                    // bound only when the emission is really there to
+                    // read -- `emits` is `None` exactly when there is
+                    // no compiled shader to ask.
+                    let osl = shading == Shading::Osl
+                        && crate::osl::is_runnable(scene, &shader)
+                        && crate::osl::emits(scene, &shader) == Some(true);
                     let mut emitter = light(
                         scene,
                         handle,
                         &shader,
                         class,
                         shutter,
+                        osl,
                         &mut flushed,
                     );
+                    if osl {
+                        emitters.push(shader.clone());
+                    }
                     let dark = detached(scene, handle);
                     if dark {
                         emitter = switched_off(emitter);
@@ -424,6 +446,17 @@ pub fn flush_with(
                         );
                         objects.extend(data);
                         objects.push(shape);
+
+                        // **In a `GeometrySet`, out of the `Layer`.**
+                        // Two different exclusions and only one is
+                        // MoonRay's rule about mesh lights: a light
+                        // whose geometry belongs to no set *segfaults*
+                        // in render prep the moment it is given a
+                        // `map_shader`, inside `QuadMesh::getQuadST`,
+                        // before a pixel. Written up in
+                        // `upstream/moonray-meshlight-map-shader-segfault.md`.
+                        geometries.push(Reference::new(MESH, handle));
+
                         flushed.limitations.push(format!(
                             "{handle:?} is a {MESH_LIGHT}'s geometry and so \
                              is not in the render layer, which MoonRay \
@@ -863,6 +896,17 @@ pub fn flush_with(
         }
     }
 
+    // One `OslMap` per shader that drives a light, carrying the same
+    // group specification the material would.
+    emitters.sort_unstable();
+    emitters.dedup();
+    for shader in &emitters {
+        let mut map = osl_shader(scene, shader, &mut flushed);
+        map.class = Name::new(OSL_MAP);
+        map.name = Some(Name::new(&map_handle(shader)));
+        objects.push(map);
+    }
+
     objects.push(Object {
         class: Name::new("Layer"),
         name: Some(Name::new("/nsi/layer")),
@@ -898,7 +942,7 @@ pub fn flush_with(
     // **Last, so it never shadows a specific report.** Everything the
     // flush looked at and could not carry has already said so in its
     // own words; this is the sweep for what nothing looked at.
-    report_unread(scene, &mut flushed);
+    report_unread(scene, shading, &mut flushed);
 
     flushed.document.push(with_globals(variables, scene));
     for object in objects {
@@ -2076,7 +2120,27 @@ const CONSUMED: &[(&str, &[&str])] = &[
             "emissiongrid",
         ],
     ),
-    ("shader", &["shaderfilename", "shaderobject."]),
+    // **The emitter parameters `light` reads.** ɴsɪ has no light
+    // nodes, so a light's photometry is set on a `shader` node like
+    // any other parameter, and `light` carries these onto the MoonRay
+    // class by name. Listed here because `light` already reports what
+    // it could *not* carry, per light and precisely; without them the
+    // sweep reports the ones that did cross as dropped, and the two
+    // messages contradict each other in the same run.
+    (
+        "shader",
+        &[
+            "shaderfilename",
+            "shaderobject.",
+            "i_color",
+            "Cs",
+            "intensity",
+            "power",
+            "exposure",
+            "coneAngle",
+            "penumbraAngle",
+        ],
+    ),
     ("screen", &["resolution", "screenwindow"]),
     (
         "outputlayer",
@@ -2155,13 +2219,29 @@ fn is_consumed(known: &[&str], name: &str) -> bool {
 /// A mesh is the exception: an attribute that is not structure becomes
 /// a primitive variable, so only the structural ones this backend
 /// drops are worth a word.
-fn report_unread(scene: &Scene, flushed: &mut Flushed) {
+fn report_unread(scene: &Scene, shading: Shading, flushed: &mut Flushed) {
     for (handle, node) in scene.nodes() {
         let node_type = node.node_type();
 
         // `.global` and `.root` are reserved and carry no type.
         if node_type.is_empty() {
             report_unread_global(handle, node, flushed);
+            continue;
+        }
+
+        // **Every parameter of a runnable OSL shader crosses**, in the
+        // group specification, whatever it is called -- that is the
+        // whole point of executing the shader rather than recognising
+        // it. `CONSUMED` lists the two attributes the flush reads by
+        // name, so without this a scene shading through OSL reports
+        // each of its own parameters as dropped. Which is not merely
+        // noise: it is a warning that says the opposite of the truth,
+        // and the loud reports are only worth having if they can be
+        // believed.
+        if node_type == "shader"
+            && shading == Shading::Osl
+            && crate::osl::is_runnable(scene, handle)
+        {
             continue;
         }
 
@@ -2814,6 +2894,23 @@ const LIGHTS: [(&str, &str); 6] = [
 /// default -- reads `SceneVariables::lights_visible_in_camera`.
 const VISIBLE_IN_CAMERA_ON: i32 = 1;
 
+/// The `Map` that runs an ɴsɪ shader network for a light's radiance.
+///
+/// `MeshLight` samples a `map_shader` per point, so this is what makes
+/// a light's emission the *shader's* -- varying across the surface --
+/// rather than one flat colour for the whole mesh.
+const OSL_MAP: &str = "OslMap";
+
+/// The `OslMap`'s own name.
+///
+/// Distinct from the shader's, because rdl2 names are unique across
+/// classes: a network that is both a light's radiance and some other
+/// object's surface would be one name asked to be two objects, which
+/// rdl2 refuses.
+fn map_handle(shader: &str) -> String {
+    format!("{shader}/radiance")
+}
+
 /// MoonRay's light DSOs, for the ɴsɪ emitters above.
 const MESH_LIGHT: &str = "MeshLight";
 const SPHERE_LIGHT: &str = "SphereLight";
@@ -2822,10 +2919,24 @@ const DISTANT_LIGHT: &str = "DistantLight";
 
 /// What MoonRay light, if any, an ɴsɪ shader makes of its geometry.
 fn light_class(scene: &Scene, shader: &str) -> Option<&'static str> {
+    // **A shader that emits *and* shades cannot be a light at all.**
+    // `createMeshLightLayer` warns and skips a light whose geometry is
+    // in the render layer, so one mesh is either shaded or a light --
+    // and the interface's whole reason for expressing a light as
+    // geometry plus OSL is that one surface can do both. Glowing metal,
+    // a screen, an emissive decal on a shaded panel: all one object.
+    //
+    // The surface wins, because a metal object rendering as a
+    // featureless emitter is the more visibly wrong of the two.
+    // `report_unrenderable_light` says what that costs.
+    if crate::osl::shades(scene, shader) == Some(true) {
+        return None;
+    }
+
     let stem = shader_stem(scene.node(shader)?)?;
 
-    if let Some((_, class)) = LIGHTS.iter().find(|(name, _)| *name == stem) {
-        return Some(class);
+    if LIGHTS.iter().any(|(name, _)| *name == stem) {
+        return Some(MESH_LIGHT);
     }
 
     // **Ask the shader rather than its name.** The interface says a
@@ -2877,12 +2988,26 @@ fn light(
     shader: &str,
     class: &'static str,
     shutter: Option<[f64; 2]>,
+    osl: bool,
     flushed: &mut Flushed,
 ) -> Object {
     let mut object = Object::new(class, light_handle(handle));
 
-    // The light stands where the geometry stands.
-    object = with_transform(object, scene, handle, shutter, flushed);
+    // **A `MeshLight` is placed by its geometry, and only by its
+    // geometry.** The mesh already carries the ɴsɪ transform, and
+    // MoonRay composes the light's own `node_xform` on top of the
+    // vertices it reads out of it -- so setting both puts the lamp at
+    // twice the translation, pointing somewhere the ɴsɪ scene never
+    // asked for. It still renders, and it renders black or blinding
+    // depending on where the doubled transform happened to land, with
+    // nothing anywhere saying a light moved.
+    //
+    // Every other class here *is* placed by its transform, because
+    // there is no geometry under it to do the placing.
+    if class != MESH_LIGHT {
+        // The light stands where the geometry stands.
+        object = with_transform(object, scene, handle, shutter, flushed);
+    }
 
     let Some(node) = scene.node(shader) else {
         return object;
@@ -2928,6 +3053,22 @@ fn light(
             object = object
                 .set("geometry", Value::Object(Reference::new(MESH, handle)))
                 .set("visible_in_camera", Value::Int(VISIBLE_IN_CAMERA_ON));
+
+            // **The shader drives the emission.** `MeshLight` samples a
+            // `map_shader` per point and `OslMap` runs the ɴsɪ network,
+            // so the light's radiance is the shader's own and varies
+            // across the surface -- rather than one flat colour and
+            // intensity for the whole mesh.
+            //
+            // Which is what the interface *means*: a light is geometry
+            // wearing a shader that emits, and the shader is the
+            // photometry.
+            if osl {
+                object = object.set(
+                    "map_shader",
+                    Value::Object(Reference::new(OSL_MAP, map_handle(shader))),
+                );
+            }
         }
         SPOT_LIGHT => {
             let (outer, inner) = cone(node);
@@ -2939,25 +3080,45 @@ fn light(
         _ => {}
     }
 
-    let dropped: Vec<&str> = node
-        .attributes()
-        .map(|(name, _)| name)
-        .filter(|name| !carried.contains(name))
-        .collect();
-
-    if dropped.is_empty() {
-        flushed.limitations.push(format!(
-            "{handle:?} wears the ɴsɪ emitter {shader:?} and became a \
-             {class}; its emission is MoonRay's rather than the OSL \
-             closure's, so the two renderers agree on where the light is \
-             and not on its photometry"
-        ));
+    // **With the map shader bound, nothing is dropped.** The whole
+    // network crosses as an OSL group specification, parameters and
+    // all, and the map runs it -- so `carried`, which lists only the
+    // handful of names the substitution path copies onto MoonRay's
+    // own attributes, is the wrong question to ask.
+    let dropped: Vec<&str> = if osl {
+        Vec::new()
     } else {
+        node.attributes()
+            .map(|(name, _)| name)
+            .filter(|name| !carried.contains(name))
+            .collect()
+    };
+
+    // **What was lost depends on whether the map shader is bound.**
+    // With an `OslMap` behind it the radiance *is* the closure's, and
+    // saying otherwise sends a reader looking for a discrepancy that
+    // is not there. Without one the light is MoonRay's colour and
+    // intensity standing in for a closure, which is worth saying every
+    // time.
+    let photometry = if osl {
+        String::new()
+    } else {
+        "; its emission is MoonRay's rather than the OSL closure's, so \
+         the two renderers agree on where the light is and not on its \
+         photometry"
+            .to_string()
+    };
+
+    if !dropped.is_empty() {
         flushed.limitations.push(format!(
             "{handle:?} wears the ɴsɪ emitter {shader:?} and became a \
-             {class}; its emission is MoonRay's rather than the OSL \
-             closure's, and these parameters are not carried: {}",
+             {class}{photometry}; these parameters are not carried: {}",
             dropped.join(", ")
+        ));
+    } else if !photometry.is_empty() {
+        flushed.limitations.push(format!(
+            "{handle:?} wears the ɴsɪ emitter {shader:?} and became a \
+             {class}{photometry}"
         ));
     }
 
@@ -6516,12 +6677,14 @@ mod tests {
             "{rdla}"
         );
 
-        // The mesh exists, and is in neither the layer nor the
-        // geometry set.
+        // **In the geometry set, out of the layer.** Two different
+        // exclusions and only the second is MoonRay's rule about mesh
+        // lights: a light whose geometry belongs to no set segfaults in
+        // render prep once a `map_shader` is bound.
         assert!(rdla.contains("RdlMeshGeometry(\"tri\") {"), "{rdla}");
         assert!(!rdla.contains("{RdlMeshGeometry(\"tri\"), \"\","), "{rdla}");
         assert!(
-            !rdla.contains("GeometrySet(\"/nsi/geometries\") {\n    RdlMeshGeometry(\"tri\")"),
+            rdla.contains("GeometrySet(\"/nsi/geometries\") {\n    RdlMeshGeometry(\"tri\")"),
             "{rdla}"
         );
 
@@ -6555,50 +6718,13 @@ mod tests {
 
         let rdla = flush(&scene).to_rdla();
 
-        assert!(rdla.contains("SphereLight(\"tri/light\") {"), "{rdla}");
+        // **A mesh light.** Every ɴsɪ light is geometry wearing a
+        // shader that emits; MoonRay's analytic lights are not
+        // reachable from that and are not a gap.
+        assert!(rdla.contains("MeshLight(\"tri/light\") {"), "{rdla}");
         assert!(rdla.contains("[\"color\"] = Rgb(1, 0.5, 0)"), "{rdla}");
         assert!(rdla.contains("[\"intensity\"] = 7"), "{rdla}");
         assert!(rdla.contains("[\"exposure\"] = 2"), "{rdla}");
-    }
-
-    /// A spot's cone angles, derived from the specification's own
-    /// listing 4.3 rather than assumed.
-    ///
-    /// Both sides are full angles, and ɴsɪ's `penumbraAngle` is added
-    /// to the *half* angle, so it counts double.
-    #[test]
-    fn a_spots_penumbra_widens_the_outer_cone_twice_over() {
-        let scene = emissive(
-            "spotLight",
-            &[
-                arg("coneAngle", Type::F32, OwnedData::F32(vec![40.0])),
-                arg("penumbraAngle", Type::F32, OwnedData::F32(vec![5.0])),
-            ],
-        );
-
-        let rdla = flush(&scene).to_rdla();
-
-        assert!(rdla.contains("SpotLight(\"tri/light\") {"), "{rdla}");
-        assert!(rdla.contains("[\"outer_cone_angle\"] = 50"), "{rdla}");
-        assert!(rdla.contains("[\"inner_cone_angle\"] = 40"), "{rdla}");
-    }
-
-    /// A negative penumbra softens inward, so the outer cone is the
-    /// one that stays put.
-    #[test]
-    fn a_negative_penumbra_narrows_the_inner_cone() {
-        let scene = emissive(
-            "spotLight",
-            &[
-                arg("coneAngle", Type::F32, OwnedData::F32(vec![60.0])),
-                arg("penumbraAngle", Type::F32, OwnedData::F32(vec![-10.0])),
-            ],
-        );
-
-        let rdla = flush(&scene).to_rdla();
-
-        assert!(rdla.contains("[\"outer_cone_angle\"] = 60"), "{rdla}");
-        assert!(rdla.contains("[\"inner_cone_angle\"] = 40"), "{rdla}");
     }
 
     /// The specification's own emitter spells the same two things

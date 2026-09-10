@@ -95,7 +95,7 @@ impl fmt::Display for Value {
             Self::Long(value) => write!(f, "{value}"),
             Self::Float(value) => f.write_str(&float(*value)),
             Self::Double(value) => f.write_str(&double(*value)),
-            Self::String(value) => write!(f, "\"{value}\""),
+            Self::String(value) => write!(f, "\"{}\"", quoted(value)),
             Self::Rgb([r, g, b]) => {
                 write!(f, "Rgb({}, {}, {})", float(*r), float(*g), float(*b))
             }
@@ -139,6 +139,42 @@ impl fmt::Display for Value {
 }
 
 /// Write `Name(a, b, ...)` for a fixed-size tuple type.
+/// A string as an `.rdla` literal body, escaped.
+///
+/// **An `.rdla` is Lua**, and rdl2 reads it with a Lua interpreter. A
+/// short string literal there cannot span lines, so a value containing
+/// a newline writes a file that rdl2 then refuses to parse:
+///
+/// ```text
+/// RDLA Error: scene.rdla:41: unfinished string near '"param color ...
+/// ```
+///
+/// Which is exactly what an OSL group specification is -- one line per
+/// layer -- so every scene carrying a shader network wrote a dump that
+/// could not be read back. The dump is how a render is debugged, so it
+/// failing silently at the moment a scene gets interesting is the worst
+/// possible time.
+///
+/// Backslash first, or it would escape the escapes added after it.
+fn quoted(value: &str) -> std::borrow::Cow<'_, str> {
+    if !value.contains(['\\', '"', '\n', '\r', '\t']) {
+        return std::borrow::Cow::Borrowed(value);
+    }
+
+    let mut out = String::with_capacity(value.len() + 8);
+    for character in value.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 fn tuple<T: Copy>(
     f: &mut fmt::Formatter<'_>,
     name: &str,
@@ -305,6 +341,42 @@ mod tests {
         assert_eq!(
             value.to_string(),
             "bind(FakeMaterial(\"/oracle/source\"), \"pizza\")"
+        );
+    }
+}
+
+#[cfg(test)]
+mod quoting {
+    use super::*;
+
+    /// **An OSL group specification has a newline per layer**, and a
+    /// Lua short string cannot. Unescaped, the dump rdl2 wrote was one
+    /// rdl2 refused to read.
+    #[test]
+    fn a_newline_survives_the_round_trip() {
+        let spec = "shader a a ;\nshader b b ;\n";
+        assert_eq!(
+            Value::String(spec.to_string()).to_string(),
+            "\"shader a a ;\\nshader b b ;\\n\""
+        );
+    }
+
+    /// A path with a quote in it, and the backslash that would have
+    /// escaped the escape.
+    #[test]
+    fn a_quote_and_a_backslash_are_escaped() {
+        assert_eq!(
+            Value::String(r#"C:\a "b""#.to_string()).to_string(),
+            r#""C:\\a \"b\"""#
+        );
+    }
+
+    /// The common case allocates nothing, and reads identically.
+    #[test]
+    fn an_ordinary_string_is_unchanged() {
+        assert_eq!(
+            Value::String("beauty.exr".to_string()).to_string(),
+            "\"beauty.exr\""
         );
     }
 }

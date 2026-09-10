@@ -113,23 +113,24 @@ impl Render {
         threads: Option<u32>,
         mode: Mode,
     ) -> Option<Self> {
-        // **The `Osl` material lives with this crate, not with
-        // MoonRay**, so its directory has to be on the DSO path or a
-        // scene naming the class loads nothing. `build.rs` built it
-        // into `$OUT_DIR/rdl2dso` and recorded where; appending it
-        // here is what keeps a caller from having to know.
+        // **Classes that live with this crate rather than with
+        // MoonRay** have to be on the DSO path, or a scene naming one
+        // loads nothing. `build.rs` builds them into `$OUT_DIR/rdl2dso`
+        // and records where; appending it here keeps a caller from
+        // having to know.
+        //
+        // Two of them, and the second is *not* conditional on OSL: the
+        // `DwaBaseMaterial` stand-in is what lets any scene with a
+        // light render at all, because
+        // `RenderContext::createMeshLightLayer` creates one for every
+        // mesh light's geometry and MoonRay does not ship the class.
         let path = dso_path.map(|path| {
-            #[cfg(osl)]
-            {
-                let ours = env!("NSI_MOONRAY_OSL_DSO");
-                if path.is_empty() {
-                    ours.to_owned()
-                } else {
-                    format!("{path}:{ours}")
-                }
+            let ours = env!("NSI_MOONRAY_MESHLIGHT_DSO");
+            if path.is_empty() {
+                ours.to_owned()
+            } else {
+                format!("{path}:{ours}")
             }
-            #[cfg(not(osl))]
-            path.to_owned()
         });
         let path = path.and_then(|path| CString::new(path).ok());
         let pointer = path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());

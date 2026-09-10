@@ -125,7 +125,53 @@ fn main() {
         println!("cargo::rustc-link-lib=dylib=tbb");
         println!("cargo::rustc-link-arg=-Wl,-rpath,{moonray}/lib");
 
+        build_meshlight_dso(moonray);
         build_osl_dso(moonray);
+    }
+}
+
+/// Build the `DwaBaseMaterial` stand-in.
+///
+/// **Not optional, and not OSL's.** `MeshLight` is how an emissive
+/// object lights a scene at all, and
+/// `RenderContext::createMeshLightLayer` creates a `DwaBaseMaterial`
+/// for every mesh light's geometry -- a class that ships with
+/// `moonshine_dwa` rather than with MoonRay. Without it, *any* scene
+/// containing a mesh light fails render prep with
+///
+/// ```text
+/// Error: Couldn't find DSO for 'DwaBaseMaterial' in search path ...
+/// ```
+///
+/// and `startFrame` returns cancelled, so a host sees a frame that did
+/// not start and nothing says a light was the reason. Written up in
+/// `upstream/moonray-meshlight-needs-moonshine-dwa.md`.
+///
+/// The stand-in was in this repository and nothing built it, so every
+/// ɴsɪ light was one render-prep failure away from working.
+fn build_meshlight_dso(moonray: &str) {
+    println!("cargo::rerun-if-changed=dso/meshlight/DwaBaseMaterial.cc");
+    println!("cargo::rerun-if-changed=dso/meshlight/attributes.cc");
+    println!("cargo::rerun-if-changed=dso/meshlight/build.sh");
+
+    let out = std::env::var("OUT_DIR").expect("cargo sets OUT_DIR");
+    let dso = format!("{out}/rdl2dso");
+
+    let status = std::process::Command::new("sh")
+        .arg("dso/meshlight/build.sh")
+        .arg(moonray)
+        .arg(&dso)
+        .status();
+
+    match status {
+        Ok(status) if status.success() => {
+            println!("cargo::rustc-env=NSI_MOONRAY_MESHLIGHT_DSO={dso}");
+        }
+        Ok(status) => panic!(
+            "dso/meshlight/build.sh failed ({status}); without \
+             `DwaBaseMaterial` no scene with a light renders"
+        ),
+        Err(error) => panic!("running dso/meshlight/build.sh: {error}"),
     }
 }
 

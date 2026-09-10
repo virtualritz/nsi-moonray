@@ -750,16 +750,19 @@ fn the_frame_matches_3delights_framing() {
 /// **`T1.7a`.** An ɴsɪ light lights the scene.
 ///
 /// ɴsɪ has no light nodes: geometry wearing an emitter *is* the light
-/// (specification 4.5), and `LIGHTS` recognises the emitter by name.
-/// The mapping is asserted as text in `flush::tests`; this is the part
-/// text cannot reach -- a light that never reaches MoonRay's light set
-/// emits a perfectly correct scene and renders black.
+/// (specification 4.5), and every one of them crosses as a MoonRay
+/// `MeshLight`. The mapping is asserted as text in `flush::tests`;
+/// this is the part text cannot reach -- a light that never reaches
+/// MoonRay's light set emits a perfectly correct scene and renders
+/// black.
 ///
-/// A `pointLight` rather than an `areaLight` because the two differ
-/// only in which row of `LIGHTS` matches, and MoonRay's `MeshLight`
-/// pulls in a `DwaBaseMaterial` that ships with `moonshine_dwa` rather
-/// than with `moonray` (`research.md` F12), which this build does not
-/// have.
+/// **The lamp's winding is the test.** A `MeshLight` emits from the
+/// front of its faces only, so a triangle wound the other way is a
+/// light that is present, sampled, and contributes nothing -- and
+/// nothing anywhere says so. An earlier version of this test had the
+/// triangle facing the camera rather than the quad, rendered black,
+/// and was read here as MoonRay's mesh lights being broken. They are
+/// not.
 ///
 /// The scene's own environment is disconnected, so the only thing that
 /// can light the quad is the lamp beside it.
@@ -804,7 +807,12 @@ fn a_light_shader_lights_the_scene() {
         "lamp",
         vec![
             arg("nvertices", Type::I32, OwnedData::I32(vec![3])),
-            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2])),
+            // **Wound to face the quad**, at -z. The vertices in
+            // order give a normal at +z, back towards the camera, so
+            // the indices reverse the last two: a `MeshLight` emits
+            // from the front of a face and a lamp facing away is a
+            // silent black frame.
+            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 2, 1])),
             arg(
                 "P",
                 Type::Point,
@@ -817,6 +825,12 @@ fn a_light_shader_lights_the_scene() {
     .unwrap();
     nsi.connect("lamp", None, "lampxf", "objects").unwrap();
 
+    // **A recognised emitter name rather than a compiled shader**, so
+    // that this test runs on a build without `$OSL_ROOT` too. The
+    // substitution table gives the `MeshLight` a flat colour and
+    // intensity; `an_osl_emitter_lights_the_scene` is the same scene
+    // with a real emission closure behind it, and asserts the part a
+    // flat colour cannot -- that the light's look is the shader's.
     nsi.create("lampattr", "attributes").unwrap();
     nsi.create("emit", "shader").unwrap();
     nsi.set_attribute(
@@ -856,6 +870,156 @@ fn a_light_shader_lights_the_scene() {
         right > left * 1.1,
         "the side facing the lamp should be brighter: left {left}, \
          right {right}"
+    );
+}
+
+/// **`T1.7b`.** An ɴsɪ light's *look* is its shader's.
+///
+/// The half `a_light_shader_lights_the_scene` cannot reach. There the
+/// emitter is a name out of the substitution table and MoonRay supplies
+/// the photometry, so a passing test proves only that a light is in the
+/// light set. Here the emitter is a compiled `.oso` that builds an
+/// `emission()` closure, the `MeshLight` samples it through an
+/// `OslMap`, and the colour on the quad can only have come from the
+/// shader -- which is what specification 4.5 actually asks for.
+///
+/// The tint is far off grey in a direction nothing else in the scene
+/// is, so a `MeshLight` falling back to its own white default fails
+/// rather than passes.
+#[cfg(osl)]
+#[test]
+fn an_osl_emitter_lights_the_scene() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = scratch("nsi-moonray-osl-emitter");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("amber.osl");
+    // **`emission()` and nothing else.** A shader that also built a
+    // `diffuse()` would be a surface that happens to glow, which this
+    // backend deliberately keeps as a surface -- see `light_class`.
+    std::fs::write(
+        &source,
+        "surface amber(color tint = color(1, 1, 1), float gain = 1)\n\
+         {\n    Ci = tint * gain * emission();\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("amber.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let (width, height) = (64usize, 48usize);
+    let mut nsi = scene(width as i32, height as i32);
+
+    nsi.disconnect("light", None, ".root", "objects").unwrap();
+
+    nsi.create("lampxf", "transform").unwrap();
+    nsi.set_attribute(
+        "lampxf",
+        vec![arg(
+            "transformationmatrix",
+            Type::MatrixF64,
+            OwnedData::F64(vec![
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                2.0, 0.0, -4.0, 1.0,
+            ]),
+        )],
+    )
+    .unwrap();
+    nsi.connect("lampxf", None, ".root", "objects").unwrap();
+
+    // A lamp with area, rather than the epsilon triangle the point
+    // light uses: a `MeshLight`'s radiance is per unit area, and an
+    // epsilon one needs an intensity large enough to hide arithmetic
+    // this test is trying to read.
+    nsi.create("lamp", "mesh").unwrap();
+    nsi.set_attribute(
+        "lamp",
+        vec![
+            arg("nvertices", Type::I32, OwnedData::I32(vec![3])),
+            // Wound to face the quad, at -z. See the note in
+            // `a_light_shader_lights_the_scene`.
+            arg("P.indices", Type::I32, OwnedData::I32(vec![0, 2, 1])),
+            arg(
+                "P",
+                Type::Point,
+                OwnedData::F32(vec![
+                    0.0, -0.5, 0.0, 1.0, -0.5, 0.0, 0.0, 0.5, 0.0,
+                ]),
+            ),
+        ],
+    )
+    .unwrap();
+    nsi.connect("lamp", None, "lampxf", "objects").unwrap();
+
+    nsi.create("lampattr", "attributes").unwrap();
+    nsi.create("amber", "shader").unwrap();
+    nsi.set_attribute(
+        "amber",
+        vec![
+            arg(
+                "shaderfilename",
+                Type::String,
+                OwnedData::String(vec![
+                    directory
+                        .join("amber.oso")
+                        .to_string_lossy()
+                        .into_owned()
+                        .into_bytes(),
+                ]),
+            ),
+            arg("tint", Type::Color, OwnedData::F32(vec![1.0, 0.25, 0.02])),
+            arg("gain", Type::F32, OwnedData::F32(vec![30.0])),
+        ],
+    )
+    .unwrap();
+    nsi.connect("lampattr", None, "lamp", "geometryattributes")
+        .unwrap();
+    nsi.connect("amber", None, "lampattr", "surfaceshader")
+        .unwrap();
+
+    let mut session = Session::new(nsi, &dso).expect("a render");
+    session.wait();
+    let pixels = session.render().snapshot().expect("a frame").2;
+
+    // A row through the middle of the quad, on the side facing the
+    // lamp, away from the lamp's own footprint in the frame.
+    let centre = ((height / 2) * width + width * 9 / 16) * 4;
+    let (red, green, blue) =
+        (pixels[centre], pixels[centre + 1], pixels[centre + 2]);
+
+    assert!(
+        red > 0.0,
+        "the OSL emitter should light the quad: {red} {green} {blue}"
+    );
+    // `tint` is 1, 0.25, 0.02: red dominant, blue almost absent. A
+    // `MeshLight` emitting its own white default would be neutral and
+    // fail both.
+    assert!(
+        red > green * 2.0,
+        "red should dominate green, as `tint` says: {red} {green} {blue}"
+    );
+    assert!(
+        green > blue * 2.0,
+        "green should dominate blue, as `tint` says: {red} {green} {blue}"
     );
 }
 

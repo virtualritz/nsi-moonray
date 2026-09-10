@@ -1,8 +1,8 @@
 <!--
 Ready to file at https://github.com/OpenMoonRay/moonray/issues/new
 
-Title: A Material without a vectorized shade function renders black in
-       vectorized mode, silently
+Title: A Material or Map without a vectorized entry point is silently
+       skipped in vectorized mode
 
 Not filed from here: this session's GitHub access is scoped to
 `virtualritz`, and the MoonRay repository is on another tier.
@@ -12,7 +12,7 @@ by running it -- see `specs/003-osl/research.md` O1, and
 `tools/scalar-material/` for the probe.
 -->
 
-# A `Material` with no vectorized shade renders black, silently
+# A `Material` or `Map` with no vectorized entry point is skipped, silently
 
 ## Summary
 
@@ -113,6 +113,46 @@ MaterialX's reference implementation, and so does any interpreter. A
 material class that calls into one has no ISPC function to offer, and
 this is the first thing it hits.
 
+## The same hole in `Map`, and it is worse
+
+`rdl2::Map` has the same pair -- `mSampleFunc` and `mSampleFuncv` --
+and the same asymmetry. A scalar-only `Map` bound to a `MeshLight`'s
+`map_shader` is not rejected in vectorized mode; the light simply
+falls back to its own `color` times `intensity`.
+
+That is worse than the material case, because the fallback is not
+black. It is a **plausible image of the wrong light**. A mesh light
+whose radiance is an OSL closure -- a tinted screen, a gradient, a
+texture -- renders as a flat white lamp in the right place at roughly
+the right brightness, and nothing about the frame says a shader was
+skipped.
+
+Reproduced with the same scene twice, differing only in the mode. The
+map returns the shader's `tint` of `(1, 0.25, 0.02)`:
+
+```
+$ moonray -in emitter.rdla -exec_mode scalar -out scalar.exr
+$ moonray -in emitter.rdla -exec_mode vectorized -out vector.exr
+$ oiiotool --stats scalar.exr | grep 'Stats Max'
+    Stats Max: 707.222107 176.805527 14.144444 1.000000 (float)
+$ oiiotool --stats vector.exr | grep 'Stats Max'
+    Stats Max: 23.540888 23.540888 23.540888 1.000000 (float)
+```
+
+The scalar run is the tint exactly: `707 : 177 : 14` is `1 : 0.25 :
+0.02`. The vectorized run is neutral grey, and does not move when the
+shader's parameters are changed -- editing `tint` to pure green or
+raising `gain` tenfold leaves the image identical to five decimal
+places, which is how this was identified at all.
+
+`MeshLight::eval` reaches the map through `sampleMapShader`, which
+calls `map->sample(...)` -- the scalar entry point -- so the C++ path
+is correct. The vectorized integrator takes another route and finds
+nothing to call.
+
+Whatever `canRunVectorized` grows for materials should cover the maps
+reachable from a light in the same walk.
+
 ## Suggested fixes, in order of preference
 
 1. **Have `canRunVectorized` ask.** Walk the layer's materials and
@@ -132,6 +172,7 @@ a black image and no message.
 
 ## Workaround here
 
-`nsi-moonray` will force `RenderOptions::setDesiredExecutionMode("scalar")`
-whenever a scene carries an OSL material, and report that it did so --
-the render is slower and correct rather than fast and black.
+`nsi-moonray` forces `RenderOptions::setDesiredExecutionMode("scalar")`
+whenever the build carries OSL at all -- materials and light maps
+alike, since both are the same shading system -- and reports that it
+did so. The render is slower and correct rather than fast and wrong.

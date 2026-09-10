@@ -397,32 +397,76 @@ fn open(scene: &Scene, handle: &str) -> Option<OslQuery> {
 /// dark and visible, which looks like what it is; a mesh wrongly
 /// promoted to a light leaves the render layer and **disappears from
 /// the frame**, so a false positive is much the worse mistake.
-fn emits_from_oso(source: &str) -> bool {
-    let mut emission_constants = Vec::new();
-
+fn closures_of_oso(source: &str) -> Vec<String> {
+    // `const  string  $const1  "emission"` -- the closure's name, held
+    // as a string constant.
+    let mut constants: Vec<(&str, &str)> = Vec::new();
     for line in source.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        // `const  string  $const1  "emission"`
         if fields.len() >= 4
             && fields[0] == "const"
             && fields[1] == "string"
-            && fields[3] == "\"emission\""
+            && fields[3].starts_with('"')
+            && fields[3].ends_with('"')
         {
-            emission_constants.push(fields[2]);
+            constants.push((fields[2], fields[3].trim_matches('"')));
         }
     }
 
-    if emission_constants.is_empty() {
-        return false;
+    // `closure  $tmp1 $const1` -- the instruction that builds one.
+    let mut built = Vec::new();
+    for line in source.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.first() != Some(&"closure") {
+            continue;
+        }
+        for field in &fields {
+            if let Some((_, name)) =
+                constants.iter().find(|(constant, _)| constant == field)
+            {
+                built.push((*name).to_owned());
+            }
+        }
     }
 
-    source.lines().any(|line| {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        fields.first() == Some(&"closure")
-            && fields
-                .iter()
-                .any(|field| emission_constants.contains(field))
-    })
+    built.sort_unstable();
+    built.dedup();
+    built
+}
+
+/// Whether a compiled shader builds an `emission()` closure.
+fn emits_from_oso(source: &str) -> bool {
+    closures_of_oso(source)
+        .iter()
+        .any(|name| name == "emission")
+}
+
+/// Whether a compiled shader builds anything *besides* emission.
+///
+/// **This is what decides whether a light can also be a surface**, and
+/// MoonRay's answer is that it cannot. `RenderContext::createMeshLightLayer`
+/// warns and skips the light outright when its geometry is in the
+/// render layer:
+///
+/// ```text
+/// "..." cannot be referenced in a MeshLight when it is in
+/// "Layer(...)". Please use a different geometry.
+/// ```
+///
+/// So a shader that is ninety percent metal with emissive patches has
+/// no faithful mapping: as a light it loses the metal, and as a surface
+/// its glow is hit-only and lights nothing. Duplicating the geometry
+/// does not rescue it either -- the material's own emission and the
+/// light's sampled emission would both contribute and the glow would
+/// count twice.
+///
+/// The surface is kept, because a metal object rendering as a
+/// featureless emitter is the more visibly wrong of the two, and the
+/// loss is reported.
+fn shades_from_oso(source: &str) -> bool {
+    closures_of_oso(source)
+        .iter()
+        .any(|name| name != "emission")
 }
 
 /// Whether the shader an ɴsɪ node names emits.
@@ -435,6 +479,16 @@ pub fn emits(scene: &Scene, handle: &str) -> Option<bool> {
     let path = oso_path(scene, handle)?;
     let source = std::fs::read_to_string(path).ok()?;
     Some(emits_from_oso(&source))
+}
+
+/// Whether the shader an ɴsɪ node names also *shades* -- that is,
+/// builds any closure besides emission.
+///
+/// See [`shades_from_oso`] for why this decides the mapping.
+pub fn shades(scene: &Scene, handle: &str) -> Option<bool> {
+    let path = oso_path(scene, handle)?;
+    let source = std::fs::read_to_string(path).ok()?;
+    Some(shades_from_oso(&source))
 }
 
 /// Where the compiled shader actually is.

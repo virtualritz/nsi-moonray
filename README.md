@@ -42,6 +42,50 @@ shaders are a table read off 3Delight's own compiled `.oso` files
 rather than guessed at; anything else is reported by name. A
 displacement has no such substitute and is reported instead.
 
+### Why OSL all the way, and not a table of names
+
+**A light is the clearest case.** ɴsɪ has no light nodes at all:
+section 4.5 says a light is geometry whose surface shader produces an
+`emission()` closure. That is not an accident of the specification --
+it is what lets *one* surface emit and reflect at once. A screen, a
+glowing filament in a metal housing, an emissive decal on a shaded
+panel: all one object, and the shader decides which parts of it glow.
+
+A renderer that recognises lights by shader *name* cannot express any
+of that. It infers a light type from a name, throws the shader away,
+and the object becomes a light *or* a surface.
+
+**This backend executes the shader instead.** Every ɴsɪ emitter becomes
+a MoonRay `MeshLight` -- the one class that takes arbitrary geometry --
+and its radiance comes from an `OslMap` running the ɴsɪ network itself.
+The light's colour, its intensity and how both vary across its own
+surface are the closure's, sampled per point, rather than a flat value
+a name table guessed at. MoonRay's analytic light classes are not
+reachable from ɴsɪ and are not meant to be: there is no ɴsɪ node that
+would name one.
+
+The name table survives only as a fallback for a build without OSL, and
+only when no compiled `.oso` can be found behind the shader. Then
+MoonRay supplies the photometry, the light is in the right place with
+the wrong look, and the flush says so.
+
+One gap remains, and it is the one the specification is written to
+allow:
+
+- A shader that emits *and* shades has **no** faithful mapping.
+  `RenderContext::createMeshLightLayer` skips a light whose geometry is
+  in the render layer, so one mesh is either shaded or a light. The
+  surface is kept -- a metal object rendering as a featureless emitter
+  is the more visibly wrong of the two -- and its emission becomes
+  hit-only, lighting nothing but itself. A masked emissive decal on a
+  metal panel is exactly this case, and exactly what ɴsɪ's model was
+  designed to express.
+
+So the whole shading surface now goes the same way: surfaces,
+displacement, volumes and lights all cross as OSL group specifications
+and MoonRay runs them. What a shader *does* is answered by executing
+it, not by recognising what it is called.
+
 ## `mnry`
 
 ```bash
