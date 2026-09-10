@@ -427,7 +427,10 @@ pub fn flush_with(
                     if dark {
                         emitter = switched_off(emitter);
                     }
-                    lights.push(Reference::new(class, light_handle(handle)));
+                    lights.push((
+                        handle.to_string(),
+                        Reference::new(class, light_handle(handle)),
+                    ));
 
                     if class == MESH_LIGHT && !dark {
                         // A `MeshLight` reads its shape from a
@@ -605,7 +608,10 @@ pub fn flush_with(
                 } else {
                     objects.push(light);
                 }
-                lights.push(Reference::new(ENVIRONMENT_LIGHT, handle));
+                lights.push((
+                    handle.to_string(),
+                    Reference::new(ENVIRONMENT_LIGHT, handle),
+                ));
             }
 
             "instances" => {
@@ -777,6 +783,14 @@ pub fn flush_with(
         ));
     }
 
+    // ɴsɪ's §4.8 inter-object visibility, which is how the interface
+    // spells light linking -- it has no attribute for it.
+    let named: HashSet<&str> =
+        lights.iter().map(|(handle, _)| handle.as_str()).collect();
+    let linked = linking(scene, &named, &mut flushed);
+    let all: Vec<Reference> =
+        lights.iter().map(|(_, light)| light.clone()).collect();
+
     let light_set = if lights.is_empty() {
         // Nothing lights the scene. Say so: a correct scene that
         // renders black looks like a bug in this backend, and this is
@@ -792,9 +806,81 @@ pub fn flush_with(
         objects.push(Object {
             class: Name::new("LightSet"),
             name: Some(Name::new(LIGHT_SET)),
-            body: Body::Set(lights),
+            body: Body::Set(all.clone()),
         });
         Some(Reference::new("LightSet", LIGHT_SET))
+    };
+
+    // **A linked row gets a set of its own.** MoonRay reads these per
+    // assignment, so the exclusion is spelled by naming a different
+    // set on that row rather than by any flag: a `LightSet` is the
+    // lights that *do* light the geometry, so it is built by
+    // subtraction, while a `ShadowSet` and a `ShadowReceiverSet` are
+    // what is excluded and are built by collection.
+    let mut linked_sets: Vec<Object> = Vec::new();
+    let mut light_set_of = |handle: &str| -> Option<Reference> {
+        let Some(excluded) = linked.unlit.get(handle) else {
+            return light_set.clone();
+        };
+        let kept: Vec<Reference> = lights
+            .iter()
+            .filter(|(light, _)| !excluded.contains(light))
+            .map(|(_, light)| light.clone())
+            .collect();
+        let name = format!("{LIGHT_SET}/{handle}");
+        linked_sets.push(Object {
+            class: Name::new("LightSet"),
+            name: Some(Name::new(&name)),
+            body: Body::Set(kept),
+        });
+        Some(Reference::new("LightSet", name))
+    };
+
+    // The two shadow columns collect what is excluded rather than what
+    // is kept -- `ShadowLinking::canCastShadow` and `canReceiveShadow`
+    // both answer yes for anything *absent* from the set -- so unlike
+    // the light set these are built from the exclusions directly, and
+    // a geometry with none gets `undef()`.
+    let mut shadow_sets: Vec<Object> = Vec::new();
+    let mut shadow_set_of = |handle: &str| -> Option<Reference> {
+        let excluded = linked.unshadowed.get(handle)?;
+        let members: Vec<Reference> = lights
+            .iter()
+            .filter(|(light, _)| excluded.contains(light))
+            .map(|(_, light)| light.clone())
+            .collect();
+        let name = format!("/nsi/shadows/{handle}");
+        shadow_sets.push(Object {
+            class: Name::new(SHADOW_SET),
+            name: Some(Name::new(&name)),
+            body: Body::Set(members),
+        });
+        Some(Reference::new(SHADOW_SET, name))
+    };
+
+    // Every shape in the layer, as the receivers a shadow could be
+    // cast onto.
+    let receivers: Vec<(String, Reference)> = bindings
+        .iter()
+        .map(|(class, handle, _, _)| {
+            ((*handle).to_string(), Reference::new(*class, *handle))
+        })
+        .collect();
+    let mut receiver_sets: Vec<Object> = Vec::new();
+    let mut shadow_receiver_set_of = |handle: &str| -> Option<Reference> {
+        let excluded = linked.unreceived.get(handle)?;
+        let members: Vec<Reference> = receivers
+            .iter()
+            .filter(|(shape, _)| excluded.contains(shape))
+            .map(|(_, shape)| shape.clone())
+            .collect();
+        let name = format!("/nsi/shadowreceivers/{handle}");
+        receiver_sets.push(Object {
+            class: Name::new(SHADOW_RECEIVER_SET),
+            name: Some(Name::new(&name)),
+            body: Body::Set(members),
+        });
+        Some(Reference::new(SHADOW_RECEIVER_SET, name))
     };
 
     let mut unshaded = 0;
@@ -816,7 +902,7 @@ pub fn flush_with(
                     ..Assignment::new(
                         Reference::new(class, handle),
                         None,
-                        light_set.clone(),
+                        light_set_of(handle),
                     )
                 };
             }
@@ -828,10 +914,12 @@ pub fn flush_with(
 
             Assignment {
                 displacement,
+                shadow_set: shadow_set_of(handle),
+                shadow_receiver_set: shadow_receiver_set_of(handle),
                 ..Assignment::new(
                     Reference::new(class, handle),
                     Some(material),
-                    light_set.clone(),
+                    light_set_of(handle),
                 )
             }
         })
@@ -847,9 +935,31 @@ pub fn flush_with(
             ..Assignment::new(
                 Reference::new(MESH, geometry),
                 Some(material),
-                light_set.clone(),
+                light_set_of(geometry),
             )
         });
+    }
+
+    // The per-row sets, after the rows that name them are built --
+    // the closures fill these as they go, so they cannot be pushed
+    // any earlier.
+    let linked_count =
+        linked_sets.len() + shadow_sets.len() + receiver_sets.len();
+    objects.extend(linked_sets);
+    objects.extend(shadow_sets);
+    objects.extend(receiver_sets);
+
+    if linked_count > 0 {
+        flushed.limitations.push(format!(
+            "ɴsɪ inter-object visibility (§4.8) linked {linked_count} \
+             row(s) of the layer: {} light set(s), {} shadow set(s) and \
+             {} shadow receiver set(s). MoonRay calls this artistic \
+             control and it is not physically correct, so a render that \
+             differs from an unlinked one is doing what was asked",
+            linked.unlit.len(),
+            linked.unshadowed.len(),
+            linked.unreceived.len()
+        ));
     }
 
     if volumes_shaded {
@@ -2964,6 +3074,193 @@ fn surface_shader(scene: &Scene, handle: &str) -> Option<String> {
         .ok()
         .flatten()
         .and_then(|binding| binding.surface_shader)
+}
+/// MoonRay's per-assignment light set, shadow set and shadow receiver
+/// set -- the three `Layer` columns ɴsɪ's inter-object visibility maps
+/// onto.
+const SHADOW_SET: &str = "ShadowSet";
+const SHADOW_RECEIVER_SET: &str = "ShadowReceiverSet";
+
+/// What ɴsɪ's §4.8 inter-object visibility says about lights.
+///
+/// **ɴsɪ has no light-linking attribute**, and that is deliberate:
+/// §4.5 says light linking is "done using more general approaches (see
+/// section 4.8)". §4.8 is a cross-hierarchy connection -- the
+/// *receiver's* `attributes` node connected to the *source's*
+/// `visibility`, carrying a `"value"` -- which "injects a new value for
+/// the source's visibility for rays coming from the receiver".
+///
+/// Three shapes of that connection have a MoonRay counterpart, and the
+/// ray type plus which end is a light decides which:
+///
+/// | ɴsɪ connection | means | MoonRay column |
+/// | --- | --- | --- |
+/// | geometry -> light, `visibility` | that light does not light it | `LightSet` |
+/// | light -> geometry, `visibility.shadow` | it casts no shadow from that light | `ShadowSet` |
+/// | geometry -> geometry, `visibility.shadow` | it casts no shadow onto that one | `ShadowReceiverSet` |
+///
+/// The polarities differ between the columns and are not guessed: a
+/// `LightSet` is the lights that *do* light the row, `ShadowLinking::
+/// canCastShadow` returns true for a light **absent** from the shadow
+/// set, and `canReceiveShadow` the same for a receiver. So the first is
+/// built by subtraction and the other two by collection.
+#[derive(Debug, Default)]
+struct Linking {
+    /// Geometry -> the lights that must not light it.
+    unlit: HashMap<String, HashSet<String>>,
+    /// Geometry -> the lights it casts no shadow from.
+    unshadowed: HashMap<String, HashSet<String>>,
+    /// Geometry -> the geometry it casts no shadow onto.
+    unreceived: HashMap<String, HashSet<String>>,
+}
+
+/// Read ɴsɪ's inter-object visibility connections.
+///
+/// `lights` is every ɴsɪ handle that became a MoonRay light, which is
+/// what decides whether an end of a connection is a light or a shape --
+/// the interface has no light nodes to ask.
+fn linking(
+    scene: &Scene,
+    lights: &HashSet<&str>,
+    flushed: &mut Flushed,
+) -> Linking {
+    // An `attributes` node stands for every geometry it is bound to, so
+    // one connection can link a whole bundle at once -- which is how a
+    // DCC spells "this light does not light these forty objects".
+    let mut bound: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in scene.edges() {
+        if edge.kind == EdgeKind::AttributeBinding {
+            bound.entry(edge.from()).or_default().push(edge.to());
+        }
+    }
+
+    // A connection may name the geometry directly rather than through
+    // its `attributes` node; both are legal and mean the same thing.
+    let ends = |handle: &str| -> Vec<String> {
+        match bound.get(handle) {
+            Some(geometries) => {
+                geometries.iter().map(|g| (*g).to_string()).collect()
+            }
+            None => vec![handle.to_string()],
+        }
+    };
+
+    let mut linking = Linking::default();
+    let mut unmapped: Vec<String> = Vec::new();
+
+    for edge in scene.edges() {
+        let EdgeKind::Other { to_attribute } = &edge.kind else {
+            continue;
+        };
+        if to_attribute != "visibility"
+            && !to_attribute.starts_with("visibility.")
+        {
+            continue;
+        }
+
+        // **A missing `value` is taken as "not visible".** The
+        // specification's own example passes one, and a connection that
+        // injected nothing would have no effect at all -- so reading it
+        // as zero is the only reading under which the scene means
+        // something. Reported, because it is a reading rather than a
+        // rule.
+        let value = visibility_value(edge);
+        if value.is_none() {
+            flushed.limitations.push(format!(
+                "the inter-object visibility connection {:?} -> {:?} \
+                 ({to_attribute}) carries no \"value\" argument, so it \
+                 is read as 0 -- not visible; ɴsɪ §4.8 passes one and \
+                 a connection injecting nothing would mean nothing",
+                edge.from(),
+                edge.to()
+            ));
+        }
+        if value.unwrap_or(0) != 0 {
+            // Re-enabling something that is visible by default is a
+            // no-op here rather than a mistake: this backend has no
+            // per-object visibility to override.
+            continue;
+        }
+
+        let receivers = ends(edge.from());
+        let sources = ends(edge.to());
+
+        for source in &sources {
+            for receiver in &receivers {
+                let source_is_light = lights.contains(source.as_str());
+                let receiver_is_light = lights.contains(receiver.as_str());
+
+                match (
+                    to_attribute.as_str(),
+                    source_is_light,
+                    receiver_is_light,
+                ) {
+                    // Light linking: a light made invisible to a shape.
+                    ("visibility", true, false) => {
+                        linking
+                            .unlit
+                            .entry(receiver.clone())
+                            .or_default()
+                            .insert(source.clone());
+                    }
+                    // Shadow linking: a shape that casts no shadow for
+                    // rays coming from one light.
+                    ("visibility.shadow", false, true) => {
+                        linking
+                            .unshadowed
+                            .entry(source.clone())
+                            .or_default()
+                            .insert(receiver.clone());
+                    }
+                    // Shadow receiver linking: a shape that casts no
+                    // shadow onto another shape.
+                    ("visibility.shadow", false, false) => {
+                        linking
+                            .unreceived
+                            .entry(source.clone())
+                            .or_default()
+                            .insert(receiver.clone());
+                    }
+                    _ => unmapped.push(format!(
+                        "{:?} -> {:?} ({to_attribute})",
+                        edge.from(),
+                        edge.to()
+                    )),
+                }
+            }
+        }
+    }
+
+    if !unmapped.is_empty() {
+        unmapped.sort_unstable();
+        unmapped.dedup();
+        flushed.limitations.push(format!(
+            "ɴsɪ inter-object visibility (§4.8) that MoonRay has no \
+             counterpart for, so these objects see each other anyway: \
+             {}. MoonRay links lights to shapes and shadows to lights \
+             or receivers; it has no general per-pair visibility",
+            unmapped.join(", ")
+        ));
+    }
+
+    linking
+}
+
+/// ɴsɪ's `"value"` connection argument, as an integer.
+///
+/// Not `Edge::priority`'s neighbour: upstream exposes `priority` and
+/// nothing else, because §4.8 leaves the set of legal destination
+/// attributes open and a `"value"` means whatever the destination means.
+fn visibility_value(edge: &nsi_intermediate::Edge) -> Option<i32> {
+    edge.args
+        .iter()
+        .find(|argument| argument.name == "value")
+        .and_then(|argument| match &argument.data {
+            OwnedData::I32(values) => values.first().copied(),
+            OwnedData::F32(values) => values.first().map(|v| *v as i32),
+            OwnedData::F64(values) => values.first().map(|v| *v as i32),
+            _ => None,
+        })
 }
 
 /// One ɴsɪ light: geometry whose shader emits.
@@ -6757,6 +7054,180 @@ mod tests {
                 .limitations
                 .iter()
                 .any(|line| line.contains("cannot also wear a material")),
+            "{:?}",
+            flushed.limitations
+        );
+    }
+
+    /// **ɴsɪ light linking, which the interface has no attribute
+    /// for.**
+    ///
+    /// §4.5: "Some operations on light sources, such as light linking,
+    /// are done using more general approaches (see section 4.8)."
+    /// §4.8 is a cross-hierarchy connection into another object's
+    /// `visibility`, and which MoonRay column it lands in depends on
+    /// the ray type and on which end of the connection is a light.
+    #[test]
+    fn inter_object_visibility_links_lights_and_shadows() {
+        // Two shapes and two lights: a linked scene has to be able to
+        // exclude one of each and keep the other, or an assertion
+        // cannot tell linking from a set that lost everything.
+        let mut scene = emissive("areaLight", &[]);
+
+        scene.create("floor", "mesh").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "floor",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![3])),
+                    arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2])),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 0.0,
+                        ]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("floor", None, ".root", "objects").unwrap();
+        scene
+            .create("floorattr", "attributes")
+            .expect("a recordable edit");
+        scene
+            .connect("floorattr", None, "floor", "geometryattributes")
+            .unwrap();
+
+        scene
+            .create("env", "environment")
+            .expect("a recordable edit");
+        scene.connect("env", None, ".root", "objects").unwrap();
+        scene
+            .create("envattr", "attributes")
+            .expect("a recordable edit");
+        scene
+            .connect("envattr", None, "env", "geometryattributes")
+            .unwrap();
+
+        let invisible =
+            || vec![arg("value", Type::I32, OwnedData::I32(vec![0]))];
+
+        // Light linking: the emissive triangle does not light the
+        // floor. The environment still does.
+        scene
+            .connect_with_arguments(
+                "floorattr",
+                None,
+                "attr",
+                "visibility",
+                invisible(),
+            )
+            .unwrap();
+
+        // Shadow linking: the floor casts no shadow from the
+        // environment.
+        scene
+            .connect_with_arguments(
+                "envattr",
+                None,
+                "floorattr",
+                "visibility.shadow",
+                invisible(),
+            )
+            .unwrap();
+
+        // Shadow receiver linking: the floor casts no shadow onto the
+        // wall. A third shape, and it has to be one that is *not* a
+        // light -- the receiver end being a light is what tells shadow
+        // linking from shadow receiver linking.
+        scene.create("wall", "mesh").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "wall",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![3])),
+                    arg("P.indices", Type::I32, OwnedData::I32(vec![0, 1, 2])),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 1.0, 3.0, 0.0, 1.0, 0.0, 3.0, 1.0,
+                        ]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("wall", None, ".root", "objects").unwrap();
+        scene
+            .create("wallattr", "attributes")
+            .expect("a recordable edit");
+        scene
+            .connect("wallattr", None, "wall", "geometryattributes")
+            .unwrap();
+        scene
+            .connect_with_arguments(
+                "wallattr",
+                None,
+                "floorattr",
+                "visibility.shadow",
+                invisible(),
+            )
+            .unwrap();
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        // The floor's own light set keeps the environment and drops
+        // the mesh light. Built by subtraction, because a `LightSet`
+        // is the lights that *do* light the row.
+        assert!(
+            rdla.contains(
+                "LightSet(\"/nsi/lights/floor\") {\n    EnvLight(\"env\"),\n}"
+            ),
+            "{rdla}"
+        );
+        // And the triangle keeps the scene-wide set, which has both.
+        assert!(
+            rdla.contains(
+                "{RdlMeshGeometry(\"floor\"), \"\", \
+                 UsdPreviewSurface(\"/nsi/default_material\"), \
+                 LightSet(\"/nsi/lights/floor\")"
+            ),
+            "{rdla}"
+        );
+
+        // The two shadow columns collect what is excluded, so these
+        // name the light and the shape the floor is linked away from.
+        assert!(
+            rdla.contains(
+                "ShadowSet(\"/nsi/shadows/floor\") {\n    EnvLight(\"env\"),\n}"
+            ),
+            "{rdla}"
+        );
+        assert!(
+            rdla.contains(
+                "ShadowReceiverSet(\"/nsi/shadowreceivers/floor\") {\n    \
+                 RdlMeshGeometry(\"wall\"),\n}"
+            ),
+            "{rdla}"
+        );
+        // Columns eight and nine of the floor's row.
+        assert!(
+            rdla.contains(
+                "ShadowSet(\"/nsi/shadows/floor\"), \
+                 ShadowReceiverSet(\"/nsi/shadowreceivers/floor\")}"
+            ),
+            "{rdla}"
+        );
+
+        // Linking is not physically correct, and the report says so
+        // rather than leaving a changed render unexplained.
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("inter-object visibility")),
             "{:?}",
             flushed.limitations
         );

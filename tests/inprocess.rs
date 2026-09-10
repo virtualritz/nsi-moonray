@@ -1023,6 +1023,167 @@ fn an_osl_emitter_lights_the_scene() {
     );
 }
 
+/// **`T1.7c`.** ɴsɪ light linking reaches MoonRay.
+///
+/// ɴsɪ has no light-linking attribute: §4.5 defers to §4.8, which is a
+/// cross-hierarchy connection into the *light's* `visibility` carrying
+/// a `"value"` of zero -- "this light is not visible to rays coming
+/// from that object", which is what light linking means.
+///
+/// The flush turns that into a `LightSet` of the row's own, and the
+/// mapping is asserted as text in `flush::tests`. This is the half
+/// text cannot reach: whether MoonRay reads the eighth column at all,
+/// and whether an unparsed `.rdla` or an ignored set would show up as
+/// anything other than a picture that looks fine.
+///
+/// The same scene as `an_osl_emitter_lights_the_scene`, which renders
+/// the quad amber. Linked away from its only light, it must render
+/// black -- and the environment is already disconnected, so nothing
+/// else can light it.
+#[cfg(osl)]
+#[test]
+fn light_linking_unlights_a_shape() {
+    use nsi_moonray::session::Session;
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay's rdl2dso");
+    };
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let directory = scratch("nsi-moonray-light-linking");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+    let source = directory.join("amber.osl");
+    std::fs::write(
+        &source,
+        "surface amber(color tint = color(1, 1, 1), float gain = 1)\n\
+         {\n    Ci = tint * gain * emission();\n}\n",
+    )
+    .expect("the shader is written");
+
+    let oslc = std::path::Path::new(env!("OSL_ROOT")).join("bin/oslc");
+    let compiled = std::process::Command::new(&oslc)
+        .arg("-o")
+        .arg(directory.join("amber.oso"))
+        .arg(&source)
+        .output()
+        .expect("oslc runs");
+    assert!(
+        compiled.status.success(),
+        "oslc failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let lamp = |nsi: &mut Scene| {
+        nsi.disconnect("light", None, ".root", "objects").unwrap();
+
+        nsi.create("lampxf", "transform").unwrap();
+        nsi.set_attribute(
+            "lampxf",
+            vec![arg(
+                "transformationmatrix",
+                Type::MatrixF64,
+                OwnedData::F64(vec![
+                    1.0, 0.0, 0.0, 0.0, //
+                    0.0, 1.0, 0.0, 0.0, //
+                    0.0, 0.0, 1.0, 0.0, //
+                    2.0, 0.0, -4.0, 1.0,
+                ]),
+            )],
+        )
+        .unwrap();
+        nsi.connect("lampxf", None, ".root", "objects").unwrap();
+
+        nsi.create("lamp", "mesh").unwrap();
+        nsi.set_attribute(
+            "lamp",
+            vec![
+                arg("nvertices", Type::I32, OwnedData::I32(vec![3])),
+                arg("P.indices", Type::I32, OwnedData::I32(vec![0, 2, 1])),
+                arg(
+                    "P",
+                    Type::Point,
+                    OwnedData::F32(vec![
+                        0.0, -0.5, 0.0, 1.0, -0.5, 0.0, 0.0, 0.5, 0.0,
+                    ]),
+                ),
+            ],
+        )
+        .unwrap();
+        nsi.connect("lamp", None, "lampxf", "objects").unwrap();
+
+        nsi.create("lampattr", "attributes").unwrap();
+        nsi.create("amber", "shader").unwrap();
+        nsi.set_attribute(
+            "amber",
+            vec![
+                arg(
+                    "shaderfilename",
+                    Type::String,
+                    OwnedData::String(vec![
+                        directory
+                            .join("amber.oso")
+                            .to_string_lossy()
+                            .into_owned()
+                            .into_bytes(),
+                    ]),
+                ),
+                arg("tint", Type::Color, OwnedData::F32(vec![1.0, 0.25, 0.02])),
+                arg("gain", Type::F32, OwnedData::F32(vec![30.0])),
+            ],
+        )
+        .unwrap();
+        nsi.connect("lampattr", None, "lamp", "geometryattributes")
+            .unwrap();
+        nsi.connect("amber", None, "lampattr", "surfaceshader")
+            .unwrap();
+
+        // The quad needs an `attributes` node of its own: §4.8 links
+        // one *attributes* node to another, which is what lets one
+        // connection stand for every shape wearing it.
+        nsi.create("quadattr", "attributes").unwrap();
+        nsi.connect("quadattr", None, "quad", "geometryattributes")
+            .unwrap();
+    };
+
+    let (width, height) = (64usize, 48usize);
+    let sample = |linked: bool| -> f32 {
+        let mut nsi = scene(width as i32, height as i32);
+        lamp(&mut nsi);
+        if linked {
+            nsi.connect_with_arguments(
+                "quadattr",
+                None,
+                "lampattr",
+                "visibility",
+                vec![arg("value", Type::I32, OwnedData::I32(vec![0]))],
+            )
+            .unwrap();
+        }
+
+        let mut session = Session::new(nsi, &dso).expect("a render");
+        session.wait();
+        let pixels = session.render().snapshot().expect("a frame").2;
+        let centre = ((height / 2) * width + width * 9 / 16) * 4;
+        pixels[centre]
+    };
+
+    // Unlinked, this is the amber quad `an_osl_emitter_lights_the_scene`
+    // asserts. It is measured here rather than assumed so that a scene
+    // that stopped lighting for some other reason fails as a broken
+    // fixture instead of passing as successful linking.
+    let lit = sample(false);
+    assert!(lit > 0.0, "the unlinked quad should be lit: {lit}");
+
+    let unlit = sample(true);
+    assert_eq!(
+        unlit, 0.0,
+        "linked away from its only light the quad renders black, and \
+         did not: lit {lit}, linked {unlit}"
+    );
+}
+
 /// **`TN.2`.** An ɴsɪ shader renders, as itself.
 ///
 /// The whole chain, and nothing in it is a substitute: an ɴsɪ `shader`

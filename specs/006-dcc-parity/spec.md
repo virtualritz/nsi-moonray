@@ -86,8 +86,20 @@ handle and report them by name.
     `id.surfaceshader`. `state_variable` (`flush.rs:3015`) knows six
     names, none of them these, so object IDs and Cryptomatte are
     unreachable.
-11. **No light linking, shadow linking or light groups.** All four
-    `Layer` columns exist in `document.rs:25-37` and are never set.
+11. ~~**No light linking, shadow linking or light groups.**~~
+    **Done.** ɴsɪ has no light-linking attribute -- §4.5 defers to
+    §4.8's inter-object visibility, a cross-hierarchy connection into
+    another object's `visibility` carrying a `"value"`. Three shapes of
+    it map, and which column they land in is decided by the ray type
+    and by which end is a light: geometry into a light's `visibility`
+    is a per-row `LightSet` built by subtraction; a light into a
+    shape's `visibility.shadow` is a `ShadowSet`; shape into shape is a
+    `ShadowReceiverSet`. The last two collect what is excluded rather
+    than what is kept, because that is the polarity
+    `ShadowLinking::canCastShadow` reads. Light groups were already
+    done, as light-path expression labels. What is still unmapped is
+    general per-pair visibility, which MoonRay has no counterpart for,
+    and it is reported by pair.
 12. **Interactive delivery is one RGBA layer from one driver**
     (`stream.rs:86`, `session.rs:205-210`), and `stoppedcallback` is
     not read, so a viewport must poll.
