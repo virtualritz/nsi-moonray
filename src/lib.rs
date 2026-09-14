@@ -59,6 +59,9 @@ pub mod document;
 pub mod dso;
 pub mod dspy;
 pub mod flush;
+/// This backend as an implementation a Rust host *links* rather than
+/// loads, so an `outputdriver`'s closures stay in one compilation.
+pub mod linked;
 pub mod name;
 pub mod osl;
 #[cfg(feature = "rdl2")]
@@ -78,5 +81,6 @@ pub mod value;
 
 pub use document::{Assignment, Body, Document, Object};
 pub use flush::{Flushed, flush};
+pub use linked::MoonRay;
 pub use name::Name;
 pub use value::{Reference, Value};

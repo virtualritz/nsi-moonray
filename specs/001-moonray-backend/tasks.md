@@ -150,7 +150,24 @@ Rust on both sides, so **no ndspy marshalling is involved**.
       `nsi-ffi-wrap`. A separately built `cdylib` needs the `extern "C"`
       entry points `DspyRegisterDriver` hands over -- already the
       twelfth symbol this crate exports, so the mechanism is present
-      and only the delivery path is missing.
+      and only the delivery path is missing. Delivery *after* a batch
+      render exists (`capi.rs` pushes the written image through a
+      registered driver); what is missing is the progressive path, where
+      `stream.rs` still speaks only to Rust closures.
+- [x] T5.4 **The linked route**, which removes the hazard rather than
+      working around it. `src/linked.rs` implements `nsi-ffi-wrap`'s
+      `FfiApi` by forwarding to this crate's own C entry points, so a
+      Rust host registers `nsi_moonray::MoonRay` with
+      `nsi::backend::register` and names `"moonray"` on `Context::new`.
+      One compilation, so an `outputdriver`'s closures are native and
+      the pixels go application -> this crate -> MoonRay with nothing
+      ABI-stable in between. `tests/linked.rs` builds a scene through
+      `nsi::Context`, hands over a closure and asserts lit pixels come
+      back, because nothing in the *types* tells the sound case from
+      the unsound one -- only running it does.
+
+      The trade is that the renderer becomes a build-time dependency,
+      which is exactly what loading gives up. Both routes stay.
 - [x] T5.3 **Progressive delivery.** `src/stream.rs`: a snapshot loop
       paced by `areCoarsePassesComplete` and `isFrameComplete`, giving
       each snapshot to `callback.write` and honouring a closure that

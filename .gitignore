@@ -23,3 +23,8 @@
 # The conda environment `just pixi-install` resolves. `pixi.toml` and
 # `pixi.lock` are committed; what they resolve to is not.
 /.pixi/
+
+# Local dependency overrides, which `Cargo.toml` points contributors at
+# for working on this crate and its upstream at once. Never committed:
+# a path here would put a sibling checkout in everyone's way, every build.
+/.cargo/

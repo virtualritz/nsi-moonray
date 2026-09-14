@@ -2346,7 +2346,15 @@ const CONSUMED: &[(&str, &[&str])] = &[
             "lightsetname",
         ],
     ),
-    ("outputdriver", &["imagefilename", "drivername"]),
+    // `callback.` is the application's own pixel delivery -- `open`,
+    // `write`, `finish` -- read by `display.rs` rather than by the
+    // flush, since it is the *render* that calls them and nothing about
+    // them belongs in a scene file. Listed so the sweep does not call a
+    // viewport's own callbacks dropped while they are being called.
+    (
+        "outputdriver",
+        &["imagefilename", "drivername", "callback."],
+    ),
     ("transform", &["transformationmatrix"]),
     (
         "instances",
