@@ -30,10 +30,7 @@
 //! it, as the file-delivery stopgap had to, means an application cannot
 //! get its renderer back.
 
-use crate::{
-    display::{Callbacks, pixel_format},
-    rdl2::Render,
-};
+use crate::{display::pixel_format, rdl2::Render};
 use nsi_ffi_wrap::output::Error;
 use std::time::{Duration, Instant};
 
