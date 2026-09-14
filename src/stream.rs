@@ -73,7 +73,7 @@ pub enum Stopped {
 /// grounds for refusing the render.
 pub fn stream(
     render: &Render,
-    callbacks: &Callbacks,
+    delivery: &mut crate::display::Delivery<'_>,
     name: &str,
     deadline: Option<Duration>,
 ) -> Result<Stopped, crate::rdl2::Error> {
@@ -83,11 +83,16 @@ pub fn stream(
     // MoonRay's render buffer is `PixelBuffer<Vec4f>` -- RGBA float per
     // pixel -- and the names go across lowercased, which is the
     // spelling the channel heuristics expect.
-    let format = pixel_format(&["r", "g", "b", "a"]);
+    const CHANNELS: [&str; 4] = ["r", "g", "b", "a"];
+    let format = pixel_format(&CHANNELS);
+    // A registered display driver is told the channel names as strings;
+    // the closures read them off the format. Both get the same four.
+    let names: Vec<String> =
+        CHANNELS.iter().map(|name| (*name).to_string()).collect();
 
     // SAFETY: the caller owns the closures and keeps them alive across
     // the render; see `display`'s "one constraint".
-    unsafe { callbacks.open(name, width, height, &format) };
+    unsafe { delivery.open(name, width, height, &format, &names) };
 
     let started = Instant::now();
     let mut outcome = Stopped::Complete;
@@ -114,7 +119,7 @@ pub fn stream(
                 // SAFETY: as `open`; the slice is exactly the
                 // rectangle, which `write` checks before handing it on.
                 let answer = unsafe {
-                    callbacks.write(
+                    delivery.write(
                         name,
                         width,
                         height,
@@ -154,7 +159,7 @@ pub fn stream(
         let (_, _, pixels) = render.snapshot()?;
         // SAFETY: as above.
         unsafe {
-            callbacks.write(
+            delivery.write(
                 name,
                 width,
                 height,
@@ -174,7 +179,7 @@ pub fn stream(
     // that impossible for every caller.
 
     // SAFETY: as `open`.
-    unsafe { callbacks.finish(name, width, height, format) };
+    unsafe { delivery.finish(name, width, height, format) };
 
     Ok(outcome)
 }

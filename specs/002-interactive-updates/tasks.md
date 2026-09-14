@@ -116,7 +116,7 @@ whether it embeds this crate or `dlopen`s it.
       MoonRay's own `updateScene` entry points call, while
       `Geometry::requiresGeometryUpdate` does not consult the flag at
       all. Two ways out, `I7` and an upstream ask.
-- [ ] I7 **Nothing to do here; the fix is upstream.** A first reading
+- [x] I7 **Nothing to do here; the fix is upstream.** A first reading
       suggested moving to the `updateScene(manifest, payload)` delta
       path to reach the BVH-only tier. That was wrong:
       `checkGeometryChangesRequireReload`'s answer is *returned to the

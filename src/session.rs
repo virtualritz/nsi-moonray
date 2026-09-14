@@ -197,15 +197,28 @@ impl Session {
     /// Block until the frame is done, delivering it to the driver's
     /// callbacks as it converges.
     ///
-    /// A scene whose output driver carries no callbacks is a batch
+    /// A scene whose output driver has nothing listening is a batch
     /// render: it converges and then writes the files the scene names,
     /// through MoonRay's own output machinery.
+    ///
+    /// **Listening** means Rust closures *or* a display driver the host
+    /// registered. A host that loaded this crate as a library cannot be
+    /// handed closures at all -- see [`crate::display::Delivery`] --
+    /// and answering only to closures left it with no progressive
+    /// delivery whatsoever.
     pub fn wait(&mut self) -> Option<Stopped> {
         let driving: Vec<&str> = self
             .scene
             .nodes()
             .filter(|(_, node)| node.node_type() == "outputdriver")
-            .filter(|(handle, _)| Callbacks::of(&self.scene, handle).is_some())
+            .filter(|(handle, _)| {
+                crate::display::Delivery::of(
+                    &self.scene,
+                    handle,
+                    Callbacks::of(&self.scene, handle).as_ref(),
+                )
+                .is_some()
+            })
             .map(|(handle, _)| handle)
             .collect();
 
@@ -248,14 +261,22 @@ impl Session {
             self.scene
                 .nodes()
                 .find(|(candidate, _)| candidate == handle)
-                .and_then(|(handle, _)| {
-                    Some((handle, Callbacks::of(&self.scene, handle)?))
-                })
+                .map(|(handle, _)| (handle, Callbacks::of(&self.scene, handle)))
         });
 
         match driver {
             Some((handle, callbacks)) => {
-                match stream(&self.render, &callbacks, handle, None) {
+                // Closures, or a display driver the host registered
+                // when it *loaded* this crate -- `Delivery` decides,
+                // and says why in its own documentation.
+                let Some(mut delivery) = crate::display::Delivery::of(
+                    &self.scene,
+                    handle,
+                    callbacks.as_ref(),
+                ) else {
+                    return None;
+                };
+                match stream(&self.render, &mut delivery, handle, None) {
                     Ok(stopped) => Some(stopped),
                     Err(error) => {
                         eprintln!("nsi-moonray: {handle:?} streaming: {error}");

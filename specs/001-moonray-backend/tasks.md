@@ -144,16 +144,29 @@ Rust on both sides, so **no ndspy marshalling is involved**.
       render and an empty viewport, with no error anywhere.
       `render::an_applications_callback_receives_the_rendered_pixels`
       asserts the closure receives the pixels.
-- [ ] T5.2 The `dlopen` route. A `Box<dyn FnWrite>` is a trait object
-      whose vtable belongs to the compilation that made it, so `T5.1`
-      holds only where the application and this backend share one
-      `nsi-ffi-wrap`. A separately built `cdylib` needs the `extern "C"`
-      entry points `DspyRegisterDriver` hands over -- already the
-      twelfth symbol this crate exports, so the mechanism is present
-      and only the delivery path is missing. Delivery *after* a batch
-      render exists (`capi.rs` pushes the written image through a
-      registered driver); what is missing is the progressive path, where
-      `stream.rs` still speaks only to Rust closures.
+- [x] T5.2 **The `dlopen` route.** A `Box<dyn FnWrite>` is a trait
+      object whose vtable belongs to the compilation that made it, so
+      `T5.1` holds only where the application and this backend share one
+      `nsi-ffi-wrap`. A separately built `cdylib` is a different
+      compilation, and the `extern "C"` entry points `DspyRegisterDriver`
+      hands over are the only thing that crosses it.
+
+      `display::Delivery` is the sink both dialects go through:
+      closures, or a registered driver. `stream.rs` writes to it rather
+      than to `Callbacks`, so the *progressive* path -- buckets as they
+      refine, which is what a viewport needs -- reaches a loaded host
+      for the first time. The batch path already pushed a finished image
+      through such a driver and still does.
+
+      **A registered driver wins over closures**, and that is the rule
+      that keeps the unsound call from happening at all rather than a
+      preference: `nsi-ffi-wrap` calls `DspyRegisterDriver` on a library
+      it has just *loaded* and on nothing else, so a registration under
+      the name an `outputdriver` asks for is itself the evidence that
+      the closures on that node are foreign.
+      `inprocess::a_registered_driver_receives_progressive_pixels`
+      asserts the buckets arrive and that the image is closed exactly
+      once.
 - [x] T5.4 **The linked route**, which removes the hazard rather than
       working around it. `src/linked.rs` implements `nsi-ffi-wrap`'s
       `FfiApi` by forwarding to this crate's own C entry points, so a

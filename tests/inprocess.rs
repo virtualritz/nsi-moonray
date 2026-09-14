@@ -366,9 +366,11 @@ fn a_converging_render_streams_to_the_applications_closures() {
     render.initialize().expect("render prep");
     render.start().expect("the frame starts");
 
+    let mut delivery =
+        nsi_moonray::display::Delivery::from_callbacks(&callbacks);
     let outcome = stream(
         &render,
-        &callbacks,
+        &mut delivery,
         "driver",
         Some(std::time::Duration::from_secs(120)),
     )
@@ -450,8 +452,10 @@ fn a_callback_that_says_stop_stops_the_render() {
     render.initialize().expect("render prep");
     render.start().expect("the frame starts");
 
+    let mut delivery =
+        nsi_moonray::display::Delivery::from_callbacks(&callbacks);
     let outcome =
-        stream(&render, &callbacks, "driver", None).expect("the loop runs");
+        stream(&render, &mut delivery, "driver", None).expect("the loop runs");
 
     assert_eq!(outcome, Stopped::ByCallback);
 }
@@ -745,6 +749,143 @@ fn the_frame_matches_3delights_framing() {
     close(bottom, height - 1, "the bottom of the quad");
     close(left, 100, "the left of the quad");
     close(right, 299, "the right of the quad");
+}
+
+/// **`T5.2`.** A display driver the host *registered* receives a
+/// converging render.
+///
+/// This is the shape a host that **loaded** this crate is in. It cannot
+/// be handed Rust closures -- a `Box<dyn Fn…>`'s vtable belongs to the
+/// compilation that made it, and a loaded library is a different one --
+/// so the only thing it can offer is the `extern "C"` entry points it
+/// hands over through `DspyRegisterDriver`. Those are ABI-stable, which
+/// is the whole point.
+///
+/// The batch path already pushed a *finished* image through such a
+/// driver. What this checks is the progressive path: buckets as they
+/// refine, which is what a viewport needs and what the loaded route had
+/// no route to at all.
+#[test]
+fn a_registered_driver_receives_progressive_pixels() {
+    use nsi_moonray::{
+        display::Delivery,
+        dspy::{
+            DevFormat, Driver, Error as DspyError, FlagStuff, ImageHandle, OK,
+            UserParameter,
+        },
+        stream::{Stopped, stream},
+    };
+    use std::{
+        os::raw::{c_char, c_int, c_uchar},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    static OPENED: AtomicUsize = AtomicUsize::new(0);
+    static BUCKETS: AtomicUsize = AtomicUsize::new(0);
+    static PIXELS: AtomicUsize = AtomicUsize::new(0);
+    static CLOSED: AtomicUsize = AtomicUsize::new(0);
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe extern "C" fn open(
+        image: *mut ImageHandle,
+        _driver: *const c_char,
+        _file: *const c_char,
+        _width: c_int,
+        _height: c_int,
+        _param_count: c_int,
+        _params: *const UserParameter,
+        _format_count: c_int,
+        _formats: *mut DevFormat,
+        _flags: *mut FlagStuff,
+    ) -> DspyError {
+        OPENED.fetch_add(1, Ordering::SeqCst);
+        // A handle of our own, so `close` gets something back.
+        unsafe { *image = 1 as ImageHandle };
+        OK
+    }
+
+    unsafe extern "C" fn write(
+        _image: ImageHandle,
+        xmin: c_int,
+        xmax_plus_one: c_int,
+        ymin: c_int,
+        ymax_plus_one: c_int,
+        _entrysize: c_int,
+        _data: *const c_uchar,
+    ) -> DspyError {
+        BUCKETS.fetch_add(1, Ordering::SeqCst);
+        PIXELS.fetch_add(
+            (xmax_plus_one - xmin).max(0) as usize
+                * (ymax_plus_one - ymin).max(0) as usize,
+            Ordering::SeqCst,
+        );
+        OK
+    }
+
+    unsafe extern "C" fn close(_image: ImageHandle) -> DspyError {
+        CLOSED.fetch_add(1, Ordering::SeqCst);
+        OK
+    }
+
+    let Some(dso) = dso_path() else {
+        panic!("set $NSI_MOONRAY_DSO to MoonRay\'s rdl2dso");
+    };
+
+    nsi_moonray::dspy::register(
+        "progressive_probe",
+        Driver {
+            open: Some(open),
+            write: Some(write),
+            close: Some(close),
+            query: None,
+        },
+    );
+
+    let (_guard, render) = renderer(&dso);
+    let context = render.scene().expect("a scene");
+
+    // The scene *names* the driver and carries no closures, which is
+    // exactly what a loaded host's scene looks like.
+    let mut nsi = scene(32, 24);
+    nsi.set_attribute(
+        "driver",
+        vec![arg(
+            "drivername",
+            Type::String,
+            OwnedData::String(vec![b"progressive_probe".to_vec()]),
+        )],
+    )
+    .unwrap();
+
+    apply(&flush(&nsi).document, &context);
+
+    render.initialize().expect("render prep");
+    render.start().expect("the frame starts");
+
+    let mut delivery = Delivery::of(&nsi, "driver", None)
+        .expect("a registered driver is something to deliver to");
+    let outcome =
+        stream(&render, &mut delivery, "driver", None).expect("the loop runs");
+
+    assert_eq!(outcome, Stopped::Complete);
+    assert_eq!(
+        OPENED.load(Ordering::SeqCst),
+        1,
+        "the driver should have been opened once"
+    );
+    assert!(
+        BUCKETS.load(Ordering::SeqCst) > 0,
+        "the driver received no buckets at all"
+    );
+    assert!(
+        PIXELS.load(Ordering::SeqCst) > 0,
+        "the driver received buckets covering no pixels"
+    );
+    assert_eq!(
+        CLOSED.load(Ordering::SeqCst),
+        1,
+        "the image must be closed exactly once, or the host leaks it"
+    );
 }
 
 /// **`T1.7a`.** An ɴsɪ light lights the scene.

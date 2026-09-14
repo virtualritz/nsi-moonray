@@ -376,6 +376,193 @@ pub fn deliver_file(
     Ok(())
 }
 
+/// Where a progressive render's pixels go.
+///
+/// Two dialects, because there are two ways a host reaches this
+/// backend and only one of them can be handed a Rust closure.
+///
+/// - **Closures**, when the host and this crate share one compilation:
+///   a Rust dependency, or the linked route in [`crate::linked`]. This
+///   is [`Callbacks`], and it is the cheap and expressive one.
+/// - **A registered display driver**, when the host *loaded* this crate
+///   as a library. Its `extern "C"` entry points arrived through
+///   `DspyRegisterDriver` and are ABI-stable, which is the only thing
+///   that is across that boundary.
+///
+/// # Which one, and why that way round
+///
+/// A registered driver wins over closures when both are present, and
+/// the rule is not a preference. `nsi-ffi-wrap` calls
+/// `DspyRegisterDriver` on a library it has just *loaded*, and on
+/// nothing else -- a backend registered in process never sees that
+/// call. So a driver being registered under the name this
+/// `outputdriver` asks for is itself the evidence that the closures on
+/// that same node belong to another compilation and must not be
+/// called.
+pub struct Delivery<'a> {
+    closures: Option<&'a Callbacks>,
+    driver: Option<(crate::dspy::Driver, String, String)>,
+    /// Opened on the first `open`, so `write` has somewhere to write
+    /// and `finish` has something to close.
+    image: Option<crate::dspy::Image>,
+}
+
+impl<'a> Delivery<'a> {
+    /// What an `outputdriver` node asks for.
+    ///
+    /// `None` when nothing is listening -- no closures and no
+    /// registered driver by that name -- which is the ordinary case for
+    /// a driver that only writes a file.
+    pub fn of(
+        scene: &Scene,
+        handle: &str,
+        closures: Option<&'a Callbacks>,
+    ) -> Option<Self> {
+        let registered =
+            crate::flush::driver_name(scene, handle).and_then(|name| {
+                let driver = crate::dspy::lookup(&name)?;
+                let file = crate::flush::image_file(scene, handle)
+                    .unwrap_or_else(|| handle.to_owned());
+                Some((driver, name, file))
+            });
+
+        // See "Which one, and why that way round".
+        let closures = registered.is_none().then_some(closures).flatten();
+
+        (registered.is_some() || closures.is_some()).then_some(Self {
+            closures,
+            driver: registered,
+            image: None,
+        })
+    }
+
+    /// Closures only, for a caller that already has them and wants no
+    /// scene lookup -- the linked route's own tests, and
+    /// [`deliver_file`].
+    pub fn from_callbacks(callbacks: &'a Callbacks) -> Self {
+        Self {
+            closures: Some(callbacks),
+            driver: None,
+            image: None,
+        }
+    }
+
+    /// Tell whoever is listening that a render is starting.
+    ///
+    /// # Safety
+    ///
+    /// As [`Callbacks::open`] for the closure dialect. The driver
+    /// dialect is safe by construction: those are `extern "C"` pointers
+    /// the host registered.
+    pub unsafe fn open(
+        &mut self,
+        name: &str,
+        width: usize,
+        height: usize,
+        format: &PixelFormat,
+        channels: &[String],
+    ) -> Error {
+        if let Some((driver, driver_name, file)) = &self.driver {
+            self.image = crate::dspy::Image::open(
+                *driver,
+                driver_name,
+                file,
+                width as i32,
+                height as i32,
+                channels,
+            );
+            return match self.image {
+                Some(_) => Error::None,
+                // A driver that refuses to open is not grounds for
+                // refusing the render; ɴsɪ always returns an image.
+                None => Error::Undefined,
+            };
+        }
+
+        match self.closures {
+            // SAFETY: the caller's guarantee, forwarded.
+            Some(callbacks) => unsafe {
+                callbacks.open(name, width, height, format)
+            },
+            None => Error::None,
+        }
+    }
+
+    /// Hand over one bucket.
+    ///
+    /// # Safety
+    ///
+    /// As [`Delivery::open`].
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn write(
+        &self,
+        name: &str,
+        width: usize,
+        height: usize,
+        x: core::ops::Range<usize>,
+        y: core::ops::Range<usize>,
+        format: &PixelFormat,
+        pixels: &[f32],
+    ) -> Error {
+        if let Some(image) = &self.image {
+            // The driver answers in the interface's own integers. Only
+            // `Stop` has a meaning the render must act on -- a driver
+            // saying "enough" -- and everything else is a bucket that
+            // did not land, which ɴsɪ does not refuse a render over.
+            let code = image.write(
+                x.start as i32,
+                y.start as i32,
+                x.len() as i32,
+                y.len() as i32,
+                format.channels(),
+                pixels,
+            );
+            return if code == crate::dspy::STOP {
+                Error::Stop
+            } else {
+                Error::None
+            };
+        }
+
+        match self.closures {
+            // SAFETY: the caller's guarantee, forwarded.
+            Some(callbacks) => unsafe {
+                callbacks.write(name, width, height, x, y, format, pixels)
+            },
+            None => Error::None,
+        }
+    }
+
+    /// Say the frame is done.
+    ///
+    /// # Safety
+    ///
+    /// As [`Delivery::open`].
+    pub unsafe fn finish(
+        &mut self,
+        name: &str,
+        width: usize,
+        height: usize,
+        format: PixelFormat,
+    ) -> Error {
+        // Dropping the image is what closes it: `Image`'s `Drop`
+        // calls the driver's `close`, so the handle cannot be leaked by
+        // a path that forgets to.
+        if let Some(image) = self.image.take() {
+            drop(image);
+            return Error::None;
+        }
+
+        match self.closures {
+            // SAFETY: the caller's guarantee, forwarded.
+            Some(callbacks) => unsafe {
+                callbacks.finish(name, width, height, format)
+            },
+            None => Error::None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

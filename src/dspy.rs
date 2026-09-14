@@ -35,6 +35,11 @@ pub type Error = c_int;
 /// `PkDspyErrorNone`.
 pub const OK: Error = 0;
 
+/// `PkDspyErrorStop`: the driver has seen enough and the render should
+/// stop. The one answer a renderer must act on rather than merely
+/// report -- an interactive viewport closing says it this way.
+pub const STOP: Error = 6;
+
 /// An opaque per-image handle the driver hands back at open and
 /// expects at write and close.
 pub type ImageHandle = *mut c_void;
