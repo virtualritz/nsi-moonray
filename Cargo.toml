@@ -65,6 +65,22 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = ["cli", "interned_handles"]
+# Build `tests/linked.rs`, which exercises the linked route end to end
+# through `nsi::Context`.
+#
+# **Off because it needs an unreleased `nsi-ffi-wrap`**, not because the
+# route is optional: `src/linked.rs` itself builds against the published
+# 0.10.2 and always has. The *test* calls `nsi::backend::register`,
+# which arrived with runtime renderer selection and is not in a release
+# yet. It also needs the test binary and this crate to share one
+# `nsi-ffi-wrap`, so run it with a local override -- see
+# `specs/001-moonray-backend/tasks.md` `T5.4`:
+#
+#     cargo nextest run --features rdl2,linked-route
+#
+# Delete this feature and the gate on the test the day that release
+# lands.
+linked-route = []
 # Link `scene_rdl2` -- and, with it, build the scene in memory rather
 # than writing a file. Off by default because it needs `scene_rdl2`
 # installed and `$SCENE_RDL2_ROOT` pointing at it, while everything

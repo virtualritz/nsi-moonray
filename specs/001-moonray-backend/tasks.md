@@ -181,6 +181,19 @@ Rust on both sides, so **no ndspy marshalling is involved**.
 
       The trade is that the renderer becomes a build-time dependency,
       which is exactly what loading gives up. Both routes stay.
+
+      **Its test is behind the `linked-route` feature**, and the reason
+      is worth knowing: `src/linked.rs` builds against the published
+      `nsi-ffi-wrap` and always has, but the test calls
+      `nsi::backend::register`, which arrived with runtime renderer
+      selection and is not in a release yet. It also needs the test
+      binary and this crate to resolve *one* `nsi-ffi-wrap`, which is
+      the whole point of the route, so a local override has to name the
+      wrapper rather than only `nsi`:
+      `[patch.crates-io] nsi-ffi-wrap = { path = "../nsi/crates/nsi-ffi-wrap" }`
+      in an uncommitted `.cargo/config.toml`, then
+      `cargo nextest run --features rdl2,linked-route`. Delete the
+      feature and the gate when that release lands.
 - [x] T5.3 **Progressive delivery.** `src/stream.rs`: a snapshot loop
       paced by `areCoarsePassesComplete` and `isFrameComplete`, giving
       each snapshot to `callback.write` and honouring a closure that

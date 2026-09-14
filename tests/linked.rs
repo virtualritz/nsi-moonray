@@ -15,7 +15,11 @@
 //! ordinary. Nothing in the *types* distinguishes those two cases, so
 //! only running it says which one this is.
 
-#![cfg(all(feature = "rdl2", moonray))]
+// See the `linked-route` feature in `Cargo.toml` for why this is not
+// built by default: the route works against the published
+// `nsi-ffi-wrap`, but this test's `nsi::backend::register` does not
+// exist there yet.
+#![cfg(all(feature = "rdl2", moonray, feature = "linked-route"))]
 
 use nsi_ffi_wrap as nsi;
 use nsi_ffi_wrap::output::{Error, PixelFormat, WriteCallback};
