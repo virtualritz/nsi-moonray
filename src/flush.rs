@@ -1079,6 +1079,12 @@ pub fn flush_with(
         .set("image_width", Value::Int(resolution.0))
         .set("image_height", Value::Int(resolution.1));
 
+    // Anti-aliasing, which is the `screen`'s to say and not
+    // `.global`'s. See `pixel_samples` for why this is a square root.
+    if let Some(samples) = pixel_samples(scene) {
+        variables = variables.set("pixel_samples", Value::Int(samples));
+    }
+
     // **An `.rdla` carrying OSL has to be rendered scalar.** MoonRay's
     // default execution mode is `AUTO`, which picks vectorized, and
     // neither an `Osl` material nor an `OslMap` has an ISPC entry
@@ -2182,47 +2188,133 @@ const STRUCTURE: [&str; 15] = [
 ///
 /// The scale differs where the two disagree about units, so each entry
 /// carries how to convert.
-const GLOBALS: &[(&str, &str, GlobalKind)] = &[
-    // Shading samples are per light and per BSDF in MoonRay, and one
-    // number in the interface. Both take it: asking for eight and
-    // getting eight of one and one of the other is not what was asked.
-    ("quality.shadingsamples", "light_samples", GlobalKind::Int),
-    ("quality.shadingsamples", "bsdf_samples", GlobalKind::Int),
+/// **The fourth column is the interface's own default**, and it is
+/// forwarded when the scene is silent.
+///
+/// `numberofthreads` is deliberately absent: see the note at the end.
+///
+/// A `.global` attribute nobody set is not "unspecified": ɴsɪ defines
+/// what it means, and the specification prints the number next to the
+/// name. Leaving it out handed MoonRay *its* default instead -- a
+/// different number, chosen by a different renderer for different
+/// reasons -- so an ɴsɪ scene that says nothing rendered one way in
+/// 3Delight and another here, with nothing to say they had diverged.
+///
+/// The ray depths are the sharp end. A glass ball seen *in a
+/// reflection* is a refraction ray spawned by a reflection ray, and a
+/// renderer whose depth stops shorter renders it black, which reads as
+/// a broken material rather than an exhausted ray budget.
+///
+/// Every default here is quoted from the specification's `.global`
+/// reference: `quality.shadingsamples` 1, `maximumraydepth.diffuse` 1,
+/// `.hair` 4, `.reflection` 1, `.refraction` 4, `.volume` 0,
+/// `numberofthreads` 0. `texturememory` has none, so it is only
+/// carried when asked for.
+const GLOBALS: &[(&str, &str, GlobalKind, Option<i32>)] = &[
+    // **One number here, two there, and the split is a guess.** The
+    // interface offers `quality.shadingsamples` and nothing else,
+    // deliberately: its position is that a renderer can measure where
+    // the variance is and divide a budget better than an artist can
+    // guess in advance -- a lesson from renderers that grew two dozen
+    // quality knobs and cost studios days of trial and error per show.
+    //
+    // MoonRay has no total budget to hand that number to, only
+    // per-lobe counts. So the number is *halved* into both: eight
+    // becomes four and four, and the two together spend what was
+    // asked rather than twice it. An even split is still a guess --
+    // the wrong one for a scene lit by forty small lights rather than
+    // one big one -- but it is the guess that at least gets the total
+    // right, which is the half of the question that is answerable
+    // from here.
+    //
+    // Written up in `upstream/moonray-sampling-has-no-total-budget.md`.
+    // It is a gap in MoonRay's control surface rather than a defect,
+    // and it is not one this backend can close from here.
+    (
+        "quality.shadingsamples",
+        "light_samples",
+        GlobalKind::Half,
+        Some(1),
+    ),
+    (
+        "quality.shadingsamples",
+        "bsdf_samples",
+        GlobalKind::Half,
+        Some(1),
+    ),
     (
         "maximumraydepth.diffuse",
         "max_diffuse_depth",
-        GlobalKind::Int,
+        GlobalKind::Depth,
+        Some(1),
     ),
     // The interface splits reflection and refraction where MoonRay has
     // one glossy depth, so the deeper of the two wins -- clamping to
-    // the shallower would lose paths the scene asked for.
+    // the shallower would lose paths the scene asked for. Which is why
+    // the defaults matter doubly here: 1 and 4 resolve to 4, and a
+    // renderer left on its own default may sit below both.
     (
         "maximumraydepth.reflection",
         "max_glossy_depth",
-        GlobalKind::IntMax,
+        GlobalKind::DepthMax,
+        Some(1),
     ),
     (
         "maximumraydepth.refraction",
         "max_glossy_depth",
-        GlobalKind::IntMax,
+        GlobalKind::DepthMax,
+        Some(4),
     ),
-    ("maximumraydepth.hair", "max_hair_depth", GlobalKind::Int),
+    (
+        "maximumraydepth.hair",
+        "max_hair_depth",
+        GlobalKind::Depth,
+        Some(4),
+    ),
     (
         "maximumraydepth.volume",
         "max_volume_depth",
-        GlobalKind::Int,
+        GlobalKind::Depth,
+        Some(0),
     ),
-    // Megabytes both sides.
-    ("texturememory", "texture_cache_size", GlobalKind::Int),
-    ("numberofthreads", "threads", GlobalKind::Int),
+    // Megabytes both sides. The interface prints no default, so this
+    // is carried only when the scene asks.
+    ("texturememory", "texture_cache_size", GlobalKind::Int, None),
+    // **`numberofthreads` is not here, and the row that claimed it was
+    // is gone.** `SceneVariables` has no thread count: MoonRay takes
+    // one as a *render option*, which `rdl2::Render::new` already
+    // passes. Setting a scene variable of that name only ever produced
+    // `"SceneVariables" attribute "threads": no such attribute` -- and
+    // only once the defaults above started forwarding unconditionally,
+    // which is the one good thing about a wrong mapping that never
+    // fired.
 ];
 
 /// How a global's value converts.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GlobalKind {
     Int,
-    /// Two interface attributes share one rdl2 one; keep the larger.
-    IntMax,
+    /// A ray depth, which the two sides count differently.
+    ///
+    /// **ɴsɪ counts bounces beyond local illumination**: its
+    /// `maximumraydepth.diffuse` says "a depth of 1 specifies one
+    /// additional bounce compared to purely local illumination", so 0
+    /// means direct lighting and nothing more. MoonRay counts total
+    /// bounces of that event type and *ignores the type past the
+    /// limit*, so 0 means the type is not rendered at all.
+    ///
+    /// One apart, and the difference is invisible until it is total:
+    /// ɴsɪ's `maximumraydepth.volume` defaults to 0, meaning a volume
+    /// lit directly, and forwarding that number unchanged switched
+    /// volumes off entirely.
+    Depth,
+    /// A ray depth, where two interface attributes share one rdl2 one:
+    /// converted as [`GlobalKind::Depth`], then the deeper wins.
+    DepthMax,
+    /// One interface attribute is split across two rdl2 ones, so each
+    /// takes half and the **total** is what was asked for. At least
+    /// one either way: a budget of 1 halved is still a sample.
+    Half,
 }
 
 /// Carry `.global` onto `SceneVariables`.
@@ -2232,27 +2324,84 @@ enum GlobalKind {
 /// ray depths or the thread count, and Gaffer's entire render-quality
 /// interface was inert. What still has no counterpart is named by the
 /// sweep rather than dropped.
+/// How many render threads the scene asked for.
+///
+/// **ɴsɪ counts threads in a way MoonRay does not.** `numberofthreads`
+/// is zero for "let the renderer choose", positive for a literal count
+/// -- and *negative* for "as many as optimal, plus this", so `-1` on a
+/// sixteen-core machine means fifteen. A DCC uses that to keep a core
+/// for its own interface, and it is the one spelling a renderer taking
+/// a plain count cannot represent: handed `-1` unchanged, MoonRay would
+/// read a nonsense thread count or ignore it.
+///
+/// So the arithmetic happens here, where the machine can be asked how
+/// many cores it has. `None` means "choose", which is both the
+/// interface's default and MoonRay's own behaviour for zero.
+///
+/// **Not a `SceneVariables` attribute.** MoonRay takes a thread count
+/// as a render option; `SceneVariables` has none, and a row that
+/// claimed otherwise produced `no such attribute` the moment anything
+/// set it.
+pub fn render_threads(scene: &Scene) -> Option<usize> {
+    let asked = scene
+        .node(".global")?
+        .effective("numberofthreads")
+        .and_then(|argument| match &argument.data {
+            OwnedData::I32(values) => values.first().copied(),
+            OwnedData::F32(values) => values.first().map(|v| *v as i32),
+            OwnedData::F64(values) => values.first().map(|v| *v as i32),
+            _ => None,
+        })?;
+
+    match asked {
+        0 => None,
+        count if count > 0 => Some(count as usize),
+        // "Optimal plus the value", and at least one: a machine with
+        // four cores asked for `-8` still has to render.
+        negative => {
+            let optimal = std::thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(1) as i32;
+            Some((optimal + negative).max(1) as usize)
+        }
+    }
+}
+
 fn with_globals(mut variables: Object, scene: &Scene) -> Object {
-    let Some(node) = scene.node(".global") else {
-        return variables;
-    };
+    // **A scene with no `.global` node still has ɴsɪ's defaults.** The
+    // node's absence means nobody overrode anything, not that the
+    // interface has no opinion -- so the defaults below are forwarded
+    // either way.
+    let node = scene.node(".global");
 
     let mut carried: HashMap<&str, i32> = HashMap::new();
-    for (nsi, rdl2, kind) in GLOBALS {
-        let Some(value) =
-            node.effective(nsi)
-                .and_then(|argument| match &argument.data {
-                    OwnedData::I32(values) => values.first().copied(),
-                    OwnedData::F32(values) => values.first().map(|v| *v as i32),
-                    OwnedData::F64(values) => values.first().map(|v| *v as i32),
-                    _ => None,
-                })
+    for (nsi, rdl2, kind, default) in GLOBALS {
+        let Some(value) = node
+            .and_then(|node| node.effective(nsi))
+            .and_then(|argument| match &argument.data {
+                OwnedData::I32(values) => values.first().copied(),
+                OwnedData::F32(values) => values.first().map(|v| *v as i32),
+                OwnedData::F64(values) => values.first().map(|v| *v as i32),
+                _ => None,
+            })
+            .or(*default)
         else {
             continue;
         };
 
+        let value = match kind {
+            // Half each, so the two together spend the budget the
+            // scene asked for rather than twice it.
+            GlobalKind::Half => (value / 2).max(1),
+            // One more than the interface asked for: ɴsɪ counts
+            // bounces past local illumination, MoonRay counts them
+            // from the first. See `GlobalKind::Depth`.
+            GlobalKind::Depth | GlobalKind::DepthMax => value + 1,
+            _ => value,
+        };
+
         let entry = carried.entry(rdl2).or_insert(value);
-        if *kind == GlobalKind::IntMax {
+        if *kind == GlobalKind::DepthMax {
             *entry = (*entry).max(value);
         } else {
             *entry = value;
@@ -2333,7 +2482,7 @@ const CONSUMED: &[(&str, &[&str])] = &[
             "penumbraAngle",
         ],
     ),
-    ("screen", &["resolution", "screenwindow"]),
+    ("screen", &["resolution", "screenwindow", "oversampling"]),
     (
         "outputlayer",
         &[
@@ -2501,7 +2650,7 @@ fn report_unread_global(handle: &str, node: &Node, flushed: &mut Flushed) {
     let mut set: Vec<&str> = node
         .attributes()
         .map(|(name, _)| name)
-        .filter(|name| !GLOBALS.iter().any(|(nsi, _, _)| nsi == name))
+        .filter(|name| !GLOBALS.iter().any(|(nsi, _, _, _)| nsi == name))
         .collect();
     if set.is_empty() {
         return;
@@ -4998,6 +5147,51 @@ fn resolution(scene: &Scene) -> (i32, i32) {
     (1920, 1080)
 }
 
+/// `screen.oversampling`, as MoonRay's `pixel_samples`.
+///
+/// **Two different quantities with one purpose.** ɴsɪ's `oversampling`
+/// is "the total number of samples (i.e. camera rays) to be computed
+/// for each pixel". MoonRay's `pixel_samples` is *the square root* of
+/// that count -- its own documentation says a value of 4 gives 4×4=16.
+/// So the conversion is a square root, and forwarding the number
+/// unchanged would have asked for its square.
+///
+/// **This is anti-aliasing, and it is not `quality.shadingsamples`.**
+/// The interface separates the two the way MoonRay does: camera rays
+/// per pixel decide edges, depth of field and motion blur, while
+/// shading samples decide BSDF and light sampling. They map to
+/// `pixel_samples` and to `bsdf_samples`/`light_samples` respectively,
+/// and crossing them would trade noise in one for noise in the other.
+///
+/// Not forwarding this at all was visible rather than subtle: MoonRay
+/// kept its own default of 8, which is sixty-four camera rays, while
+/// 3Delight took the scene at its word. One render came back clean and
+/// the other grainy, from the same scene.
+///
+/// The specification prints no default for `oversampling`, so a scene
+/// that does not set it is left to the renderer -- which is what "no
+/// default" means.
+fn pixel_samples(scene: &Scene) -> Option<i32> {
+    for output in scene.render_outputs() {
+        if let Some(node) = scene.node(&output.screen)
+            && let Some(argument) = node.effective("oversampling")
+        {
+            let total = match &argument.data {
+                OwnedData::I32(values) => values.first().map(|v| *v as f64),
+                OwnedData::F32(values) => values.first().map(|v| *v as f64),
+                OwnedData::F64(values) => values.first().copied(),
+                _ => None,
+            }?;
+
+            // At least one: a scene asking for zero camera rays is
+            // asking for no image, which is not what it means.
+            return Some((total.max(1.0).sqrt().round() as i32).max(1));
+        }
+    }
+
+    None
+}
+
 /// The screen window, as the interface's four numbers.
 ///
 /// `[left, bottom, right, top]` in screen space. The specification's
@@ -6382,13 +6576,24 @@ mod tests {
         let flushed = flush(&scene);
         let said = flushed.limitations.join("\n");
 
+        // Anti-aliasing crosses now -- `screen.oversampling` is
+        // MoonRay's `pixel_samples`, square-rooted -- so reporting it
+        // would cry wolf.
+        assert!(
+            !said.contains("oversampling"),
+            "oversampling is carried\n{said}"
+        );
+        assert!(
+            flushed.to_rdla().contains("[\"pixel_samples\"]"),
+            "{}",
+            flushed.to_rdla()
+        );
+
         // Genuinely unread, and named.
-        for name in ["crop", "oversampling"] {
-            assert!(
-                said.contains(name),
-                "{name:?} was dropped without a word\n{said}"
-            );
-        }
+        assert!(
+            said.contains("crop"),
+            "\"crop\" was dropped without a word\n{said}"
+        );
 
         // Visibility is carried now, so reporting it would cry wolf --
         // and it must reach the shape.
@@ -6550,11 +6755,25 @@ mod tests {
         let rdla = flushed.to_rdla();
         let said = flushed.limitations.join("\n");
 
-        assert!(rdla.contains("[\"light_samples\"] = 8"), "{rdla}");
-        assert!(rdla.contains("[\"bsdf_samples\"] = 8"), "{rdla}");
-        assert!(rdla.contains("[\"max_diffuse_depth\"] = 3"), "{rdla}");
+        // **Halved, so the two together spend the budget.** The
+        // interface offers one shading-sample number and MoonRay has
+        // two counts to put it in; eight into both would spend
+        // sixteen. Four and four is still a guess about the *split*,
+        // which is MoonRay's control surface to fix
+        // (`upstream/moonray-sampling-has-no-total-budget.md`), but it
+        // is the guess that gets the total right.
+        assert!(rdla.contains("[\"light_samples\"] = 4"), "{rdla}");
+        assert!(rdla.contains("[\"bsdf_samples\"] = 4"), "{rdla}");
+        // **One more than asked, on every depth.** ɴsɪ counts bounces
+        // past local illumination and MoonRay counts them from the
+        // first, so 3 becomes 4. Forwarding unchanged switched volumes
+        // off entirely at the interface's own default of 0.
+        assert!(rdla.contains("[\"max_diffuse_depth\"] = 4"), "{rdla}");
+        // Reflection 2 and refraction 5 become 3 and 6, and the deeper
+        // wins: clamping to the shallower would lose paths the scene
+        // asked for.
         assert!(
-            rdla.contains("[\"max_glossy_depth\"] = 5"),
+            rdla.contains("[\"max_glossy_depth\"] = 6"),
             "the deeper of reflection and refraction wins\n{rdla}"
         );
 
@@ -7587,6 +7806,49 @@ mod tests {
             .limitations
             .join("\n");
         assert!(!quiet.contains("exec_mode"), "{quiet}");
+    }
+
+    /// **ɴsɪ counts threads in a way MoonRay does not.**
+    ///
+    /// Zero means "choose", a positive value is a literal count, and a
+    /// negative one is *optimal plus this* -- so `-1` keeps a core free
+    /// for a DCC's interface. MoonRay takes a plain count, so handing
+    /// it `-1` unchanged would be a nonsense thread count rather than
+    /// fifteen threads on a sixteen-core machine.
+    #[test]
+    fn a_thread_count_resolves_the_interfaces_conventions() {
+        let asked = |value: i32| {
+            let mut scene = triangle();
+            scene
+                .set_attribute(
+                    ".global",
+                    vec![arg(
+                        "numberofthreads",
+                        Type::I32,
+                        OwnedData::I32(vec![value]),
+                    )],
+                )
+                .expect("a recordable edit");
+            render_threads(&scene)
+        };
+
+        // Zero is "let the renderer choose", which is what `None` says.
+        assert_eq!(asked(0), None);
+        // A positive value is itself.
+        assert_eq!(asked(6), Some(6));
+
+        let optimal = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+
+        // A negative value counts down from optimal, and never below
+        // one: a four-core machine asked for `-8` still has to render.
+        assert_eq!(asked(-1), Some((optimal - 1).max(1)));
+        assert_eq!(asked(-(optimal as i32) - 4), Some(1));
+
+        // And a scene that never mentions threads says nothing, rather
+        // than forwarding the default of zero as a literal count.
+        assert_eq!(render_threads(&triangle()), None);
     }
 
     /// **A narrowed environment is a sun, and MoonRay has no cone.**

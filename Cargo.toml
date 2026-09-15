@@ -81,11 +81,39 @@ default = ["cli", "interned_handles"]
 # Delete this feature and the gate on the test the day that release
 # lands.
 linked-route = []
-# Link `scene_rdl2` -- and, with it, build the scene in memory rather
-# than writing a file. Off by default because it needs `scene_rdl2`
-# installed and `$SCENE_RDL2_ROOT` pointing at it, while everything
-# else here -- the emitter, the oracle, the flush -- is checked without
-# a renderer and must stay that way.
+# Build the scene **in memory**, by linking MoonRay's own scene library.
+#
+# # What "rdl2" is, since the name explains nothing
+#
+# `scene_rdl2` is the library MoonRay keeps its scene in: node classes,
+# attributes, the `Layer` table, and readers and writers for its two
+# file formats, `.rdla` (ASCII) and `.rdlb` (binary). The feature is
+# named after the library because that is the thing being linked.
+#
+# **MoonRay's own source never expands the letters.** `RDL` appears
+# throughout `scene_rdl2` -- "all the data for a specific scene in RDL",
+# "use RDL to read and write SceneContexts" -- and nowhere as words, so
+# what it abbreviates is not stated anywhere this crate can check. The
+# `2` is a generation marker, the library being the second of its line.
+# Anything more confident than that would be a guess dressed as fact.
+#
+# # What it changes
+#
+# With it, a render hands MoonRay the scene directly and no file is
+# written. Without it, the flush writes an `.rdla` and spawns the
+# `moonray` binary to read it back -- the same image, later, through a
+# process boundary and a parse.
+#
+# **The file route is for looking at scenes, not for rendering them.**
+# `$NSI_MOONRAY_SCENE` and `mnry cat` exist so a scene can be read; the
+# spawn is what happens when there is no linked renderer to hand it to.
+#
+# Off by default because it needs `scene_rdl2` installed and
+# `$SCENE_RDL2_ROOT` pointing at it, while everything else here -- the
+# emitter, the oracle, the flush -- is checked without a renderer and
+# must stay that way. Turning it on by default would mean this crate
+# could not be built, or its tests run, on a machine that cannot build
+# MoonRay.
 rdl2 = []
 # The `mnry` command. On by default so `cargo install nsi-moonray`
 # gives you the renderer's front end; a library consumer that wants the

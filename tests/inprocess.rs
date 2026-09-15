@@ -3295,6 +3295,22 @@ fn an_osl_volume_shader_shades_the_volume() {
     let mut nsi = scene(width as i32, height as i32);
     nsi.disconnect("quad", None, ".root", "objects").unwrap();
 
+    // **The scene asks for the samples it needs.** ɴsɪ's own default
+    // for `quality.shadingsamples` is 1, and this backend forwards
+    // that rather than leaving MoonRay on its own larger default -- so
+    // a scene that says nothing is now genuinely as noisy as the
+    // interface specifies. A test reading colour out of a volume has
+    // to say what quality it wants, exactly as a scene would.
+    nsi.set_attribute(
+        ".global",
+        vec![arg(
+            "quality.shadingsamples",
+            Type::I32,
+            OwnedData::I32(vec![16]),
+        )],
+    )
+    .unwrap();
+
     nsi.create("smoke", "volume").unwrap();
     nsi.set_attribute(
         "smoke",

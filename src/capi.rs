@@ -932,7 +932,13 @@ pub unsafe extern "C" fn NSIRenderControl(
             })
             .collect();
 
-        if let Err(error) = Render::new(&path).run() {
+        // The same thread count the linked path resolves, for the
+        // spawned one: `.global numberofthreads`, with ɴsɪ's negative
+        // "optimal plus this" convention already turned into a number.
+        let mut job = Render::new(&path);
+        job.threads = crate::flush::render_threads(&context.scene);
+
+        if let Err(error) = job.run() {
             // ɴsɪ always returns an image, and when it cannot, it says
             // so and leaves the scene where someone can look at it.
             context.reporter.say(

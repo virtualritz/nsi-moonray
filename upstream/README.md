@@ -16,6 +16,7 @@ crashes for one assembled in memory.
 | [`moonray-meshlight-needs-moonshine-dwa.md`](moonray-meshlight-needs-moonshine-dwa.md) | Not filed — as above |
 | [`moonray-scalar-material-renders-black.md`](moonray-scalar-material-renders-black.md) | Not filed — as above |
 | [`moonray-meshlight-map-shader-segfault.md`](moonray-meshlight-map-shader-segfault.md) | Not filed — as above |
+| [`moonray-sampling-has-no-total-budget.md`](moonray-sampling-has-no-total-budget.md) | Not filed — as above. A control-surface gap rather than a defect: there is no way to ask for a quality budget and let the renderer divide it |
 
 The workaround for each lives in this repository and is marked as
 such, so that fixing it upstream is a deletion rather than an

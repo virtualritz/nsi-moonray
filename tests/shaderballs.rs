@@ -105,7 +105,7 @@ fn look<'a>(
 }
 
 /// Build the row. Identical for both renderers, by construction.
-fn build<'a>(
+fn stage<'a>(
     context: &nsi::Context<'a>,
     principled: &'a str,
     environment: &'a str,
@@ -135,12 +135,28 @@ fn build<'a>(
     context.create("screen", nsi::node::SCREEN, None);
     context.set_attribute(
         "screen",
-        &[
-            nsi::i32_slice!("resolution", &[width, height]).array_len(PAIR),
-            nsi::i32!("oversampling", 64),
-        ],
+        &[nsi::i32_slice!("resolution", &[width, height]).array_len(PAIR)],
     );
     context.connect("screen", None, "cam", "screens", None);
+
+    // **Samples on `.global`, because both renderers read it.**
+    //
+    // `quality.shadingsamples` is the interface's own control and
+    // crosses to `SceneVariables` on the MoonRay side, so asking for a
+    // number here asks *both* for it. That is the opposite of
+    // `screen.oversampling`, which only 3Delight reads -- setting that
+    // would hand one renderer a larger budget than the other and call
+    // the result a comparison, so it is deliberately absent.
+    //
+    // The interface's default is 1, which is honest and unreadable: at
+    // one sample the noise is louder than anything the image is trying
+    // to show. Everything *else* on `.global` is left unset on purpose,
+    // so the ray depths come from the defaults this backend forwards
+    // rather than from a number written here.
+    context.set_attribute(
+        nsi::node::GLOBAL,
+        &[nsi::i32!("quality.shadingsamples", 32)],
+    );
 
     // A dim sky, so the emitter is the brightest thing and the metal
     // has something other than white to reflect.
@@ -194,6 +210,43 @@ fn build<'a>(
         ],
     );
 
+    context.create("beauty", nsi::node::OUTPUT_LAYER, None);
+    context.set_attribute(
+        "beauty",
+        &[
+            nsi::string!("variablename", "Ci"),
+            nsi::string!("scalarformat", "float"),
+        ],
+    );
+    context.connect("beauty", None, "screen", "outputlayers", None);
+
+    context.create("driver", nsi::node::OUTPUT_DRIVER, None);
+    context.set_attribute(
+        "driver",
+        &[
+            nsi::string!("drivername", "exr"),
+            nsi::string!("imagefilename", image),
+        ],
+    );
+    context.connect("driver", None, "beauty", "outputdrivers", None);
+}
+
+/// **A roughness sweep, to settle what the looks only hint at.**
+///
+/// The comparison above shows the plastic sphere glossier in 3Delight
+/// and the floor glossier in MoonRay, which is the wrong shape for a
+/// simple unit mismatch: a roughness read as alpha, or alpha read as
+/// roughness, moves every surface the same way. Something else is
+/// going on, and five spheres wearing five different looks cannot say
+/// what.
+///
+/// So: one look, one parameter, swept. Identical geometry, identical
+/// lighting, only `roughness` changing across the row. Whatever the two
+/// renderers disagree about is then a function of that one number, and
+/// the measured highlight tells which way.
+
+/// The five looks, left to right.
+fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
     // Matte, plastic, glass, metal, emissive -- left to right.
     let spacing = 2.3f32;
     let first = -2.0 * spacing;
@@ -259,26 +312,87 @@ fn build<'a>(
             nsi::f32!("incandescence_intensity", 8.0),
         ],
     );
+}
 
-    context.create("beauty", nsi::node::OUTPUT_LAYER, None);
-    context.set_attribute(
-        "beauty",
-        &[
-            nsi::string!("variablename", "Ci"),
-            nsi::string!("scalarformat", "float"),
-        ],
-    );
-    context.connect("beauty", None, "screen", "outputlayers", None);
+#[test]
+fn a_roughness_sweep_through_both_renderers() {
+    let Ok(delight) = std::env::var("DELIGHT") else {
+        eprintln!("skipped: no $DELIGHT");
+        return;
+    };
+    let principled = format!("{delight}/osl/dlPrincipled.oso");
+    if !std::path::Path::new(&principled).is_file() {
+        eprintln!("skipped: {principled} is not there");
+        return;
+    }
 
-    context.create("driver", nsi::node::OUTPUT_DRIVER, None);
-    context.set_attribute(
-        "driver",
-        &[
-            nsi::string!("drivername", "exr"),
-            nsi::string!("imagefilename", image),
-        ],
+    nsi::backend::register(
+        "moonray",
+        std::sync::Arc::new(nsi_moonray::MoonRay),
     );
-    context.connect("driver", None, "beauty", "outputdrivers", None);
+
+    let environment = std::path::Path::new(env!("NSI_MOONRAY_SHADERS"))
+        .join("moonrayEnvironment.oso")
+        .to_string_lossy()
+        .into_owned();
+    let directory = std::env::temp_dir().join("nsi-moonray-roughness");
+    std::fs::create_dir_all(&directory).expect("a writable directory");
+
+    const SWEEP: [f32; 5] = [0.05, 0.15, 0.30, 0.50, 0.80];
+
+    for renderer in ["3delight", "moonray"] {
+        let image = directory.join(format!("{renderer}.exr"));
+        let _ = std::fs::remove_file(&image);
+
+        {
+            let context =
+                nsi::Context::new(Some(&[nsi::string!("renderer", renderer)]))
+                    .unwrap_or_else(|| panic!("{renderer} did not load"));
+
+            stage(
+                &context,
+                &principled,
+                &environment,
+                image.to_string_lossy().as_ref(),
+            );
+
+            let spacing = 2.3f32;
+            let first = -2.0 * spacing;
+            for (slot, roughness) in SWEEP.into_iter().enumerate() {
+                let handle = format!("ball{slot}");
+                sphere(
+                    &context,
+                    &handle,
+                    [first + slot as f32 * spacing, 0.0, 0.0],
+                    1.0,
+                );
+                look(
+                    &context,
+                    &handle,
+                    &principled,
+                    &[
+                        nsi::color!("i_color", &[0.8, 0.8, 0.8]),
+                        nsi::f32!("roughness", roughness),
+                        nsi::f32!("specular_level", 0.5),
+                    ],
+                );
+            }
+
+            context.render_control(nsi::Action::Start, None);
+            context.render_control(nsi::Action::Wait, None);
+            context.render_control(nsi::Action::Stop, None);
+        }
+
+        eprintln!(
+            "{renderer}: {} ({})",
+            image.display(),
+            if image.is_file() {
+                "written"
+            } else {
+                "MISSING"
+            }
+        );
+    }
 }
 
 #[test]
@@ -323,14 +437,21 @@ fn a_row_of_looks_through_both_renderers() {
                 nsi::Context::new(Some(&[nsi::string!("renderer", renderer)]))
                     .unwrap_or_else(|| panic!("{renderer} did not load"));
 
-            build(
+            stage(
                 &context,
                 &principled,
                 &environment,
                 image.to_string_lossy().as_ref(),
             );
+            looks(&context, &principled);
+            // **A batch render: start, wait, stop.** No
+            // `synchronize` -- that is the interactive loop's verb,
+            // and a render driven through it is a different thing
+            // being measured. `stop` after the wait so the frame is
+            // finished rather than merely left.
             context.render_control(nsi::Action::Start, None);
             context.render_control(nsi::Action::Wait, None);
+            context.render_control(nsi::Action::Stop, None);
         }
 
         eprintln!(

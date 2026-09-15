@@ -65,7 +65,13 @@ impl Session {
     /// process, or a scene MoonRay's render prep refuses. Each is
     /// reported on the way out.
     pub fn new(scene: Scene, dso_path: &str) -> Option<Self> {
-        let render = Render::new(Some(dso_path), None, Mode::Progressive)?;
+        // `.global numberofthreads`, with ɴsɪ's negative convention
+        // already resolved against this machine's core count -- see
+        // `flush::render_threads`. MoonRay takes the count here rather
+        // than as a scene variable.
+        let threads =
+            crate::flush::render_threads(&scene).map(|count| count as u32);
+        let render = Render::new(Some(dso_path), threads, Mode::Progressive)?;
         let mut session = Self {
             scene,
             render,
