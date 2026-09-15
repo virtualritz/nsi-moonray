@@ -122,9 +122,9 @@ deps:
 deps-list:
     @packaging/deps.sh --list
 
-# Fetch and build MoonRay into `vendor/install`.
-renderer:
-    packaging/renderer.sh --prefix "{{prefix}}"
+# Fetch and build MoonRay into PREFIX (default: the platform's own place).
+renderer PREFIX=prefix:
+    packaging/renderer.sh --prefix "{{PREFIX}}"
 
 # **The volume tests need a volume**, and one is an asset rather than
 # something a checkout has. These are the OpenVDB project's own sample
@@ -151,8 +151,8 @@ assets:
     ls -la vendor/assets/
 
 # Check the tools and headers a renderer build needs, building nothing.
-renderer-check:
-    packaging/renderer.sh --prefix "{{prefix}}" --check
+renderer-check PREFIX=prefix:
+    packaging/renderer.sh --prefix "{{PREFIX}}" --check
 
 # Type-check the renderer half.
 check-rdl2: require-rdl2
@@ -218,24 +218,44 @@ require-rdl2:
 build:
     cargo build --release
 
-# Put `mnry` on the PATH from this checkout. With a renderer built --
-# `just setup` -- this links it, so renders happen in process; without
-# one it still installs, and falls back to spawning the `moonray`
-# binary. Either way the scene classes are found with no flag, because
-# `just renderer` installs them where `src/dso.rs` looks.
+# Everything, into one place: MoonRay at PREFIX, `mnry` in
+# ~/.cargo/bin linked against it, and an offer to put PREFIX/bin on the
+# PATH so `moonray` and `rdl2_print` are reachable too.
+#
+# **PREFIX defaults to the platform's own data directory** --
+# `~/Library/Application Support/MoonRay` on macOS,
+# `$XDG_DATA_HOME/moonray` or `~/.local/share/moonray` elsewhere --
+# which is where `src/dso.rs` and `build.rs` both look with nothing
+# set. Installing there is what makes the scene classes resolve without
+# a flag and the `rdl2` feature build without `$SCENE_RDL2_ROOT`;
+# installing anywhere else means setting that variable.
+#
+# The renderer is built only if PREFIX has none. `just renderer`
+# rebuilds one that is already there.
+#
+# `mnry` stays in ~/.cargo/bin, where `cargo install` puts every other
+# Rust binary on the machine and the PATH question is already settled.
 
-# Install `mnry` into ~/.cargo/bin.
-install:
+# Install MoonRay into PREFIX and `mnry` against it.
+install PREFIX=prefix:
     #!/usr/bin/env sh
     set -eu
-    NSI_MOONRAY_PREFIX="{{prefix}}" . packaging/env.sh
-    if [ -d "{{prefix}}/rdl2dso" ]; then
+    if [ -d "{{PREFIX}}/rdl2dso" ]; then
+        echo "install: MoonRay is already at {{PREFIX}}"
+    else
+        echo "install: no MoonRay at {{PREFIX}} -- building one, about an hour"
+        packaging/renderer.sh --prefix "{{PREFIX}}"
+    fi
+    NSI_MOONRAY_PREFIX="{{PREFIX}}" . packaging/env.sh
+    if [ -d "{{PREFIX}}/rdl2dso" ]; then
         cargo install --path . --locked --features rdl2
-        echo "mnry: installed with the renderer linked"
+        echo "install: mnry -> $(command -v mnry || echo ~/.cargo/bin/mnry), renderer linked"
+        echo "install: MoonRay -> {{PREFIX}}"
+        packaging/path.sh "{{PREFIX}}/bin"
     else
         cargo install --path . --locked
-        echo "mnry: installed without a renderer -- it will spawn the" >&2
-        echo "      \`moonray\` binary. \`just setup\` builds one." >&2
+        echo "install: mnry installed without a renderer -- it will spawn" >&2
+        echo "         the \`moonray\` binary. \`just renderer\` builds one." >&2
     fi
 
 # Assemble a relocatable tree from a MoonRay install: this backend, the
@@ -246,7 +266,7 @@ install:
 # `patchelf` is what makes the result relocatable on Linux; without it
 # the bundle works only where it was built, and the script says so.
 
-# Assemble a bundle from a MoonRay install (default: vendor/install).
+# Assemble a bundle from a MoonRay install (default: the install prefix).
 bundle PREFIX=prefix: require-rdl2
     #!/usr/bin/env sh
     set -eu

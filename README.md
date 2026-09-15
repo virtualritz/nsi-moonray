@@ -245,20 +245,40 @@ dump is written, which is how you look at what a render was made from.
 From a checkout:
 
 ```bash
-just setup     # dependencies, then MoonRay (about an hour)
-just install   # mnry into ~/.cargo/bin, renderer linked
+just pixi-install   # the dependencies, into .pixi/, no root
+just install        # MoonRay, then mnry linked against it
 ```
 
-`just install` is `cargo install --path .` with the renderer feature
-turned on when there is a renderer to turn it on for, and without when
-there is not. Plain `cargo install --path .` works too and gives you
-the emitter -- `mnry cat`, `.nsi` to `.rdla`, scene conversion -- with
-`mnry render` falling back to spawning the `moonray` binary.
+`just install` takes where to put MoonRay, and defaults to the
+platform's own per-user data directory:
 
-**No flag is needed to find the scene classes.** `just setup` installs
-MoonRay into the platform's per-user data directory, which is one of
-the places `mnry` searches, so an installed binary finds an installed
-renderer on its own. `tests/bundle.rs` holds those two defaults
+```bash
+just install                      # ~/.local/share/moonray, or
+                                  # ~/Library/Application Support/MoonRay
+just install /opt/moonray         # or wherever you want it
+```
+
+It builds a renderer only if that place has none -- about an hour, and
+it says so before it starts -- then `cargo install`s `mnry` into
+~/.cargo/bin with the renderer feature turned on. `just renderer`
+rebuilds one that is already there.
+
+Afterwards it offers to append `PREFIX/bin` to your `~/.zshrc`,
+`~/.bashrc` or `~/.config/fish/config.fish`, because that is where
+`moonray`, `rdl2_print` and the rest of MoonRay's own tools land and
+nothing else puts them on the PATH. It asks, takes silence for no, and
+prints the line either way; `packaging/path.sh --yes DIR` does it
+unattended.
+
+Plain `cargo install --path .` works too and gives you the emitter --
+`mnry cat`, `.nsi` to `.rdla`, scene conversion -- with `mnry render`
+falling back to spawning the `moonray` binary.
+
+**Why the default location is not arbitrary.** `src/dso.rs` searches
+it, so an installed `mnry` finds an installed renderer with no flag;
+`build.rs` searches it too, so `--features rdl2` compiles without
+`$SCENE_RDL2_ROOT` set. Installing anywhere else works and means
+setting that variable. `tests/bundle.rs` holds those defaults
 together, since they are written in different files and drifting apart
 would render a black frame in silence.
 
@@ -303,7 +323,7 @@ off.
 ### With a renderer
 
 ```bash
-just setup       # dependencies, then MoonRay into vendor/install
+just setup       # dependencies, then MoonRay into the default prefix
 just test-rdl2   # the tests that link it and render
 ```
 
@@ -340,10 +360,10 @@ OpenImageIO that OSL 1.15 conflicts with, so the official binary
 release is downloaded; and `log4cplus` on macOS ARM, which conda-forge
 does not build and which is compiled from source there.
 
-Every renderer recipe uses `$SCENE_RDL2_ROOT` when set and
-`vendor/install` otherwise, so an install you already have needs only
-`SCENE_RDL2_ROOT=/path/to/install just test-rdl2`. `just env` says what
-the recipes can see.
+Every renderer recipe uses `$SCENE_RDL2_ROOT` when set and the
+platform's per-user data directory otherwise, so an install you already
+have needs only `SCENE_RDL2_ROOT=/path/to/install just test-rdl2`.
+`just env` says what the recipes can see.
 
 **MoonRay is cloned, not a submodule.** Four repositories and several
 hundred megabytes, every one of them useless to somebody who wants the
