@@ -3,6 +3,28 @@
 
 #include "nsi_moonray_shim.h"
 
+// **Before rdl2, and not for anything here.** The installed
+// `rdl2/Shader.h` forward-declares
+// `moonray::shading::ThreadLocalObjectState` and then subscripts a
+// pointer to it inside `forEachThreadLocalObjectState`, a member
+// template. The expression is non-dependent, so a compiler is free to
+// diagnose it when it parses the template rather than when someone
+// instantiates it -- clang does, GCC waits for an instantiation that
+// a consumer of rdl2 never makes. Completing the type first settles it
+// for both, and MoonRay's own build never noticed because in *its*
+// tree the definition is already included by something.
+//
+// `__has_include` because MoonRay does not install this header: it is
+// missing from the `PUBLIC_HEADER` list in
+// `lib/rendering/shading/CMakeLists.txt`, which is what
+// `upstream/moonray-shader-header-needs-tlos.md` asks to have fixed.
+// `packaging/renderer.sh` installs it, so a renderer from `just
+// install` has it; an install from elsewhere may not, and then this
+// falls back to the GCC-only situation rather than failing to compile.
+#if __has_include(<moonray/rendering/shading/ThreadLocalObjectState.h>)
+#include <moonray/rendering/shading/ThreadLocalObjectState.h>
+#endif
+
 #include <scene_rdl2/scene/rdl2/rdl2.h>
 #include <scene_rdl2/scene/rdl2/AsciiWriter.h>
 #include <scene_rdl2/common/except/exceptions.h>

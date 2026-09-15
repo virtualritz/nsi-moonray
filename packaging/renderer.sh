@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 #
-# Fetch and build MoonRay into `vendor/install`, so `just test-rdl2`,
+# Fetch and build MoonRay into the platform's own place, so `just test-rdl2`,
 # `just bundle` and everything else that needs a renderer just work.
 #
 # This is `specs/001-moonray-backend/quickstart.md` made executable,
@@ -17,7 +17,8 @@
 #
 # Usage: packaging/renderer.sh [--prefix DIR] [--jobs N] [--check]
 #
-#   --prefix   where to install; default `vendor/install`
+#   --prefix   where to install; default the platform's per-user data
+#              directory, which is where `build.rs` and `src/dso.rs` look
 #   --jobs     parallel build jobs; default every core
 #   --check    verify the tools and headers are there, build nothing
 
@@ -338,6 +339,23 @@ CMAKE_MODULES_ROOT="$MODULES" cmake -S "$VENDOR/moonray" -B "$VENDOR/build-moonr
 # built. With the tests gone, `all` builds and installs cleanly.
 cmake --build "$VENDOR/build-moonray" -j"$JOBS"
 cmake --install "$VENDOR/build-moonray"
+
+# **The header MoonRay forgets to install.**
+# `scene_rdl2/scene/rdl2/Shader.h` forward-declares
+# `moonray::shading::ThreadLocalObjectState` and subscripts a pointer
+# to it inside a member template, so any consumer of the *installed*
+# rdl2 headers needs the definition -- and
+# `lib/rendering/shading/CMakeLists.txt` leaves that one header out of
+# its `PUBLIC_HEADER` list while installing its neighbours. GCC parses
+# the template and waits for an instantiation that never comes; clang
+# diagnoses it there and then, which is why this looked for a while
+# like "MoonRay needs GCC" rather than like a missing file.
+#
+# Copied rather than patched into the CMakeLists because `vendor/` is a
+# clone at a pinned ref and a patch there is undone by the next fetch.
+# `upstream/moonray-shader-header-needs-tlos.md` is the ask upstream.
+cp "$VENDOR/moonray/lib/rendering/shading/ThreadLocalObjectState.h" \
+   "$PREFIX/include/moonray/rendering/shading/"
 
 step "done"
 [ -d "$PREFIX/rdl2dso" ] || die "$PREFIX/rdl2dso was not installed, so \

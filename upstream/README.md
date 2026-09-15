@@ -17,6 +17,7 @@ crashes for one assembled in memory.
 | [`moonray-scalar-material-renders-black.md`](moonray-scalar-material-renders-black.md) | Not filed — as above |
 | [`moonray-meshlight-map-shader-segfault.md`](moonray-meshlight-map-shader-segfault.md) | Not filed — as above |
 | [`moonray-sampling-has-no-total-budget.md`](moonray-sampling-has-no-total-budget.md) | Not filed — as above. A control-surface gap rather than a defect: there is no way to ask for a quality budget and let the renderer divide it |
+| [`moonray-shader-header-needs-tlos.md`](moonray-shader-header-needs-tlos.md) | Not filed — as above. A build defect: the installed `rdl2/Shader.h` needs a header MoonRay does not install, which clang catches and GCC does not |
 
 The workaround for each lives in this repository and is marked as
 such, so that fixing it upstream is a deletion rather than an
