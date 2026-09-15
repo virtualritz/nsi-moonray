@@ -280,15 +280,22 @@ fn build_shaders() {
 ///    second-guessed. A wrong one fails loudly rather than being
 ///    quietly replaced by a working install, because "it built, but
 ///    against the wrong library" is the worse afternoon.
-/// 2. **`target/<profile>/`.** A build-local install, so a checkout can
-///    carry its own renderer without touching the machine.
-/// 3. **The platform's own place**, which is exactly what
-///    `packaging/env.sh` picks and `just setup` installs into:
+/// 2. **`$MOONRAY_ROOT`.** Every install this repository makes puts
+///    both at the same prefix, so somebody who exported one meant it.
+/// 3. **`target/<profile>/` and `target/`.** A build-local install, so
+///    a checkout can carry its own renderer without touching the
+///    machine.
+/// 4. **The platform's own place**, which is exactly what
+///    `packaging/env.sh` picks and `just install` installs into:
 ///    `$XDG_DATA_HOME/moonray` or `~/.local/share/moonray`, and
 ///    `~/Library/Application Support/MoonRay` on macOS.
+/// 5. **`/usr/local` and `/usr`**, for a package or a `cmake --install`
+///    that took the default prefix.
 ///
 /// Panics listing every path tried, because the alternative is a build
-/// failing on a missing header with no hint of what was looked for.
+/// failing on a missing header with no hint of what was looked for --
+/// and because that list is what caught this function getting the
+/// `target/` arithmetic wrong.
 fn scene_rdl2_root() -> String {
     if let Ok(root) = std::env::var("SCENE_RDL2_ROOT") {
         return root;
@@ -296,20 +303,47 @@ fn scene_rdl2_root() -> String {
 
     let mut tried = Vec::new();
 
-    // `$OUT_DIR` is `target/<profile>/build/<crate>-<hash>/out`, so the
-    // profile directory is four levels up. Derived rather than assumed:
-    // the profile is not `debug` or `release` only, and `CARGO_TARGET_DIR`
-    // may point anywhere.
+    // `$MOONRAY_ROOT` names the same prefix in every install this
+    // repository makes, and somebody who exported one and not the other
+    // meant the renderer they exported.
+    if let Ok(root) = std::env::var("MOONRAY_ROOT") {
+        tried.push(std::path::PathBuf::from(root));
+    }
+
+    // A build-local install, so a checkout can carry its own renderer.
+    //
+    // **Found by name, not by counting.** `$OUT_DIR` sits somewhere
+    // under `<target>/<profile>/build/`, and how deep has changed:
+    // cargo wrote `build/<crate>-<hash>/out` once and writes
+    // `build/<crate>/<hash>/out` now. Counting four levels up was right
+    // for the first and one short for the second, which reported
+    // `<target>/<profile>/build` as an install prefix -- a directory
+    // that will never hold one. Stepping out of the `build` directory
+    // is the same answer under both layouts and under any future one
+    // that keeps the name.
     if let Ok(out) = std::env::var("OUT_DIR") {
         let out = std::path::PathBuf::from(out);
-        if let Some(profile) = out.ancestors().nth(3) {
+        let build = out
+            .ancestors()
+            .find(|path| path.file_name().is_some_and(|name| name == "build"));
+        if let Some(profile) = build.and_then(std::path::Path::parent) {
             tried.push(profile.to_path_buf());
+            // And the target directory itself, for an install put
+            // beside the profiles rather than inside one.
+            if let Some(target) = profile.parent() {
+                tried.push(target.to_path_buf());
+            }
         }
     }
 
     if let Some(prefix) = platform_prefix() {
         tried.push(prefix);
     }
+
+    // A system install, which is what a distribution package or a
+    // `cmake --install` with no prefix produces.
+    tried.push(std::path::PathBuf::from("/usr/local"));
+    tried.push(std::path::PathBuf::from("/usr"));
 
     for path in &tried {
         // `rdl2/Types.h` is what the shim includes, so its presence is
@@ -320,14 +354,22 @@ fn scene_rdl2_root() -> String {
     }
 
     panic!(
-        "the `rdl2` feature needs a `scene_rdl2` install and found \
-         none. Set $SCENE_RDL2_ROOT to one, or run `just setup` to \
-         build it. Looked in: {}",
+        "the `rdl2` feature needs `scene_rdl2`'s headers and found \
+         none.\n\nEach of these was probed for \
+         `include/scene_rdl2/scene/rdl2/Types.h`:\n{}\n\n\
+         Note that it is the *headers* that are missing, so a MoonRay \
+         bundle or package that ships only `bin` and `lib` is not \
+         enough -- this feature compiles against rdl2.\n\n\
+         Either:\n  \
+         - set $SCENE_RDL2_ROOT to an install that has them, or\n  \
+         - build one: `just install` in a nsi-moonray checkout, or\n  \
+         - turn the feature off, and this backend spawns the `moonray` \
+         binary instead of linking it.",
         tried
             .iter()
-            .map(|path| path.display().to_string())
+            .map(|path| format!("  {}", path.display()))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join("\n")
     );
 }
 
