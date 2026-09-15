@@ -86,6 +86,48 @@ displacement, volumes and lights all cross as OSL group specifications
 and MoonRay runs them. What a shader *does* is answered by executing
 it, not by recognising what it is called.
 
+## One Scene, Two Renderers
+
+ɴsɪ is an interface, not a renderer. `tests/shaderballs.rs` builds a row
+of five spheres -- matte, plastic, glass, metal, emissive -- once,
+through `nsi::Context`, and renders it twice. Every sphere wears the
+same 3Delight shader, `dlPrincipled`, at five parameter sets. The two
+passes differ by one string:
+
+```rust
+nsi::Context::new(Some(&[nsi::string!("renderer", "3delight")]));
+nsi::Context::new(Some(&[nsi::string!("renderer", "moonray")]));
+```
+
+**3Delight**
+
+![Five spheres rendered by 3Delight](doc/images/shaderballs-3delight.png)
+
+**MoonRay, through this crate**
+
+![The same five spheres rendered by MoonRay](doc/images/shaderballs-moonray.png)
+
+What the pair is for is the disagreements, and there are three worth
+knowing:
+
+- **Glass.** `refract_weight` reaches the shader, but the closure walk
+  here has no transmission path, so the lobe is dropped and the sphere
+  renders opaque.
+- **The environment.** MoonRay cannot run `environmentLight`, so it
+  falls back to a flat white dome carrying only the intensity. The
+  metal sphere reflects a hard horizon rather than a graded sky.
+- **The emitter.** It is seen, at the right colour, but it lights far
+  less than it should. `dlPrincipled` both emits *and* shades, so it is
+  kept a surface rather than becoming a `MeshLight` -- and MoonRay's
+  self-emission is hit-only, with no next-event estimation toward
+  emissive geometry. This is the case the section above is about, and
+  the clearest argument for OSL end to end: one surface that both emits
+  and reflects is exactly what the interface exists to express.
+
+Matte and plastic agree closely, which is the other half of the result:
+geometry, camera, and the diffuse and specular response all cross
+intact.
+
 ## `mnry`
 
 ```bash

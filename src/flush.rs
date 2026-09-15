@@ -3733,7 +3733,8 @@ fn environment(
         None => flushed.limitations.push(format!(
             "environment {handle:?} carries shader {shader:?}, which \
              MoonRay cannot run and which names no texture this backend \
-             recognises; the light is white at intensity 1"
+             recognises; the light is white, and its intensity is the \
+             shader's where the shader has one"
         )),
     }
 
