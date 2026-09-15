@@ -36,13 +36,7 @@ fn main() {
         return;
     }
 
-    let root = std::env::var("SCENE_RDL2_ROOT").unwrap_or_else(|_| {
-        panic!(
-            "the `rdl2` feature needs $SCENE_RDL2_ROOT set to a \
-             `scene_rdl2` install prefix -- the one `quickstart.md` \
-             builds into"
-        )
-    });
+    let root = scene_rdl2_root();
 
     let lua = std::env::var("LUA_INCLUDE_DIR")
         .unwrap_or_else(|_| "/usr/include/lua5.3".to_string());
@@ -268,4 +262,87 @@ fn build_shaders() {
         ),
         Err(error) => panic!("running oslc: {error}"),
     }
+}
+
+/// Where `scene_rdl2` is installed.
+///
+/// **An environment variable is an override, not a requirement.** The
+/// feature used to demand `$SCENE_RDL2_ROOT` and panic without it,
+/// which meant a machine with a perfectly good install still could not
+/// build until someone exported a path they had to know. The same
+/// argument `src/dso.rs` makes for scene classes applies here: an
+/// ordinary install should be found, and the variable should be for
+/// when it is not ordinary.
+///
+/// The order, and why it is that order:
+///
+/// 1. **`$SCENE_RDL2_ROOT`.** What the caller said, never
+///    second-guessed. A wrong one fails loudly rather than being
+///    quietly replaced by a working install, because "it built, but
+///    against the wrong library" is the worse afternoon.
+/// 2. **`target/<profile>/`.** A build-local install, so a checkout can
+///    carry its own renderer without touching the machine.
+/// 3. **The platform's own place**, which is exactly what
+///    `packaging/env.sh` picks and `just setup` installs into:
+///    `$XDG_DATA_HOME/moonray` or `~/.local/share/moonray`, and
+///    `~/Library/Application Support/MoonRay` on macOS.
+///
+/// Panics listing every path tried, because the alternative is a build
+/// failing on a missing header with no hint of what was looked for.
+fn scene_rdl2_root() -> String {
+    if let Ok(root) = std::env::var("SCENE_RDL2_ROOT") {
+        return root;
+    }
+
+    let mut tried = Vec::new();
+
+    // `$OUT_DIR` is `target/<profile>/build/<crate>-<hash>/out`, so the
+    // profile directory is four levels up. Derived rather than assumed:
+    // the profile is not `debug` or `release` only, and `CARGO_TARGET_DIR`
+    // may point anywhere.
+    if let Ok(out) = std::env::var("OUT_DIR") {
+        let out = std::path::PathBuf::from(out);
+        if let Some(profile) = out.ancestors().nth(3) {
+            tried.push(profile.to_path_buf());
+        }
+    }
+
+    if let Some(prefix) = platform_prefix() {
+        tried.push(prefix);
+    }
+
+    for path in &tried {
+        // `rdl2/Types.h` is what the shim includes, so its presence is
+        // the question actually being asked.
+        if path.join("include/scene_rdl2/scene/rdl2/Types.h").is_file() {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+
+    panic!(
+        "the `rdl2` feature needs a `scene_rdl2` install and found \
+         none. Set $SCENE_RDL2_ROOT to one, or run `just setup` to \
+         build it. Looked in: {}",
+        tried
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+}
+
+/// The platform's own install location, matching `packaging/env.sh`.
+fn platform_prefix() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+
+    if cfg!(target_os = "macos") {
+        return home
+            .map(|home| home.join("Library/Application Support/MoonRay"));
+    }
+
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        return Some(std::path::PathBuf::from(data).join("moonray"));
+    }
+
+    home.map(|home| home.join(".local/share/moonray"))
 }
