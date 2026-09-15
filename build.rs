@@ -127,6 +127,7 @@ fn main() {
 
         build_meshlight_dso(moonray);
         build_osl_dso(moonray);
+        build_shaders();
     }
 }
 
@@ -222,5 +223,49 @@ fn build_osl_dso(moonray: &str) {
              wrong."
         ),
         Err(error) => panic!("running dso/osl/build.sh: {error}"),
+    }
+}
+
+/// Compile the shaders this crate ships.
+///
+/// **One shader, and it stands for something MoonRay cannot express as
+/// a shader at all.** `EnvLight` is a light class with no binding an
+/// `OslMap` could hang off, so an environment's OSL never executes.
+/// `shaders/moonrayEnvironment.osl` gives that built-in a shader's
+/// face: its parameters are `EnvLight`'s, spelled and defaulted the
+/// same, so the mapping is a declaration rather than a table in Rust
+/// that drifts from the class it mirrors.
+///
+/// Compiled here rather than shipped as `.oso` because an `.oso` is
+/// version-bound to the OSL that reads it, and this build already
+/// knows which one that is.
+fn build_shaders() {
+    println!("cargo::rerun-if-changed=shaders/moonrayEnvironment.osl");
+
+    let Ok(osl) = std::env::var("OSL_ROOT") else {
+        return;
+    };
+    let out = std::env::var("OUT_DIR").expect("cargo sets OUT_DIR");
+    let shaders = format!("{out}/shaders");
+    if let Err(error) = std::fs::create_dir_all(&shaders) {
+        panic!("creating {shaders}: {error}");
+    }
+
+    let status = std::process::Command::new(format!("{osl}/bin/oslc"))
+        .arg("-o")
+        .arg(format!("{shaders}/moonrayEnvironment.oso"))
+        .arg("shaders/moonrayEnvironment.osl")
+        .status();
+
+    match status {
+        Ok(status) if status.success() => {
+            println!("cargo::rustc-env=NSI_MOONRAY_SHADERS={shaders}");
+        }
+        Ok(status) => panic!(
+            "compiling shaders/moonrayEnvironment.osl failed ({status}); \
+             without it a scene naming MoonRay's own environment finds \
+             no shader"
+        ),
+        Err(error) => panic!("running oslc: {error}"),
     }
 }

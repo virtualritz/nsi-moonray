@@ -69,8 +69,30 @@ only when no compiled `.oso` can be found behind the shader. Then
 MoonRay supplies the photometry, the light is in the right place with
 the wrong look, and the flush says so.
 
-One gap remains, and it is the one the specification is written to
-allow:
+Two gaps remain:
+
+- **An `environment` node's shader never runs.** MoonRay's `EnvLight`
+  is a light class rather than a shader: its whole attribute list is a
+  texture and some colour correction, with nothing an `OslMap` could
+  bind to. So an environment crosses as colour, intensity, exposure and
+  a texture path, and everything else the shader does -- a gradient, a
+  mapping, a per-component contribution -- is lost.
+
+  **The size of that loss is easy to miss.** 3Delight's
+  `environmentLight` defaults `i_color` to 0.5 grey and *applies* it,
+  because 3Delight executes the shader. A substituting backend that
+  reads only the intensity gets a white dome: a full stop brighter
+  across every surface it lights, with a black background where the sky
+  should be. Someone using one renderer alone would tune the scene
+  around that and have it come out wrong in the other. What the scene
+  leaves unset is therefore read from the compiled shader's own
+  declarations rather than from whatever the rdl2 class happens to
+  default to.
+
+  The route that would remove this is an enclosing dome mesh wearing
+  the shader, since `MeshLight` is the one light class that takes an
+  `OslMap`. It costs the sampling quality an analytic environment light
+  has, which is why it is written down rather than done.
 
 - A shader that emits *and* shades has **no** faithful mapping.
   `RenderContext::createMeshLightLayer` skips a light whose geometry is
@@ -81,9 +103,11 @@ allow:
   metal panel is exactly this case, and exactly what ɴsɪ's model was
   designed to express.
 
-So the whole shading surface now goes the same way: surfaces,
-displacement, volumes and lights all cross as OSL group specifications
-and MoonRay runs them. What a shader *does* is answered by executing
+Everything else goes the same way: surfaces, displacement, volumes and
+emissive geometry all cross as OSL group specifications and MoonRay
+runs them. **No built-in MoonRay shader is ever substituted for one the
+scene named** -- the substitution table is the fallback for a build
+without OSL, not a path a working install takes. What a shader *does* is answered by executing
 it, not by recognising what it is called.
 
 ## One Scene, Two Renderers
@@ -107,26 +131,31 @@ nsi::Context::new(Some(&[nsi::string!("renderer", "moonray")]));
 
 ![The same five spheres rendered by MoonRay](doc/images/shaderballs-moonray.png)
 
-What the pair is for is the disagreements, and there are three worth
-knowing:
+**Both sides run OSL.** Every sphere and the floor cross as an OSL
+group specification that MoonRay executes; no built-in stands in for a
+shader the scene named. The environment is the one thing MoonRay has no
+way to run a shader for, so the scene asks for MoonRay's own class by
+name through the stub in [`shaders/`](shaders/) -- and the two skies
+then measure identical, which is what makes the rest of the frame worth
+comparing.
+
+The disagreements that remain are the renderers', and there are two:
 
 - **Glass.** `refract_weight` reaches the shader, but the closure walk
   here has no transmission path, so the lobe is dropped and the sphere
   renders opaque.
-- **The environment.** MoonRay cannot run `environmentLight`, so it
-  falls back to a flat white dome carrying only the intensity. The
-  metal sphere reflects a hard horizon rather than a graded sky.
-- **The emitter.** It is seen, at the right colour, but it lights far
-  less than it should. `dlPrincipled` both emits *and* shades, so it is
-  kept a surface rather than becoming a `MeshLight` -- and MoonRay's
-  self-emission is hit-only, with no next-event estimation toward
-  emissive geometry. This is the case the section above is about, and
-  the clearest argument for OSL end to end: one surface that both emits
-  and reflects is exactly what the interface exists to express.
+- **The emitter.** It is seen, at the right colour, but it lights less
+  than it should and the metal sphere's reflection of it is weaker.
+  `dlPrincipled` both emits *and* shades, so it is kept a surface
+  rather than becoming a `MeshLight` -- and MoonRay's self-emission is
+  hit-only, with no next-event estimation toward emissive geometry.
+  This is the case the section above is about, and the clearest
+  argument for OSL end to end: one surface that both emits and reflects
+  is exactly what the interface exists to express.
 
-Matte and plastic agree closely, which is the other half of the result:
-geometry, camera, and the diffuse and specular response all cross
-intact.
+Matte and plastic agree closely -- MoonRay about a third of a stop
+brighter -- which is the other half of the result: geometry, camera,
+and the diffuse and specular response all cross intact.
 
 ## `mnry`
 

@@ -3411,12 +3411,23 @@ fn light(
         _ => ("i_color", "intensity"),
     };
 
-    if let Some(rgb) = colour_of(node, colour) {
+    // **The shader's own defaults, for what the scene left unset.**
+    // Substituting means nobody runs the shader, so a parameter the
+    // scene never mentioned would otherwise fall through to whatever
+    // the rdl2 light class defaults to -- a different number, from an
+    // unrelated class. A renderer that *executes* the shader gets the
+    // author's value, so reading the declaration is what keeps the two
+    // agreeing. See `osl::colour_default`.
+    if let Some(rgb) = colour_of(node, colour)
+        .or_else(|| crate::osl::colour_default(scene, shader, colour))
+    {
         object = object.set("color", Value::Rgb(rgb));
         carried.push(colour);
     }
     for (from, to) in [(strength, "intensity"), ("exposure", "exposure")] {
-        if let Some(value) = scalar_of(node, from) {
+        if let Some(value) = scalar_of(node, from)
+            .or_else(|| crate::osl::scalar_default(scene, shader, from))
+        {
             object = object.set(to, Value::Float(value));
             carried.push(from);
         }
@@ -3695,6 +3706,21 @@ fn environment(
         return object;
     };
 
+    // **MoonRay's own environment, named as a shader.**
+    //
+    // `EnvLight` is a light class with nothing an `OslMap` could bind
+    // to, so an environment's OSL cannot execute here however much this
+    // backend would like it to. `shaders/moonrayEnvironment.osl` is the
+    // answer: a stub whose parameters *are* `EnvLight`'s, so a scene
+    // that wants MoonRay's environment asks for it by name and this
+    // maps the two across one for one. No guessing, and no built-in
+    // silently standing in for a shader the scene actually named.
+    if scene.node(&shader).and_then(shader_stem).as_deref()
+        == Some(MOONRAY_ENVIRONMENT)
+    {
+        return moonray_environment(object, scene, &shader);
+    }
+
     // **The texture crosses even though the shader does not.**
     // MoonRay's `Light` base class declares `texture`, a path to an
     // image, so an environment map reaches the render without anything
@@ -3733,16 +3759,208 @@ fn environment(
         None => flushed.limitations.push(format!(
             "environment {handle:?} carries shader {shader:?}, which \
              MoonRay cannot run and which names no texture this backend \
-             recognises; the light is white, and its intensity is the \
-             shader's where the shader has one"
+             recognises; its colour, intensity and exposure cross and \
+             everything else the shader does -- a gradient, a mapping, \
+             a per-component contribution -- does not"
         )),
     }
 
-    // An intensity, where the shader carries one.
-    if let Some(node) = node
-        && let Some(intensity) = scalar_of(node, "intensity")
-    {
-        object = object.set("intensity", Value::Float(intensity));
+    // **Colour and exposure, not only intensity.** An environment
+    // shader's tint is half its brightness: 3Delight's
+    // `environmentLight` defaults `i_color` to 0.5 grey, so carrying
+    // the intensity alone made the dome twice as bright as the scene
+    // asked for -- a full stop across every surface it lit, with
+    // nothing saying why.
+    //
+    // **And what the scene did not set, the shader author did.** A
+    // parameter absent from the ɴsɪ node is not "unspecified": the
+    // compiled shader declares a default, and a renderer that executes
+    // the shader uses it. This one substitutes, so without reading the
+    // declaration an unset parameter takes rdl2's default instead -- a
+    // different number, from an unrelated class, with nothing to say
+    // the two disagreed.
+    if let Some(node) = node {
+        let rgb = colour_of(node, "i_color")
+            .or_else(|| crate::osl::colour_default(scene, &shader, "i_color"));
+        if let Some(rgb) = rgb {
+            object = object.set("color", Value::Rgb(rgb));
+        }
+        for (from, to) in [("intensity", "intensity"), ("exposure", "exposure")]
+        {
+            let value = scalar_of(node, from)
+                .or_else(|| crate::osl::scalar_default(scene, &shader, from));
+            if let Some(value) = value {
+                object = object.set(to, Value::Float(value));
+            }
+        }
+    }
+
+    // **The sky is seen, not only reflected.** ɴsɪ's environment is
+    // ordinary scene background: a camera ray that misses everything
+    // hits it. MoonRay defers to `SceneVariables::lights_visible_in_camera`
+    // unless told, and the default left the background pure black while
+    // the same dome went on lighting the scene -- so the render looked
+    // like a scene with no environment at all, and the difference from
+    // a renderer that shows it was a blank upper half.
+    object = object.set("visible_in_camera", Value::Int(VISIBLE_IN_CAMERA_ON));
+
+    object
+}
+
+/// The stub shader standing for MoonRay's built-in environment.
+///
+/// `shaders/moonrayEnvironment.osl`, compiled by `build.rs`.
+const MOONRAY_ENVIRONMENT: &str = "moonrayEnvironment";
+
+/// Every parameter of that stub, and the `EnvLight` attribute it is.
+///
+/// **The table mirrors the shader, and the shader mirrors the class.**
+/// Both were read off `rdl2_print --class EnvLight`, so a parameter
+/// here has the same name, the same type and the same default as the
+/// attribute it feeds. The two spellings that differ do so because OSL
+/// forced them: `texture` is OSL's own builtin and cannot name a
+/// parameter, and `Cs` is what the Open Shading Language distribution's
+/// `emitter.osl` calls a base colour.
+const MOONRAY_ENVIRONMENT_PARAMETERS: &[(&str, &str, EnvironmentKind)] = &[
+    ("Cs", "color", EnvironmentKind::Colour),
+    ("intensity", "intensity", EnvironmentKind::Scalar),
+    ("exposure", "exposure", EnvironmentKind::Scalar),
+    ("filename", "texture", EnvironmentKind::Text),
+    (
+        "texture_border_color",
+        "texture_border_color",
+        EnvironmentKind::Colour,
+    ),
+    ("texture_filter", "texture_filter", EnvironmentKind::Integer),
+    (
+        "texture_mirror_u",
+        "texture_mirror_u",
+        EnvironmentKind::Boolean,
+    ),
+    (
+        "texture_mirror_v",
+        "texture_mirror_v",
+        EnvironmentKind::Boolean,
+    ),
+    ("texture_reps_u", "texture_reps_u", EnvironmentKind::Scalar),
+    ("texture_reps_v", "texture_reps_v", EnvironmentKind::Scalar),
+    (
+        "texture_rotation",
+        "texture_rotation",
+        EnvironmentKind::Scalar,
+    ),
+    ("contrast", "contrast", EnvironmentKind::Colour),
+    ("gain", "gain", EnvironmentKind::Colour),
+    ("gamma", "gamma", EnvironmentKind::Colour),
+    ("offset", "offset", EnvironmentKind::Colour),
+    ("saturation", "saturation", EnvironmentKind::Colour),
+    (
+        "sample_upper_hemisphere_only",
+        "sample_upper_hemisphere_only",
+        EnvironmentKind::Boolean,
+    ),
+    (
+        "visible_in_camera",
+        "visible_in_camera",
+        EnvironmentKind::Integer,
+    ),
+    (
+        "visible_diffuse_reflection",
+        "visible_diffuse_reflection",
+        EnvironmentKind::Boolean,
+    ),
+    (
+        "visible_diffuse_transmission",
+        "visible_diffuse_transmission",
+        EnvironmentKind::Boolean,
+    ),
+    (
+        "visible_glossy_reflection",
+        "visible_glossy_reflection",
+        EnvironmentKind::Boolean,
+    ),
+    (
+        "visible_glossy_transmission",
+        "visible_glossy_transmission",
+        EnvironmentKind::Boolean,
+    ),
+    (
+        "visible_mirror_reflection",
+        "visible_mirror_reflection",
+        EnvironmentKind::Boolean,
+    ),
+    (
+        "visible_mirror_transmission",
+        "visible_mirror_transmission",
+        EnvironmentKind::Boolean,
+    ),
+];
+
+/// How one of those parameters reaches rdl2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvironmentKind {
+    Colour,
+    Scalar,
+    Integer,
+    Boolean,
+    Text,
+}
+
+/// Map the stub's parameters onto `EnvLight`, one for one.
+///
+/// **What the scene left unset, the shader declared.** A parameter
+/// absent from the ɴsɪ node is not unspecified: the compiled stub
+/// carries a default, read straight out of the class it mirrors. Taking
+/// it from there rather than leaving rdl2 to its own default is what
+/// keeps this honest -- the two agree today, and reading the
+/// declaration is what keeps them agreeing when one of them moves.
+fn moonray_environment(
+    mut object: Object,
+    scene: &Scene,
+    shader: &str,
+) -> Object {
+    let Some(node) = scene.node(shader) else {
+        return object;
+    };
+
+    for (parameter, attribute, kind) in MOONRAY_ENVIRONMENT_PARAMETERS {
+        let value = match kind {
+            EnvironmentKind::Colour => colour_of(node, parameter)
+                .or_else(|| {
+                    crate::osl::colour_default(scene, shader, parameter)
+                })
+                .map(Value::Rgb),
+            EnvironmentKind::Scalar => scalar_of(node, parameter)
+                .or_else(|| {
+                    crate::osl::scalar_default(scene, shader, parameter)
+                })
+                .map(Value::Float),
+            EnvironmentKind::Integer => scalar_of(node, parameter)
+                .or_else(|| {
+                    crate::osl::scalar_default(scene, shader, parameter)
+                })
+                .map(|value| Value::Int(value as i32)),
+            EnvironmentKind::Boolean => scalar_of(node, parameter)
+                .or_else(|| {
+                    crate::osl::scalar_default(scene, shader, parameter)
+                })
+                .map(|value| Value::Bool(value != 0.0)),
+            EnvironmentKind::Text => match &node
+                .effective(parameter)
+                .map(|attribute| &attribute.data)
+            {
+                Some(OwnedData::String(values)) => values
+                    .first()
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                    .filter(|text| !text.is_empty())
+                    .map(Value::String),
+                _ => None,
+            },
+        };
+
+        if let Some(value) = value {
+            object = object.set(*attribute, value);
+        }
     }
 
     object

@@ -1,0 +1,93 @@
+// MoonRay's built-in environment light, addressable as an ɴsɪ shader.
+//
+// **Why a stub rather than a substitution.** This backend runs OSL and
+// calls MoonRay's closures from it; it does not swap a scene's shader
+// for a built-in MoonRay one and hope the parameters line up. But
+// `EnvLight` is a *light class*, not a shader: its whole surface is a
+// texture and some colour correction, with nothing an `OslMap` could
+// bind to. There is no way to execute OSL for an environment at all.
+//
+// So the built-in is given a shader's face instead. Every parameter
+// below is one of `EnvLight`'s, spelled the way rdl2 spells it and
+// defaulted to what rdl2 defaults it to, so the mapping is a
+// declaration you can read rather than a table in Rust that drifts.
+// A scene that names this shader gets MoonRay's environment exactly,
+// and knows it is asking for one.
+//
+// # It really does emit
+//
+// The body is a constant `emission()`, which is not decoration: it
+// makes the shader answer "yes" to the same question every other
+// emitter is asked, so nothing in this backend has to special-case it
+// to know an environment lights the scene.
+//
+// # What another renderer does with it
+//
+// Runs it, and gets a constant environment of `i_color * intensity *
+// 2^exposure`. That is the honest reading: a renderer that cannot ask
+// MoonRay for its `EnvLight` still gets the colour and brightness the
+// scene asked for, and loses only the corrections below -- which is
+// the same trade this shader exists to make legible.
+
+surface
+moonrayEnvironment(
+    // --- what every renderer can honour -----------------------------
+    //
+    // `Cs` is the Open Shading Language distribution's own word for a
+    // base colour -- its `emitter.osl` uses it, and so does the ɴsɪ
+    // specification's listing 4.2, which is the same shader. Following
+    // that rather than a vendor's spelling is what makes this read as
+    // an OSL shader rather than one renderer's class wearing a
+    // disguise.
+    //
+    // `intensity` and not the distribution's `power`, deliberately:
+    // `power` there is *total* power divided by surface area, and an
+    // environment has no area to divide by. The quantity here is
+    // radiance, which is what `EnvLight.intensity` is.
+    color Cs = color(1, 1, 1)
+        [[ string label = "Colour",
+           string help = "EnvLight.color" ]],
+    float intensity = 1
+        [[ string label = "Intensity",
+           string help = "EnvLight.intensity; radiance, not total power" ]],
+    float exposure = 0
+        [[ string label = "Exposure",
+           string help = "EnvLight.exposure; stops, applied as 2^exposure" ]],
+
+    // --- the image ---------------------------------------------------
+    // `filename`, after the distribution's `image.osl`. `texture` is
+    // OSL's own builtin and cannot be a parameter name at all, and
+    // this backend already recognises `filename` as a texture path.
+    string filename = ""
+        [[ string label = "Texture",
+           string help = "EnvLight.texture" ]],
+    color texture_border_color = color(1, 1, 1),
+    int texture_filter = 0
+        [[ string help = "0 nearest, as EnvLight.texture_filter" ]],
+    int texture_mirror_u = 0,
+    int texture_mirror_v = 0,
+    float texture_reps_u = 1,
+    float texture_reps_v = 1,
+    float texture_rotation = 0,
+
+    // --- colour correction, applied by MoonRay after sampling --------
+    color contrast = color(1, 1, 1),
+    color gain = color(1, 1, 1),
+    color gamma = color(1, 1, 1),
+    color offset = color(0, 0, 0),
+    color saturation = color(1, 1, 1),
+
+    // --- sampling and visibility -------------------------------------
+    int sample_upper_hemisphere_only = 0,
+    int visible_in_camera = 1
+        [[ string help = "ɴsɪ shows its environment; rdl2 defers to a \
+scene-wide switch, so this says so outright" ]],
+    int visible_diffuse_reflection = 1,
+    int visible_diffuse_transmission = 1,
+    int visible_glossy_reflection = 1,
+    int visible_glossy_transmission = 1,
+    int visible_mirror_reflection = 1,
+    int visible_mirror_transmission = 1)
+{
+    Ci = Cs * intensity * pow(2.0, exposure) * emission();
+}

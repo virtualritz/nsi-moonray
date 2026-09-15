@@ -371,6 +371,51 @@ fn open(scene: &Scene, handle: &str) -> Option<OslQuery> {
     OslQuery::open_with_searchpath(&name, &search).ok()
 }
 
+/// A parameter's default, read from the compiled shader.
+///
+/// **A shader's defaults belong to whoever runs the shader**, and a
+/// substituted shader is run by nobody. 3Delight executes
+/// `environmentLight.oso` and OSL supplies its declared `i_color` of
+/// 0.5 grey; this backend does not execute it, so an unset parameter
+/// used to fall through to whatever the *rdl2* class happens to
+/// default to -- white. The dome came out a full stop bright, across
+/// every surface it lit, and nothing anywhere said so.
+///
+/// Reading the declaration closes that: what the scene did not set,
+/// the shader author did, and that is the answer both renderers should
+/// reach. `None` only where the shader cannot be found or declares no
+/// default, which is the honest "nobody said".
+pub fn colour_default(
+    scene: &Scene,
+    handle: &str,
+    parameter: &str,
+) -> Option<[f32; 3]> {
+    use oslquery_petite::TypedParameter;
+
+    match open(scene, handle)?.param_by_name(parameter)?.typed_param() {
+        TypedParameter::Color { default, .. }
+        | TypedParameter::Point { default, .. }
+        | TypedParameter::Vector { default, .. }
+        | TypedParameter::Normal { default, .. } => *default,
+        _ => None,
+    }
+}
+
+/// The same, for a scalar.
+pub fn scalar_default(
+    scene: &Scene,
+    handle: &str,
+    parameter: &str,
+) -> Option<f32> {
+    use oslquery_petite::TypedParameter;
+
+    match open(scene, handle)?.param_by_name(parameter)?.typed_param() {
+        TypedParameter::Float { default } => *default,
+        TypedParameter::Int { default } => default.map(|value| value as f32),
+        _ => None,
+    }
+}
+
 /// Whether a compiled shader produces an `emission()` closure.
 ///
 /// **The interface has no light nodes.** Section 4.5 says a light is

@@ -39,12 +39,7 @@ const PAIR: NonZeroUsize = match NonZeroUsize::new(2) {
 };
 
 /// A UV sphere, built through the interface.
-fn sphere(
-    context: &nsi::Context,
-    handle: &str,
-    centre: [f32; 3],
-    radius: f32,
-) {
+fn sphere(context: &nsi::Context, handle: &str, centre: [f32; 3], radius: f32) {
     let (segments, rings) = (64usize, 32usize);
     let mut positions: Vec<[f32; 3]> = Vec::new();
     for ring in 0..=rings {
@@ -156,12 +151,19 @@ fn build<'a>(
         "env_shader",
         &[
             nsi::string!("shaderfilename", environment),
-            nsi::f32!("intensity", 0.15),
+            nsi::color!("Cs", &[0.55, 0.60, 0.70]),
+            nsi::f32!("intensity", 0.5),
         ],
     );
     context.create("env_attributes", nsi::node::ATTRIBUTES, None);
     context.connect("env_attributes", None, "env", "geometryattributes", None);
-    context.connect("env_shader", None, "env_attributes", "surfaceshader", None);
+    context.connect(
+        "env_shader",
+        None,
+        "env_attributes",
+        "surfaceshader",
+        None,
+    );
 
     // The floor.
     context.create("floor", nsi::node::MESH, None);
@@ -286,15 +288,28 @@ fn a_row_of_looks_through_both_renderers() {
         return;
     };
     let principled = format!("{delight}/osl/dlPrincipled.oso");
-    let environment = format!("{delight}/osl/environmentLight.oso");
-    for shader in [&principled, &environment] {
-        if !std::path::Path::new(shader).is_file() {
-            eprintln!("skipped: {shader} is not there");
-            return;
-        }
+    if !std::path::Path::new(&principled).is_file() {
+        eprintln!("skipped: {principled} is not there");
+        return;
     }
 
-    nsi::backend::register("moonray", std::sync::Arc::new(nsi_moonray::MoonRay));
+    // **MoonRay's own environment, asked for by name.**
+    //
+    // `EnvLight` is a light class with nothing an `OslMap` could bind
+    // to, so an environment's OSL never executes on that side. Rather
+    // than let a built-in stand in silently for whatever shader the
+    // scene named -- which made the dome a stop bright with a black
+    // sky, and swamped everything this image is about -- the scene
+    // names the stub this crate ships for exactly that class.
+    //
+    // 3Delight runs it, because it is a real OSL shader that emits a
+    // constant. MoonRay maps its parameters onto `EnvLight` one for
+    // one. Both therefore stand on the same ground, and the comparison
+    // is about the surfaces.
+    let environment = std::path::Path::new(env!("NSI_MOONRAY_SHADERS"))
+        .join("moonrayEnvironment.oso")
+        .to_string_lossy()
+        .into_owned();
 
     let directory = std::env::temp_dir().join("nsi-moonray-shaderballs");
     std::fs::create_dir_all(&directory).expect("a writable directory");
@@ -304,11 +319,9 @@ fn a_row_of_looks_through_both_renderers() {
         let _ = std::fs::remove_file(&image);
 
         {
-            let context = nsi::Context::new(Some(&[nsi::string!(
-                "renderer",
-                renderer
-            )]))
-            .unwrap_or_else(|| panic!("{renderer} did not load"));
+            let context =
+                nsi::Context::new(Some(&[nsi::string!("renderer", renderer)]))
+                    .unwrap_or_else(|| panic!("{renderer} did not load"));
 
             build(
                 &context,
@@ -323,7 +336,11 @@ fn a_row_of_looks_through_both_renderers() {
         eprintln!(
             "{renderer}: {} ({})",
             image.display(),
-            if image.is_file() { "written" } else { "MISSING" }
+            if image.is_file() {
+                "written"
+            } else {
+                "MISSING"
+            }
         );
     }
 }

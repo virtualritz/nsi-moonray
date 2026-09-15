@@ -42,8 +42,7 @@ fn sphere(
     for ring in 0..=rings {
         let theta = std::f32::consts::PI * ring as f32 / rings as f32;
         for segment in 0..segments {
-            let phi =
-                std::f32::consts::TAU * segment as f32 / segments as f32;
+            let phi = std::f32::consts::TAU * segment as f32 / segments as f32;
             positions.extend_from_slice(&[
                 centre[0] + radius * theta.sin() * phi.cos(),
                 centre[1] + radius * theta.cos(),
@@ -152,7 +151,9 @@ fn a_row_of_spheres_with_one_emitter() {
             vec![arg("fov", Type::F32, OwnedData::F32(vec![40.0]))],
         )
         .expect("a recordable edit");
-    scene.create("camxf", "transform").expect("a recordable edit");
+    scene
+        .create("camxf", "transform")
+        .expect("a recordable edit");
     scene
         .set_attribute(
             "camxf",
@@ -194,7 +195,9 @@ fn a_row_of_spheres_with_one_emitter() {
     // looks like a flat white ball.** The whole question here is what
     // the mirrors reflect, and that is unreadable until the background
     // stops being the brightest thing in the scene.
-    scene.create("env", "environment").expect("a recordable edit");
+    scene
+        .create("env", "environment")
+        .expect("a recordable edit");
     scene
         .connect("env", None, ".root", "objects")
         .expect("known attribute");
@@ -254,8 +257,7 @@ fn a_row_of_spheres_with_one_emitter() {
     // mirrors are polished, so whatever they reflect is legible.
     let spacing = 2.1f32;
     let first = -2.0 * spacing;
-    for (slot, roughness) in [0.02f32, 0.05, 0.1, 0.2].into_iter().enumerate()
-    {
+    for (slot, roughness) in [0.02f32, 0.05, 0.1, 0.2].into_iter().enumerate() {
         let handle = format!("sphere{slot}");
         sphere(
             &mut scene,
@@ -282,7 +284,14 @@ fn a_row_of_spheres_with_one_emitter() {
     }
 
     // The emitter, at the right end of the row.
-    sphere(&mut scene, "emitter", [first + 4.0 * spacing, 0.0, 0.0], 0.9, 48, 24);
+    sphere(
+        &mut scene,
+        "emitter",
+        [first + 4.0 * spacing, 0.0, 0.0],
+        0.9,
+        48,
+        24,
+    );
     shade(
         &mut scene,
         "emitter",
@@ -316,7 +325,9 @@ fn a_row_of_spheres_with_one_emitter() {
     std::fs::create_dir_all(&directory).expect("a writable directory");
     let image = directory.join("spheres.exr");
 
-    scene.create("beauty", "outputlayer").expect("a recordable edit");
+    scene
+        .create("beauty", "outputlayer")
+        .expect("a recordable edit");
     scene
         .set_attribute(
             "beauty",
@@ -331,7 +342,9 @@ fn a_row_of_spheres_with_one_emitter() {
         .connect("beauty", None, "screen", "outputlayers")
         .expect("known attribute");
 
-    scene.create("driver", "outputdriver").expect("a recordable edit");
+    scene
+        .create("driver", "outputdriver")
+        .expect("a recordable edit");
     scene
         .set_attribute(
             "driver",
@@ -350,8 +363,7 @@ fn a_row_of_spheres_with_one_emitter() {
 
     let flushed = flush(&scene);
     let scene_file = directory.join("spheres.rdla");
-    std::fs::write(&scene_file, flushed.to_rdla())
-        .expect("writing the scene");
+    std::fs::write(&scene_file, flushed.to_rdla()).expect("writing the scene");
     for line in &flushed.limitations {
         eprintln!("nsi-moonray: {line}");
     }
