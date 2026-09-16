@@ -2873,6 +2873,14 @@ fn report_unread_global(handle: &str, node: &Node, flushed: &mut Flushed) {
         .attributes()
         .map(|(name, _)| name)
         .filter(|name| !GLOBALS.iter().any(|(nsi, _, _, _)| nsi == name))
+        // String-valued and so not in `GLOBALS`, which only carries
+        // the `i32` table -- read separately in `with_globals`, not
+        // unread. Left out of the filter above, this reported
+        // `statistics.filename` as having no MoonRay counterpart on
+        // every scene that set it, which said the opposite of the
+        // truth about the one global this backend goes out of its
+        // way to forward.
+        .filter(|name| *name != "statistics.filename")
         .collect();
     if set.is_empty() {
         return;
@@ -7074,10 +7082,19 @@ mod tests {
             )
             .unwrap();
 
-        let rdla = flush(&scene).to_rdla();
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
         assert!(
             rdla.contains("[\"stats_file\"] = \"/tmp/stats.csv\""),
             "{rdla}"
+        );
+        assert!(
+            !flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("statistics.filename")),
+            "carried, so not unread\n{:?}",
+            flushed.limitations
         );
     }
 
