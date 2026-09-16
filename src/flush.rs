@@ -2207,8 +2207,8 @@ fn mesh(
     // say otherwise or it is subdivided anyway.
     object = object.set("is_subd", Value::Bool(subdivision));
 
-    // **MoonRay's own tessellation defaults are far coarser than
-    // 3Delight's.** `mesh_resolution` defaults to `2.0` and
+    // **MoonRay's own tessellation defaults leave a coarse cage
+    // faceted.** `mesh_resolution` defaults to `2.0` and
     // `adaptive_error` to `0.0` (adaptive tessellation off): together
     // that uniformly tessellates every input edge to at most two
     // segments, which renders a coarse cage -- a subdivided
@@ -2216,12 +2216,18 @@ fn mesh(
     // not smooth, no matter the sample count. Confirmed by rendering:
     // a Catmull-Clark icosahedron at MoonRay's own defaults kept its
     // 20 flat facets, next to 3Delight's smooth sphere from the same
-    // cage. 3Delight dices adaptively to sub-pixel error by default
-    // and ɴsɪ has no per-mesh tessellation-rate attribute for a scene
-    // to ask for the same -- there is nothing to read this from -- so
-    // this backend asks MoonRay for comparable adaptive dicing
-    // itself, rather than leave its own, much coarser default to
-    // silently under-tessellate every subdivision surface it sends.
+    // cage.
+    //
+    // **Not because 3Delight dices finer.** 3Delight is closed source
+    // and this backend does not guess at what it does internally; what
+    // is known and checkable is what it renders, and a coarse
+    // Catmull-Clark cage with no displacement shader on it renders
+    // smooth there. ɴsɪ itself has no per-mesh tessellation-rate
+    // attribute for a scene to ask for a particular fineness, so there
+    // is nothing to read a number from either way. What this asks
+    // MoonRay for is simply finer than its own default cap, which a
+    // coarse cage needs to look like the smooth surface ɴsɪ describes
+    // rather than the polyhedron backing it.
     if subdivision {
         object = object
             .set("adaptive_error", Value::Float(0.25))
