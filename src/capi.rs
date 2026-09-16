@@ -831,6 +831,43 @@ pub unsafe extern "C" fn NSIRenderControl(
                 if rendered {
                     return;
                 }
+
+                // **In-memory is the answer, not a preference this
+                // build happened to have.** Falling through to the
+                // spawned path here means a scene renders correctly
+                // but through a different renderer instance, on a
+                // different code path, writing a `.rdla` and reading
+                // it back through a process this build was never
+                // asked to shell out to -- silently, because
+                // `render_in_process` failing produces only an
+                // `eprintln`, easy to miss under `--no-capture`'s own
+                // noise, and *found this way once*: a render that
+                // looked identical in every respect except which
+                // renderer instance actually ran, with the difference
+                // showing up only as an unexplained `moonray` process
+                // in `ps`.
+                //
+                // `spawn-fallback` is the opt-in for wanting that
+                // behaviour anyway -- a farm node with a broken
+                // `rdl2dso` install that should degrade rather than
+                // stop, say. Without it, failing loud is strictly
+                // better than rendering correctly through the wrong
+                // path and leaving nothing to notice.
+                #[cfg(not(feature = "spawn-fallback"))]
+                {
+                    report(
+                        ctx,
+                        LEVEL_ERROR,
+                        "in-process rendering failed and \
+                         \"spawn-fallback\" is not enabled, so nothing \
+                         was rendered rather than silently falling back \
+                         to spawning the `moonray` binary. See the \
+                         warning just above this one for why in-process \
+                         failed, or build with --features spawn-fallback \
+                         to allow the fallback",
+                    );
+                    return;
+                }
             }
 
             // `"suspend"` and `"resume"` are not mapped. MoonRay has
