@@ -2207,6 +2207,27 @@ fn mesh(
     // say otherwise or it is subdivided anyway.
     object = object.set("is_subd", Value::Bool(subdivision));
 
+    // **MoonRay's own tessellation defaults are far coarser than
+    // 3Delight's.** `mesh_resolution` defaults to `2.0` and
+    // `adaptive_error` to `0.0` (adaptive tessellation off): together
+    // that uniformly tessellates every input edge to at most two
+    // segments, which renders a coarse cage -- a subdivided
+    // icosahedron standing in for a sphere, say -- visibly faceted,
+    // not smooth, no matter the sample count. Confirmed by rendering:
+    // a Catmull-Clark icosahedron at MoonRay's own defaults kept its
+    // 20 flat facets, next to 3Delight's smooth sphere from the same
+    // cage. 3Delight dices adaptively to sub-pixel error by default
+    // and ɴsɪ has no per-mesh tessellation-rate attribute for a scene
+    // to ask for the same -- there is nothing to read this from -- so
+    // this backend asks MoonRay for comparable adaptive dicing
+    // itself, rather than leave its own, much coarser default to
+    // silently under-tessellate every subdivision surface it sends.
+    if subdivision {
+        object = object
+            .set("adaptive_error", Value::Float(0.25))
+            .set("mesh_resolution", Value::Float(64.0));
+    }
+
     if let Some(scheme) = &scheme {
         // 0 is bilinear and 1 is catclark, per `RdlMesh`'s
         // `subd_scheme` enum. MoonRay has no other schemes.
@@ -5987,6 +6008,54 @@ mod tests {
                 || rdla.contains("[\"smooth_normal\"] = false"),
             "{rdla}"
         );
+    }
+
+    /// **A subdivision surface asks MoonRay for adaptive tessellation
+    /// finer than its own default.** Left at `mesh_resolution = 2`,
+    /// `adaptive_error = 0`, a coarse cage renders visibly faceted --
+    /// confirmed by rendering a subdivided icosahedron standing in for
+    /// a shaderball, which kept its 20 flat facets next to 3Delight's
+    /// smooth sphere from the very same cage.
+    #[test]
+    fn a_subdivision_surface_asks_for_finer_tessellation_than_moonrays_default()
+    {
+        let mut scene = two_quads();
+        scene
+            .set_attribute(
+                "mesh",
+                vec![arg(
+                    "subdivision.scheme",
+                    Type::String,
+                    OwnedData::String(vec![b"catmull-clark".to_vec()]),
+                )],
+            )
+            .expect("a recordable edit");
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("[\"adaptive_error\"]"), "{rdla}");
+        assert!(
+            !rdla.contains("[\"adaptive_error\"] = Float(0)"),
+            "MoonRay's own default leaves adaptive tessellation off\n{rdla}"
+        );
+        assert!(rdla.contains("[\"mesh_resolution\"]"), "{rdla}");
+        assert!(
+            !rdla.contains("[\"mesh_resolution\"] = Float(2)"),
+            "MoonRay's own default is too coarse for a low-poly cage\n\
+             {rdla}"
+        );
+    }
+
+    /// A polygon mesh -- no `subdivision.scheme` -- gets neither
+    /// attribute: `mesh_resolution`/`adaptive_error` only mean
+    /// something for a subdivision surface, and setting them on a flat
+    /// mesh would be a MoonRay attribute nobody asked for.
+    #[test]
+    fn a_polygon_mesh_carries_no_tessellation_attributes() {
+        let rdla = flush(&two_quads()).to_rdla();
+
+        assert!(!rdla.contains("adaptive_error"), "{rdla}");
+        assert!(!rdla.contains("mesh_resolution"), "{rdla}");
     }
 
     /// **An attribute nobody declared crosses as `UserData`.**
