@@ -114,9 +114,7 @@ pub struct MoonRay;
 /// Registers [`MoonRay`] with `nsi-ffi-wrap` before `main` runs --
 /// **when this object file is linked in at all.** See the module doc
 /// comment's "This is best-effort, not a guarantee" section: nothing
-/// makes that certain for a host that references nothing else here,
-/// and measurement rather than the mechanism's own description is
-/// what found that out.
+/// makes that certain for a host that references nothing else here.
 ///
 /// Unconditional since `nsi-ffi-wrap` 0.10.3, which is where
 /// `nsi_ffi_wrap::backend` first shipped. A host that does not want

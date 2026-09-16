@@ -316,31 +316,21 @@ fn stage<'a>(
     context.connect("screen", None, "cam", "screens", None);
 
     // **`oversampling` set explicitly, because leaving it unset is not
-    // neutral.** The comment this replaced claimed only 3Delight reads
-    // it -- wrong about this backend's own code: `pixel_samples()` in
-    // `flush.rs` reads `screen`'s `oversampling` and forwards its
-    // square root to MoonRay's `pixel_samples` for exactly this
-    // reason, ɴsɪ separating AA from shading quality on both sides.
+    // neutral.** `pixel_samples()` in `flush.rs` reads `screen`'s
+    // `oversampling` and forwards its square root to MoonRay's
+    // `pixel_samples`, ɴsɪ separating AA from shading quality on both
+    // sides -- so this reaches both renderers, not just 3Delight.
     //
-    // Unlike `quality.shadingsamples`, the specification names no
-    // default for `oversampling` at all (nsi.readthedocs.io's `screen`
-    // page: an empty default column) -- so `flush.rs` forwarding
-    // nothing when it is unset is correct, not a gap to close the way
-    // the ray depths and shading samples were. There is no spec number
-    // to carry across.
-    //
-    // But a scene built to *compare* two renderers cannot leave either
-    // to a number the specification declines to pin down: absent it,
-    // each renderer reaches for its own house default, and those have
-    // no reason to agree. MoonRay's is `pixel_samples = 8`
-    // (`SceneVariables.cc`'s declared default), sixty-four actual
-    // camera rays per pixel -- most of why the earlier sweep took 22
-    // minutes and came out smoother than 3Delight's, whose own unset
-    // default is far lower, which is why *its* image is the noisy one.
-    // Two unrelated defaults were being compared and called a result.
-    // 16 gives 3Delight sixteen direct camera rays and MoonRay
-    // `round(sqrt(16)) = 4`, i.e. sixteen actual -- matched, and cheap
-    // enough for a confirmation render.
+    // The specification names no default for `oversampling` at all
+    // (nsi.readthedocs.io's `screen` page has an empty default
+    // column), so each renderer falls back to its own house default
+    // when it is unset, and those have no reason to agree: MoonRay's
+    // is `pixel_samples = 8` (`SceneVariables.cc`), sixty-four actual
+    // camera rays per pixel, far more than 3Delight's own unset
+    // default. A scene built to *compare* the two renderers has to
+    // pin this down itself. 16 gives 3Delight sixteen direct camera
+    // rays and MoonRay `round(sqrt(16)) = 4`, i.e. sixteen actual --
+    // matched, and cheap.
     context.set_attribute("screen", &[nsi::i32!("oversampling", oversampling)]);
 
     // `quality.shadingsamples` is the interface's own control and
@@ -374,30 +364,22 @@ fn stage<'a>(
         &[nsi::i32!("quality.causticsamples", 64)],
     );
 
-    // **`quality.denoise` defaults to `1` -- on -- and we never turned
-    // it off.** Denoisers are guided by albedo/normal buffers that
-    // correlate poorly with view-dependent content, and blocky,
-    // patchy artefacts on noisy specular/refractive surfaces are a
-    // well-known failure mode of exactly that mismatch -- a better
-    // match for "blocky reflections and refractions" than anything
-    // about progressive rendering, which this comparison never
-    // actually tested since disabling it changed nothing visible.
-    // Off, so what is compared is this backend's sampling, not an
-    // ML model's opinion of it.
+    // **`quality.denoise` defaults to `1`, on.** Off here, so what is
+    // compared is this backend's own sampling, not a denoiser's
+    // opinion of it.
     context
         .set_attribute(nsi::node::GLOBAL, &[nsi::i32!("quality.denoise", 0)]);
 
     // **CPU time per phase, not wall clock.** 3Delight writes proper
     // JSON when the name ends `.json` -- `render_options`,
-    // `profiling.timings` per task, `system_time`, `cpu_usage` --
-    // undocumented but confirmed by rendering and reading the file.
+    // `profiling.timings` per task, `system_time`, `cpu_usage`.
     // MoonRay's own `stats_file` (`SceneVariables.cc`): "the filename
     // to write the rendering statistics to in CSV format", forwarded
-    // by `with_globals` in `flush.rs`. Different formats because
+    // by `with_globals` in `flush.rs`. Different formats, since
     // neither renderer was asked to match the other's, but both name
-    // real per-phase CPU time, which a wall-clock reading from outside
-    // the process cannot separate from time lost to another renderer
-    // sharing the machine -- the actual question after tonight.
+    // real per-phase CPU time -- unlike a wall-clock reading from
+    // outside the process, which cannot separate that from time lost
+    // to another renderer sharing the machine.
     context.set_attribute(
         nsi::node::GLOBAL,
         &[nsi::string!("statistics.filename", stats)],
@@ -452,10 +434,8 @@ fn stage<'a>(
             // Bright enough to read as the key against the sky, not so
             // bright that Russian roulette keeps every path alive near
             // it: throughput near a source this hot survives roulette
-            // far more often, and with the deeper ray counts this
-            // backend now forwards to match ɴsɪ's own defaults, that
-            // turned a five-sphere test into a half-hour one. 8 matches
-            // what the "emissive" look below already uses.
+            // far more often, which costs render time. 8 matches what
+            // the "emissive" look below already uses.
             nsi::f32!("incandescence_intensity", 8.0),
         ],
     );
@@ -876,12 +856,6 @@ fn a_row_of_looks_through_both_renderers() {
 
     // This render is read as an image, not a measurement, and can
     // afford to sit for it.
-    //
-    // Doubling this to 512 left the blocky patch on the metal ball's
-    // reflection of the emissive sphere completely unchanged -- ruling
-    // out ordinary shading-sample noise. Back to 256; the next test is
-    // `oversampling` (AA), a different parameter this scene has never
-    // varied.
     const SHADING_SAMPLES: i32 = 256;
 
     for renderer in ["3delight", "moonray"] {
@@ -908,14 +882,7 @@ fn a_row_of_looks_through_both_renderers() {
                 &environment,
                 image.to_string_lossy().as_ref(),
                 SHADING_SAMPLES,
-                // **Back to 16, matching the sweep.** Quadrupling this
-                // to 64 was a diagnostic for a blocky patch on the
-                // metal ball's reflection of the emissive sphere --
-                // ruled out, alongside doubled `shading_samples`,
-                // by measuring the patch's own colour: a genuine green
-                // tint, not noise. It was the checker's own hard cell
-                // edges, reflected in a mirror, converged correctly at
-                // 16 all along.
+                // Matches the sweep's own oversampling.
                 16,
                 stats.to_string_lossy().as_ref(),
                 // Raised and pitched down 25 degrees: the frustum's

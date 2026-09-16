@@ -268,10 +268,6 @@ What follows actually is dropped:
 | Particles | `N` for orientation | Renders as spheres regardless. |
 | Volumes | Scalar OpenVDB emission grid | `VdbGeometry` reads RGB emission only. |
 
-A polygon mesh without `N` isn't on this list -- that was a bug here
-(MoonRay invented smooth normals; ɴsɪ's own default is flat shading),
-fixed in `09f6358`.
-
 ## Architecture
 
 This repository owns only the flush. Recording, connection

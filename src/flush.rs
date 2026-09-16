@@ -820,11 +820,11 @@ pub fn flush_with(
             // screen window; an `attributes` node is dissolved into
             // bindings upstream.
             //
-            // **Reaching the catch-all was the bug.** A `set` used
-            // exactly as ɴsɪ's own light-layer workflow says came back
-            // as "no MoonRay mapping and was skipped" while its
-            // members were being carried, and a report that says the
-            // opposite of the truth costs more than no report.
+            // A `set` used exactly as ɴsɪ's own light-layer workflow
+            // describes must not fall through to the catch-all below:
+            // its members are carried, and reporting "no MoonRay
+            // mapping" for a node whose contents *do* cross would say
+            // the opposite of the truth.
             "transform" | "attributes" | "screen" | "set" => {}
 
             "outputdriver" | "outputlayer" => {}
@@ -2211,20 +2211,16 @@ fn mesh(
     // faceted.** `mesh_resolution` defaults to `2.0` and
     // `adaptive_error` to `0.0` (adaptive tessellation off): together
     // that uniformly tessellates every input edge to at most two
-    // segments, which renders a coarse cage -- a subdivided
-    // icosahedron standing in for a sphere, say -- visibly faceted,
-    // not smooth, no matter the sample count. Confirmed by rendering:
-    // a Catmull-Clark icosahedron at MoonRay's own defaults kept its
-    // 20 flat facets, next to 3Delight's smooth sphere from the same
-    // cage.
+    // segments, which renders a coarse cage visibly faceted, not
+    // smooth, no matter the sample count.
     //
-    // **Not because 3Delight dices finer.** 3Delight is closed source
-    // and this backend does not guess at what it does internally; what
-    // is known and checkable is what it renders, and a coarse
-    // Catmull-Clark cage with no displacement shader on it renders
-    // smooth there. ɴsɪ itself has no per-mesh tessellation-rate
-    // attribute for a scene to ask for a particular fineness, so there
-    // is nothing to read a number from either way.
+    // **Not because 3Delight necessarily dices finer.** 3Delight is
+    // closed source and this backend does not guess at what it does
+    // internally; a coarse Catmull-Clark cage with no displacement
+    // shader on it renders smooth there regardless. ɴsɪ itself has no
+    // per-mesh tessellation-rate attribute for a scene to ask for a
+    // particular fineness, so there is nothing to read a number from
+    // either way.
     //
     // `adaptive_error` is a maximum tessellated-edge length **in
     // pixels**, so it is the same knob RenderMan's `shadingrate`
@@ -3037,8 +3033,7 @@ fn expanded(
             // four faces *and* four vertices is two different meshes
             // depending which reading is taken, and ɴsɪ's own answer is
             // the `per_face`/`per_vertex` flag -- so an unflagged one is
-            // reported rather than guessed. An earlier version of this
-            // code guessed, and guessed uniform.
+            // reported rather than guessed.
             flushed.limitations.push(format!(
                 "mesh {handle:?}: {name:?} was not carried ({error})"
             ));
@@ -5886,8 +5881,6 @@ mod tests {
     /// the count can see -- and the two are different meshes. ɴsɪ's
     /// answer is the `per_face`/`per_vertex` flag, and `nsi-intermediate`
     /// refuses an unflagged one rather than picking.
-    ///
-    /// This backend used to pick, and picked uniform.
     #[test]
     fn a_variable_the_count_cannot_decide_is_reported() {
         let mut scene = Scene::default();
@@ -6024,10 +6017,8 @@ mod tests {
 
     /// **A subdivision surface asks MoonRay for adaptive tessellation
     /// finer than its own default.** Left at `mesh_resolution = 2`,
-    /// `adaptive_error = 0`, a coarse cage renders visibly faceted --
-    /// confirmed by rendering a subdivided icosahedron standing in for
-    /// a shaderball, which kept its 20 flat facets next to 3Delight's
-    /// smooth sphere from the very same cage.
+    /// `adaptive_error = 0`, a coarse cage renders visibly faceted,
+    /// no matter the sample count.
     #[test]
     fn a_subdivision_surface_asks_for_finer_tessellation_than_moonrays_default()
     {
@@ -6345,11 +6336,9 @@ mod tests {
 
         assert!(spec.contains("[\"result\"] = \"light aov\""), "{spec}");
         // **`.*`, not nothing.** `C<..'specular'>L` is one scatter and
-        // then a light, which is the *direct* pass alone -- so the
-        // layer a scene asked for without naming a depth used to come
-        // back missing every bounce. Without a `.direct`/`.indirect`
-        // suffix and without an explicit `lightdepth`, the answer is
-        // both.
+        // then a light, which is the *direct* pass alone. Without a
+        // `.direct`/`.indirect` suffix and without an explicit
+        // `lightdepth`, the answer is both.
         assert!(
             spec.contains("[\"lpe\"] = \"C<..'specular'>.*L\""),
             "{spec}"
@@ -6681,11 +6670,10 @@ mod tests {
 
     /// **A `curves` node becomes MoonRay's curve geometry.**
     ///
-    /// Hair, fur and grass, which both applications emit and which
-    /// used to be skipped outright. `width` is a *diameter* and
-    /// `radius_list` is a radius, so the halving is the one arithmetic
-    /// step -- getting it wrong renders hair twice as thick with
-    /// nothing to say so.
+    /// Hair, fur and grass. `width` is a *diameter* and `radius_list`
+    /// is a radius, so the halving is the one arithmetic step --
+    /// getting it wrong renders hair twice as thick with nothing to
+    /// say so.
     #[test]
     fn a_curves_node_becomes_curve_geometry() {
         let mut scene = triangle();

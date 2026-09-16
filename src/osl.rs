@@ -377,14 +377,13 @@ fn open(scene: &Scene, handle: &str) -> Option<OslQuery> {
 /// substituted shader is run by nobody. 3Delight executes
 /// `environmentLight.oso` and OSL supplies its declared `i_color` of
 /// 0.5 grey; this backend does not execute it, so an unset parameter
-/// used to fall through to whatever the *rdl2* class happens to
-/// default to -- white. The dome came out a full stop bright, across
-/// every surface it lit, and nothing anywhere said so.
+/// is read from the shader's own declaration rather than falling
+/// through to whatever the *rdl2* class happens to default to.
 ///
-/// Reading the declaration closes that: what the scene did not set,
-/// the shader author did, and that is the answer both renderers should
-/// reach. `None` only where the shader cannot be found or declares no
-/// default, which is the honest "nobody said".
+/// What the scene did not set, the shader author did, and that is the
+/// answer both renderers should reach. `None` only where the shader
+/// cannot be found or declares no default, which is the honest
+/// "nobody said".
 pub fn colour_default(
     scene: &Scene,
     handle: &str,

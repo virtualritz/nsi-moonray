@@ -165,10 +165,10 @@ fn a_bundle_is_not_assembled_over_another() {
 ///
 /// `cargo packager` puts the binary at `/usr/bin/mnry` and every
 /// resource under `/usr/lib/mnry/`, which the tarball layout misses
-/// entirely. That was found by building a package and listing it, and
-/// it is pinned here because the next version of the packager could
-/// move it and nothing else would notice: an installed renderer that
-/// resolves no classes renders a black frame and reports nothing.
+/// entirely. Pinned here because the next version of the packager
+/// could move it and nothing else would notice: an installed renderer
+/// that resolves no classes renders a black frame and reports
+/// nothing.
 #[test]
 fn an_installed_package_finds_its_own_classes() {
     let installed = Path::new("/usr/bin/mnry");

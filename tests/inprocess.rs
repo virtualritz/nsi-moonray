@@ -900,10 +900,8 @@ fn a_registered_driver_receives_progressive_pixels() {
 /// **The lamp's winding is the test.** A `MeshLight` emits from the
 /// front of its faces only, so a triangle wound the other way is a
 /// light that is present, sampled, and contributes nothing -- and
-/// nothing anywhere says so. An earlier version of this test had the
-/// triangle facing the camera rather than the quad, rendered black,
-/// and was read here as MoonRay's mesh lights being broken. They are
-/// not.
+/// nothing anywhere says so. Getting the lamp's own winding right
+/// matters here as much as the quad's.
 ///
 /// The scene's own environment is disconnected, so the only thing that
 /// can light the quad is the lamp beside it.
