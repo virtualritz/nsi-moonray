@@ -21,10 +21,14 @@ use crate::{
     value::{Reference, Value},
 };
 use nsi_intermediate::{
-    EdgeKind, IDENTITY, Node, OwnedArgument, OwnedData, Scene, is_reserved,
+    Binding, EdgeKind, IDENTITY, Node, OwnedArgument, OwnedData, Scene,
+    is_reserved,
 };
 use nsi_trait::Type;
-use std::collections::{HashMap, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 /// MoonRay's mesh geometry, whose DSO is `moonray/dso/geometry/RdlMesh`.
 const MESH: &str = "RdlMeshGeometry";
@@ -346,14 +350,25 @@ pub fn flush_with(
     // not have -- a row that looks right and names nothing.
     // Handles borrow from the scene now rather than being copied:
     // upstream interns them, and a flush that cloned every one back
-    // into a `String` would hand that saving straight back.
-    // Geometry, part name and the material bound to that part.
-    let mut parts: Vec<(&str, &str, Reference)> = Vec::new();
+    // into a `String` would hand that saving straight back. The one
+    // exception is a geometry shared under several transforms, whose
+    // *placements* need distinct rdl2 object names the scene never
+    // gave a handle to -- `Cow` keeps every ordinary, singly-placed
+    // shape a borrow, and only that case allocates.
+    // The rdl2 object's own name, the ɴsɪ handle to resolve light
+    // linking from, the part name, and the material bound to that
+    // part.
+    let mut parts: Vec<(Cow<'_, str>, &str, &str, Reference)> = Vec::new();
     // Shaders that drive a light's radiance. They become `OslMap`
     // objects rather than the material they would otherwise be.
     let mut emitters: Vec<String> = Vec::new();
+    // The rdl2 object name a row binds (which a multiply-placed
+    // geometry does not share with its ɴsɪ handle), the ɴsɪ handle to
+    // resolve shared attributes -- light linking, shadow sets -- from,
+    // then the material and displacement.
     let mut bindings: Vec<(
         &'static str,
+        Cow<'_, str>,
         &str,
         Option<Reference>,
         Option<Reference>,
@@ -458,7 +473,9 @@ pub fn flush_with(
                         let (shape, data) = mesh(
                             scene,
                             handle,
+                            handle,
                             prototypes.get(handle).copied(),
+                            None,
                             shutter,
                             &mut flushed,
                         );
@@ -488,18 +505,127 @@ pub fn flush_with(
                     continue;
                 }
 
+                // A prototype does not reach `.root` and is not
+                // detached: its instancer is what places it, and it
+                // has exactly one placement -- relative to the
+                // instancer, not the world -- that `placements` does
+                // not know how to walk. Left on the single-object path
+                // below, unchanged.
+                let is_prototype = prototypes.contains_key(handle);
+                let shared = if is_prototype {
+                    None
+                } else {
+                    match scene.placements(handle) {
+                        Ok(placements) if placements.len() > 1 => {
+                            Some(placements)
+                        }
+                        _ => None,
+                    }
+                };
+
+                if let Some(placements) = shared {
+                    // **A geometry ɴsɪ connects under several
+                    // transforms is one shared node**, and 3Delight
+                    // renders it that way: "connecting a node to two
+                    // transforms draws it twice." `RdlMeshGeometry` has
+                    // no such sharing -- one object, one transform, one
+                    // material -- so this is not a feature to drop or a
+                    // reason to ask the scene to duplicate its
+                    // geometry. It is expanded here instead, at the
+                    // boundary: one `RdlMeshGeometry` per placement,
+                    // each carrying that placement's own transform and
+                    // material, so the render matches what the ɴsɪ
+                    // scene actually describes. Documented, because it
+                    // is a real MoonRay limitation and not a rewrite of
+                    // the scene's intent.
+                    flushed.limitations.push(format!(
+                        "{handle:?} is connected under {} transforms; \
+                         MoonRay's geometry cannot share one object \
+                         across placements with their own materials, so \
+                         it was expanded into {} separate objects",
+                        placements.len(),
+                        placements.len()
+                    ));
+
+                    for (index, placement) in placements.iter().enumerate() {
+                        let name = format!("{handle}#{index}");
+                        let (shape, data) = mesh(
+                            scene,
+                            handle,
+                            &name,
+                            None,
+                            Some(placement.transform),
+                            shutter,
+                            &mut flushed,
+                        );
+                        objects.extend(data);
+
+                        let sets = face_sets(scene, handle);
+                        let shape = with_parts(
+                            shape,
+                            scene,
+                            handle,
+                            &sets,
+                            &mut flushed,
+                        );
+                        objects.push(with_visibility(
+                            shape,
+                            scene,
+                            handle,
+                            &mut flushed,
+                        ));
+
+                        for set in &sets {
+                            if let Some(shader) = face_set_shader(scene, set) {
+                                let class = if shading == Shading::Osl
+                                    && crate::osl::is_runnable(scene, shader)
+                                {
+                                    OSL_MATERIAL
+                                } else {
+                                    MATERIAL
+                                };
+                                parts.push((
+                                    Cow::Owned(name.clone()),
+                                    handle,
+                                    set,
+                                    Reference::new(class, shader),
+                                ));
+                            }
+                        }
+
+                        geometries.push(Reference::new(MESH, name.as_str()));
+                        bindings.push((
+                            MESH,
+                            Cow::Owned(name),
+                            handle,
+                            material_of(
+                                scene,
+                                placement.binding.as_ref(),
+                                shading,
+                            ),
+                            displacement_of(
+                                scene,
+                                placement.binding.as_ref(),
+                                shading,
+                                handle,
+                                &mut flushed,
+                            ),
+                        ));
+                    }
+                    continue;
+                }
+
                 let (shape, data) = mesh(
                     scene,
                     handle,
+                    handle,
                     prototypes.get(handle).copied(),
+                    None,
                     shutter,
                     &mut flushed,
                 );
                 objects.extend(data);
-                // A prototype does not reach `.root` and is not
-                // detached: its instancer is what places it.
-                let placed = prototypes.contains_key(handle);
-                if !placed && detached(scene, handle) {
+                if !is_prototype && detached(scene, handle) {
                     if purpose == Purpose::Batch {
                         // Nothing will show it again, so it is not
                         // worth tessellating.
@@ -533,6 +659,7 @@ pub fn flush_with(
                                 MATERIAL
                             };
                             parts.push((
+                                Cow::Borrowed(handle),
                                 handle,
                                 set,
                                 Reference::new(class, shader),
@@ -547,6 +674,7 @@ pub fn flush_with(
                 // simply absent from the image.
                 bindings.push((
                     MESH,
+                    Cow::Borrowed(handle),
                     handle,
                     material(scene, handle, shading, &mut flushed),
                     displacement(scene, handle, shading, &mut flushed),
@@ -564,6 +692,7 @@ pub fn flush_with(
                 geometries.push(Reference::new(CURVES, handle));
                 bindings.push((
                     CURVES,
+                    Cow::Borrowed(handle),
                     handle,
                     material(scene, handle, shading, &mut flushed),
                     None,
@@ -581,6 +710,7 @@ pub fn flush_with(
                 geometries.push(Reference::new(POINTS, handle));
                 bindings.push((
                     POINTS,
+                    Cow::Borrowed(handle),
                     handle,
                     material(scene, handle, shading, &mut flushed),
                     None,
@@ -600,7 +730,13 @@ pub fn flush_with(
                 // a material, and the two columns are not
                 // interchangeable: MoonRay reads the volume through the
                 // sixth and would render nothing from the third.
-                bindings.push((VOLUME, handle, None, None));
+                bindings.push((
+                    VOLUME,
+                    Cow::Borrowed(handle),
+                    handle,
+                    None,
+                    None,
+                ));
                 report_volume_shader(scene, handle, shading, &mut flushed);
                 volumes.push(handle);
             }
@@ -667,6 +803,7 @@ pub fn flush_with(
                     // if any -- the prototypes carry their own.
                     bindings.push((
                         INSTANCER,
+                        Cow::Borrowed(handle),
                         handle,
                         material(scene, handle, shading, &mut flushed),
                         displacement(scene, handle, shading, &mut flushed),
@@ -907,8 +1044,8 @@ pub fn flush_with(
     // cast onto.
     let receivers: Vec<(String, Reference)> = bindings
         .iter()
-        .map(|(class, handle, _, _)| {
-            ((*handle).to_string(), Reference::new(*class, *handle))
+        .map(|(class, name, handle, _, _)| {
+            ((*handle).to_string(), Reference::new(*class, name.as_ref()))
         })
         .collect();
     let mut receiver_sets: Vec<Object> = Vec::new();
@@ -932,7 +1069,7 @@ pub fn flush_with(
     let mut volumes_shaded = false;
     let assignments = bindings
         .into_iter()
-        .map(|(class, handle, material, displacement)| {
+        .map(|(class, name, handle, material, displacement)| {
             // **A volume's row is shaded through the sixth column, not
             // the third.** MoonRay reads a volume through its
             // `VolumeShader` and a material there does nothing; the row
@@ -945,7 +1082,7 @@ pub fn flush_with(
                         Reference::new(VOLUME_SHADER, DEFAULT_VOLUME_SHADER)
                     })),
                     ..Assignment::new(
-                        Reference::new(class, handle),
+                        Reference::new(class, name.as_ref()),
                         None,
                         light_set_of(handle),
                     )
@@ -962,7 +1099,7 @@ pub fn flush_with(
                 shadow_set: shadow_set_of(handle),
                 shadow_receiver_set: shadow_receiver_set_of(handle),
                 ..Assignment::new(
-                    Reference::new(class, handle),
+                    Reference::new(class, name.as_ref()),
                     Some(material),
                     light_set_of(handle),
                 )
@@ -974,13 +1111,13 @@ pub fn flush_with(
     // the more specific row for a face in a part, so the order here is
     // for legibility rather than for meaning.
     let mut assignments: Vec<Assignment> = assignments;
-    for (geometry, part, material) in parts {
+    for (name, handle, part, material) in parts {
         assignments.push(Assignment {
             part: Name::new(part),
             ..Assignment::new(
-                Reference::new(MESH, geometry),
+                Reference::new(MESH, name.as_ref()),
                 Some(material),
-                light_set_of(geometry),
+                light_set_of(handle),
             )
         });
     }
@@ -1967,21 +2104,34 @@ fn blurred_transform(
 fn mesh(
     scene: &Scene,
     handle: &str,
+    name: &str,
     prototype_of: Option<&str>,
+    placement_transform: Option<[f64; 16]>,
     shutter: Option<[f64; 2]>,
     flushed: &mut Flushed,
 ) -> (Object, Vec<Object>) {
     let Some(node) = scene.node(handle) else {
-        return (Object::new(MESH, handle), Vec::new());
+        return (Object::new(MESH, name), Vec::new());
     };
 
-    let mut object = Object::new(MESH, handle);
+    let mut object = Object::new(MESH, name);
 
-    object = match prototype_of {
-        Some(instancer) => {
+    object = match (prototype_of, placement_transform) {
+        (Some(instancer), _) => {
             with_prototype_transform(object, scene, handle, instancer, flushed)
         }
-        None => with_transform(object, scene, handle, shutter, flushed),
+        // One of several placements of a shared geometry: the
+        // transform already comes composed, along *this* placement's
+        // own path -- `with_transform` resolves "the" path, which a
+        // multiply-placed handle does not have.
+        (None, Some(transform)) => {
+            if transform == IDENTITY {
+                object
+            } else {
+                object.set("node_xform", Value::Mat4d(transform))
+            }
+        }
+        (None, None) => with_transform(object, scene, handle, shutter, flushed),
     };
 
     match node.effective("nvertices").map(|arg| &arg.data) {
@@ -2921,6 +3071,31 @@ fn material(
     shading: Shading,
     flushed: &mut Flushed,
 ) -> Option<Reference> {
+    match scene.geometry_binding(handle) {
+        Ok(binding) => material_of(scene, binding.as_ref(), shading),
+        Err(error) => {
+            flushed.limitations.push(format!(
+                "{handle:?} has no single material binding ({error}); it \
+                 renders with the default surface"
+            ));
+            None
+        }
+    }
+}
+
+/// The same lookup as [`material`], over an already-resolved
+/// [`Binding`] rather than a handle to resolve one from.
+///
+/// A geometry placed under several transforms has no single path for
+/// [`Scene::geometry_binding`] to resolve, and [`Scene::placements`]
+/// already did that work once per placement -- calling `material`
+/// again per placement would resolve the whole scene chain a second
+/// time for an answer it already has.
+fn material_of(
+    scene: &Scene,
+    binding: Option<&Binding>,
+    shading: Shading,
+) -> Option<Reference> {
     // A `Layer` row names an object by class *and* name, so the class
     // has to be the one the shader actually became. Assuming
     // `UsdPreviewSurface` here while the shader emitted an `Osl`
@@ -2931,19 +3106,10 @@ fn material(
         _ => MATERIAL,
     };
 
-    match scene.geometry_binding(handle) {
-        Ok(binding) => binding?
-            .surface_shader
-            .as_deref()
-            .map(|shader| Reference::new(class(shader), shader)),
-        Err(error) => {
-            flushed.limitations.push(format!(
-                "{handle:?} has no single material binding ({error}); it \
-                 renders with the default surface"
-            ));
-            None
-        }
-    }
+    binding?
+        .surface_shader
+        .as_deref()
+        .map(|shader| Reference::new(class(shader), shader))
 }
 
 /// The shader handles bound in each shader slot: surfaces,
@@ -2993,13 +3159,22 @@ fn displacement(
     shading: Shading,
     flushed: &mut Flushed,
 ) -> Option<Reference> {
-    let shader = scene
-        .geometry_binding(handle)
-        .ok()
-        .flatten()?
-        .displacement_shader?;
+    let binding = scene.geometry_binding(handle).ok().flatten();
+    displacement_of(scene, binding.as_ref(), shading, handle, flushed)
+}
 
-    if shading != Shading::Osl || !crate::osl::is_runnable(scene, &shader) {
+/// The same lookup as [`displacement`], over an already-resolved
+/// [`Binding`]. See [`material_of`] for why this exists separately.
+fn displacement_of(
+    scene: &Scene,
+    binding: Option<&Binding>,
+    shading: Shading,
+    handle: &str,
+    flushed: &mut Flushed,
+) -> Option<Reference> {
+    let shader = binding?.displacement_shader.as_deref()?;
+
+    if shading != Shading::Osl || !crate::osl::is_runnable(scene, shader) {
         flushed.limitations.push(format!(
             "{handle:?} has displacement shader {shader:?} bound, which \
              needs OSL; the geometry is not displaced"
@@ -3007,7 +3182,7 @@ fn displacement(
         return None;
     }
 
-    Some(Reference::new(OSL_DISPLACEMENT, shader))
+    Some(Reference::new(OSL_DISPLACEMENT, shader.to_string()))
 }
 
 /// The OSL volume shader bound to one volume, if there is one and OSL
@@ -7485,6 +7660,89 @@ mod tests {
                  1, 2, 3, 1),"
             ),
             "{rdla}"
+        );
+    }
+
+    /// **A geometry connected under two transforms is one shared node,
+    /// each placement with its own material.** ɴsɪ's own lightweight
+    /// instancing -- "connecting a node to two transforms draws it
+    /// twice" -- with no `instances` node in sight. `RdlMeshGeometry`
+    /// cannot share one object across two materials, so this expands
+    /// at the boundary into two, one per placement, and says so.
+    #[test]
+    fn one_geometry_under_two_transforms_becomes_two_objects_and_materials() {
+        let mut scene = triangle();
+
+        scene
+            .create("left", "transform")
+            .expect("a recordable edit");
+        scene
+            .create("right", "transform")
+            .expect("a recordable edit");
+        scene
+            .set_attribute("left", vec![translation(-2.0)])
+            .expect("a recordable edit");
+        scene
+            .set_attribute("right", vec![translation(2.0)])
+            .expect("a recordable edit");
+        scene.connect("left", None, ".root", "objects").unwrap();
+        scene.connect("right", None, ".root", "objects").unwrap();
+
+        // Off `.root` directly and onto both transforms instead: two
+        // placements, not the one `triangle()` already wired up.
+        scene.disconnect("tri", None, ".root", "objects").unwrap();
+        scene.connect("tri", None, "left", "objects").unwrap();
+        scene.connect("tri", None, "right", "objects").unwrap();
+
+        for (attr, transform, shader) in [
+            ("attr_left", "left", "red"),
+            ("attr_right", "right", "blue"),
+        ] {
+            scene.create(attr, "attributes").expect("a recordable edit");
+            scene.create(shader, "shader").expect("a recordable edit");
+            scene
+                .set_attribute(
+                    shader,
+                    vec![arg(
+                        "shaderfilename",
+                        Type::String,
+                        OwnedData::String(vec![shader.as_bytes().to_vec()]),
+                    )],
+                )
+                .expect("a recordable edit");
+            // Bound to the *transform*, not to the shared geometry: a
+            // binding on "tri" itself would sit on every path through
+            // it, placement or no. This is what actually differs
+            // between the two placements.
+            scene
+                .connect(attr, None, transform, "geometryattributes")
+                .unwrap();
+            scene.connect(shader, None, attr, "surfaceshader").unwrap();
+        }
+
+        let flushed = flush(&scene);
+        let rdla = flushed.to_rdla();
+
+        assert!(rdla.contains("RdlMeshGeometry(\"tri#0\")"), "{rdla}");
+        assert!(rdla.contains("RdlMeshGeometry(\"tri#1\")"), "{rdla}");
+        assert!(
+            rdla.matches(
+                "[\"node_xform\"] = Mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0"
+            )
+            .count()
+                == 2,
+            "expected both placements' own transform, {rdla}"
+        );
+        assert!(rdla.contains("UsdPreviewSurface(\"red\")"), "{rdla}");
+        assert!(rdla.contains("UsdPreviewSurface(\"blue\")"), "{rdla}");
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("\"tri\"")
+                    && line.contains("expanded into 2")),
+            "{:?}",
+            flushed.limitations
         );
     }
 
