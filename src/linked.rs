@@ -33,15 +33,52 @@
 //! # Using it
 //!
 //! ```ignore
-//! nsi::backend::register("moonray", std::sync::Arc::new(nsi_moonray::MoonRay));
-//!
 //! let context = nsi::Context::new(Some(&[
 //!     nsi::string!("renderer", "moonray"),
 //! ]));
 //! ```
 //!
-//! Register before the first context that asks for the name; one
-//! already built keeps the renderer it was built with.
+//! Usually no call to make first: a `#[ctor]` function below calls
+//! `nsi_ffi_wrap::backend::register` before `main` runs, the same way
+//! `nsi::backend::register("moonray",
+//! std::sync::Arc::new(nsi_moonray::MoonRay))` would by hand. "Usually"
+//! is doing real work in that sentence -- read on before leaving the
+//! call out.
+//!
+//! # This is best-effort, not a guarantee
+//!
+//! **A `#[ctor]` inside a dependency's `rlib` is not reliably linked
+//! into a consumer that never references anything else from it.** This
+//! is not specific to this crate or to `ctor`: it is how static
+//! linking works. `rustc`/`ld` pull object files out of an archive
+//! only for symbols something actually references: a `#[used]` static
+//! keeps a *linked* object file's section from being garbage-collected,
+//! but it cannot make the linker select an object file that nothing
+//! names in the first place. Nothing else in a host that only calls
+//! `nsi::Context::new(&[renderer("moonray")])` references anything in
+//! this module, so the linker has no reason to pull this file's object
+//! code from the archive, and the constructor that would have
+//! registered `"moonray"` is never linked in to run. Cargo has no
+//! stable, portable way for a library to force `--whole-archive`
+//! linking onto an arbitrary downstream consumer -- see
+//! <https://github.com/rust-lang/cargo/issues/7586>, open since 2019 --
+//! so this cannot be closed from this crate alone.
+//!
+//! It *does* run reliably when this crate is loaded as the `cdylib`
+//! (a shared library links every reachable symbol, archive-selection
+//! does not apply), and it runs incidentally whenever a host's own
+//! code references anything else in this module -- holding an
+//! `Arc<MoonRay>` for some other reason, say. Measured here: present
+//! and firing in `libnsi_moonray.so`, absent from a `cargo test`
+//! binary that named nothing else in this file.
+//! `tests/shaderballs.rs`'s `a_row_of_looks_through_both_renderers`
+//! hit exactly this, which is how it was found rather than assumed.
+//!
+//! **So: call `register` explicitly unless you already know your
+//! binary references something else here.** It is idempotent --
+//! registering a name twice keeps the later write -- so calling it
+//! even when the `#[ctor]` also fires costs nothing and is the safe
+//! default. This crate's own tests do.
 //!
 //! **The host and this crate must share one `nsi-ffi-wrap`.** That is
 //! the whole point, and Cargo gives it for free within one build graph
@@ -73,6 +110,45 @@ use std::{ffi::c_char, os::raw::c_int};
 /// cloning it costs nothing.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MoonRay;
+
+/// Registers [`MoonRay`] with `nsi-ffi-wrap` before `main` runs --
+/// **when this object file is linked in at all.** See the module doc
+/// comment's "This is best-effort, not a guarantee" section: nothing
+/// makes that certain for a host that references nothing else here,
+/// and measurement rather than the mechanism's own description is
+/// what found that out.
+///
+/// Behind `backend-registry` because `nsi_ffi_wrap::backend` is not in
+/// the published `nsi-ffi-wrap` this crate otherwise builds against --
+/// see that feature's own comment in `Cargo.toml`. A host that does
+/// not want `MoonRay` to answer `"moonray"` can call
+/// `nsi_ffi_wrap::backend::register` itself afterwards with something
+/// else; registering a name twice keeps the later one.
+///
+/// `ctor`'s mechanism -- a function placed in a platform's pre-`main`
+/// init section (`.init_array` on Linux, and the equivalents
+/// elsewhere) -- is what lets this run with no call site, on the
+/// binaries it does reach. `backend::register`'s own storage is a
+/// `LazyLock<Mutex<...>>`, which initialises itself on first touch and
+/// needs nothing already running to be safe to call this early --
+/// that part was never in question; being linked in at all was.
+///
+/// # Safety
+///
+/// `ctor` 1.0 requires this acknowledgement because a pre-`main`
+/// function runs before the platform guarantees anything is set up,
+/// and it cannot verify that for an arbitrary function body. This one
+/// only allocates (a `String` key, a `HashMap` entry) and takes a
+/// `Mutex` -- both routed through the same allocator and libc `main`
+/// itself will use once it starts, and neither needs a thread pool,
+/// signal handlers, or any other runtime service `.init_array` runs
+/// before. No global state is read here, only written, so there is
+/// nothing for run order against another `ctor` to corrupt.
+#[cfg(feature = "backend-registry")]
+#[ctor::ctor(unsafe)]
+fn register_with_nsi() {
+    nsi_ffi_wrap::backend::register("moonray", std::sync::Arc::new(MoonRay));
+}
 
 /// `nsi_sys::NSIParam` and `nsi_trait::FfiParam` are both `#[repr(C)]`
 /// mirrors of the specification's `NSIParam_t`, field for field. The

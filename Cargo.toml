@@ -66,21 +66,25 @@ crate-type = ["rlib", "cdylib"]
 [features]
 default = ["cli", "interned_handles"]
 # Build `tests/linked.rs`, which exercises the linked route end to end
-# through `nsi::Context`.
+# through `nsi::Context`, and turn on `src/linked.rs`'s self-registering
+# `#[ctor]` so `"moonray"` resolves with no call a host has to make.
 #
 # **Off because it needs an unreleased `nsi-ffi-wrap`**, not because the
-# route is optional: `src/linked.rs` itself builds against the published
-# 0.10.2 and always has. The *test* calls `nsi::backend::register`,
-# which arrived with runtime renderer selection and is not in a release
-# yet. It also needs the test binary and this crate to share one
+# route is optional: `src/linked.rs`'s `FfiApi` impl builds against the
+# published 0.10.2 and always has. `nsi_ffi_wrap::backend`, which the
+# `#[ctor]` calls into, arrived with runtime renderer selection and is
+# not in a release yet -- so both it and the `ctor` crate that reaches
+# it are gated here rather than pulled in unconditionally, which would
+# break the default build against the real published dependency. It
+# also needs the test binary and this crate to share one
 # `nsi-ffi-wrap`, so run it with a local override -- see
 # `specs/001-moonray-backend/tasks.md` `T5.4`:
 #
-#     cargo nextest run --features rdl2,linked-route
+#     cargo nextest run --features rdl2,backend-registry
 #
-# Delete this feature and the gate on the test the day that release
-# lands.
-linked-route = []
+# Delete this feature, its gate on `src/linked.rs`'s `#[ctor]`, and the
+# gate on the test, the day that release lands.
+backend-registry = ["dep:ctor"]
 # Build the scene **in memory**, by linking MoonRay's own scene library.
 #
 # # What "rdl2" is, since the name explains nothing
@@ -115,6 +119,21 @@ linked-route = []
 # could not be built, or its tests run, on a machine that cannot build
 # MoonRay.
 rdl2 = []
+# Allow a batch render to fall back to writing a `.rdla` and spawning
+# the `moonray` binary when in-process rendering fails, instead of
+# reporting an error and rendering nothing.
+#
+# **Off by default, on purpose.** In-process is the answer when `rdl2`
+# is linked at all -- see `rdl2`'s own comment -- so a fallback nobody
+# asked for renders correctly through a different renderer instance on
+# a different code path with nothing to say so beyond an `eprintln`
+# easy to lose under ordinary output. That is a worse failure than
+# rendering nothing: found once as an unexplained `moonray` process in
+# `ps` next to a scene that should never have shelled out to it.
+#
+# Meaningless without `rdl2`: without it there is no in-process route
+# to fail, and the spawned path is the only one there ever was.
+spawn-fallback = []
 # The `mnry` command. On by default so `cargo install nsi-moonray`
 # gives you the renderer's front end; a library consumer that wants the
 # flush and nothing else takes `default-features = false` and none of
@@ -207,6 +226,17 @@ nsi-trait = "0.4.2"
 # no display-driver interface, so this crate calls those closures
 # itself; see `src/display.rs`. Nothing here marshals ndspy structs.
 nsi-ffi-wrap = { version = "0.10.2", features = ["output"] }
+# So `src/linked.rs` can register `MoonRay` with `nsi-ffi-wrap` the
+# moment this crate is linked into a binary, instead of leaving every
+# host to remember the call itself. See the `#[ctor]` there.
+#
+# **Optional, and only pulled in by `backend-registry`**, for the same
+# reason that feature's own comment gives: `nsi_ffi_wrap::backend` is
+# not in the published 0.10.2 this crate otherwise builds against, only
+# in the local, gitignored `[patch.crates-io]` override. `mod linked`
+# stays unconditional either way -- the `FfiApi` impl builds fine
+# against 0.10.2 -- only the self-registering `#[ctor]` needs the gate.
+ctor = { version = "1", optional = true }
 # One ndspy struct, and only one: `PixelFormat::from_ndspy` takes the
 # channel list in that shape, and it is the only public way to build the
 # type the callbacks are handed. Nothing else here marshals ndspy.
