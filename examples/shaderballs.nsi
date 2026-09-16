@@ -1,8 +1,8 @@
 # 3Delight 2.9.209 linux64 (Sep  3 2026, a8edaa) "Re-Animator" (free 12 core version)
-# Written Wed Sep 16 22:03:02 2026
+# Written Wed Sep 16 23:47:02 2026
 Create "camxf" "transform" 
 SetAttribute "camxf" 
-  "transformationmatrix" "doublematrix" 1 [ 1 0 0 0 0 0.90630778703664994 -0.42261826174069944 0 0 0.42261826174069944 0.90630778703664994 0 0 4 11 1 ] 
+  "transformationmatrix" "doublematrix" 1 [ 1 0 0 0 0 0.90630778703664994 -0.42261826174069944 0 0 0.42261826174069944 0.90630778703664994 0 0 2.7999999999999998 7.7000000000000002 1 ] 
 Connect "camxf" "" ".root" "objects" 
 Create "cam" "perspectivecamera" 
 SetAttribute "cam" 

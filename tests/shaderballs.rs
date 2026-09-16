@@ -252,6 +252,15 @@ fn look<'a>(
 /// elevation. The roughness sweep keeps the original framing, since
 /// its disc coordinates for measurement are pixel positions computed
 /// against it; the five-look row asks for a different one.
+///
+/// `camera_distance` is `camera_height` and the old fixed `11.0`
+/// z-offset's shared scale, not a third independent number: moving
+/// the rig closer along both axes at once leaves the pitch-vs-fov
+/// relationship that hides the sky untouched (that is an angle, not a
+/// distance) while making everything in frame -- balls and floor
+/// alike -- proportionally larger. The row's own balls read small
+/// against the frame at the original `11.0`; the roughness sweep
+/// keeps that distance for the same reason it keeps the framing.
 fn stage<'a>(
     context: &nsi::Context<'a>,
     principled: &'a str,
@@ -262,6 +271,7 @@ fn stage<'a>(
     stats: &str,
     camera_height: f64,
     camera_pitch_degrees: f64,
+    camera_distance: f64,
 ) {
     let (width, height) = (960i32, 320i32);
 
@@ -287,7 +297,7 @@ fn stage<'a>(
                 0.0, //
                 0.0,
                 camera_height,
-                11.0,
+                camera_distance,
                 1.0f64,
             ]
         )],
@@ -755,6 +765,7 @@ fn a_roughness_sweep_through_both_renderers() {
                 stats.to_string_lossy().as_ref(),
                 1.1,
                 0.0,
+                11.0,
             );
 
             let spacing = 2.3f32;
@@ -912,8 +923,16 @@ fn a_row_of_looks_through_both_renderers() {
                 // sits 5 degrees below the horizon's fixed 0-degree
                 // elevation -- the sky is out of frame with a small
                 // margin, not balanced exactly on the edge.
-                4.0,
+                //
+                // Height and distance both at 0.7x the roughness
+                // sweep's own `4.0`/`11.0`: the pitch angle above is
+                // unaffected by distance, so the sky stays hidden the
+                // same way, while every ball reads larger in frame --
+                // they read small against the wide, mostly-empty floor
+                // at the original distance.
+                2.8,
                 25.0,
+                7.7,
             );
             looks(&context, &principled);
             // **A batch render: start, wait, stop.** No
@@ -1018,8 +1037,9 @@ fn dump_shaderballs_nsi() {
         256,
         16,
         "shaderballs.csv",
-        4.0,
+        2.8,
         25.0,
+        7.7,
     );
     looks(&context, &principled);
     // **Batch means fully converged, not merely started.**
