@@ -2074,6 +2074,19 @@ fn mesh(
 
     if subdivision {
         object = creases(object, node);
+    } else {
+        // `smooth_normal` defaults to `true` on `RdlMeshGeometry`:
+        // "Generates smooth shading normals on a PolygonMesh when the
+        // mesh doesn't provide shading normals." ɴsɪ has the opposite
+        // default -- a polygon mesh with no `N` is flat-shaded, one
+        // normal per face, full stop; nothing in the spec invents a
+        // smooth one. Left at MoonRay's default, every polygon mesh
+        // this backend sends without `N` renders smooth where 3Delight
+        // renders faceted, which no sample count changes because it
+        // is not noise. So this is forced off here; an ɴsɪ scene that
+        // wants smooth shading says so the only way the spec allows,
+        // by supplying `N`.
+        object = object.set("smooth_normal", Value::Bool(false));
     }
 
     // ɴsɪ says which way faces wind; MoonRay calls the same thing
@@ -5763,6 +5776,23 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(normals.matches("Vec3(").count(), 8, "{rdla}");
         assert_eq!(normals.matches("Vec3(0, 1, 0)").count(), 4, "{normals}");
+    }
+
+    /// ɴsɪ flat-shades a polygon mesh with no `N`; MoonRay's own
+    /// default, left alone, invents smooth ones instead. Rendered,
+    /// that is not noise a sample count can fix -- it is a different
+    /// surface. So every non-subdivision mesh crosses with
+    /// `smooth_normal` forced off, whether or not this one happens to
+    /// carry `N`.
+    #[test]
+    fn a_polygon_mesh_without_n_does_not_get_invented_smooth_normals() {
+        let rdla = flush(&two_quads()).to_rdla();
+
+        assert!(
+            rdla.contains("[\"smooth_normal\"] = Bool(false)")
+                || rdla.contains("[\"smooth_normal\"] = false"),
+            "{rdla}"
+        );
     }
 
     /// **An attribute nobody declared crosses as `UserData`.**
