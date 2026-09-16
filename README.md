@@ -262,7 +262,7 @@ What follows actually is dropped:
 | Motion samples | More than two | `scene_rdl2` has exactly two timesteps; the rest are resampled onto the shutter's ends. |
 | Instancer blur | Rotation/scale across the shutter | Only translation blurs. |
 | Cryptomatte | One output per kind | MoonRay has one output total, object identity only. |
-| Subdivision scheme | Any named scheme | Catmull-Clark only. |
+| Subdivision scheme | Any scheme named in a mesh's `subdivision.scheme` | Catmull-Clark only -- MoonRay's own subdivision implementation has no other scheme, and this is a geometry attribute, not something OSL touches. |
 | Curve basis | Non-linear bases, `extrapolate` | Linear only; no extrapolation. |
 | Cameras | `cylindricalcamera`, most fisheye mappings | No equivalent; skipped or falls back. |
 | Particles | `N` for orientation | Renders as spheres regardless. |
