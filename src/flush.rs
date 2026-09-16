@@ -2224,13 +2224,19 @@ fn mesh(
     // Catmull-Clark cage with no displacement shader on it renders
     // smooth there. ɴsɪ itself has no per-mesh tessellation-rate
     // attribute for a scene to ask for a particular fineness, so there
-    // is nothing to read a number from either way. What this asks
-    // MoonRay for is simply finer than its own default cap, which a
-    // coarse cage needs to look like the smooth surface ɴsɪ describes
-    // rather than the polyhedron backing it.
+    // is nothing to read a number from either way.
+    //
+    // `adaptive_error` is a maximum tessellated-edge length **in
+    // pixels**, so it is the same knob RenderMan's `shadingrate`
+    // is, one level removed: `shadingrate`'s default of `1` bounds a
+    // micropolygon to *area* one pixel squared, i.e. an edge around
+    // `sqrt(1) = 1` px. `0.8` asks for a finer bound than that
+    // default, an edge under `0.8` px, comparable to a `shadingrate`
+    // a little under `0.64` rather than MoonRay's own uncapped `2`
+    // full segments per edge regardless of screen size.
     if subdivision {
         object = object
-            .set("adaptive_error", Value::Float(0.25))
+            .set("adaptive_error", Value::Float(0.8))
             .set("mesh_resolution", Value::Float(64.0));
     }
 
