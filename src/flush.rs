@@ -21,7 +21,7 @@ use crate::{
     value::{Reference, Value},
 };
 use nsi_intermediate::{
-    EdgeKind, IDENTITY, Node, OwnedArgument, OwnedData, Scene,
+    EdgeKind, IDENTITY, Node, OwnedArgument, OwnedData, Scene, is_reserved,
 };
 use nsi_trait::Type;
 use std::collections::{HashMap, HashSet};
@@ -388,6 +388,21 @@ pub fn flush_with(
     let (surfaces, displaces, volume_shaders) = shader_roles(scene);
 
     for (handle, node) in scene.nodes() {
+        // **`.root` and `.global` don't need `NSICreate`.** ɴsɪ says so
+        // outright, and every scene that sets an attribute on either
+        // without creating it first -- which is the ordinary way to
+        // use `.global`, not an edge case -- leaves `node_type()`
+        // empty. The `"root"` arm below only ever matched a stream
+        // that *did* create `.root` explicitly, which nothing here
+        // does; an uncreated `.global` fell to the catch-all and
+        // reported itself skipped while `with_globals` was reading it
+        // correctly a few lines down -- a report that said the
+        // opposite of the truth, the same failure `"set"` was fixed
+        // for below.
+        if is_reserved(handle) {
+            continue;
+        }
+
         match node.node_type() {
             "mesh" | "subdivisionmesh" => {
                 // ɴsɪ has no light nodes: a mesh wearing an emitter
@@ -673,7 +688,7 @@ pub fn flush_with(
             // as "no MoonRay mapping and was skipped" while its
             // members were being carried, and a report that says the
             // opposite of the truth costs more than no report.
-            "transform" | "attributes" | "screen" | "root" | "set" => {}
+            "transform" | "attributes" | "screen" | "set" => {}
 
             "outputdriver" | "outputlayer" => {}
 
@@ -2314,6 +2329,19 @@ enum GlobalKind {
     /// One interface attribute is split across two rdl2 ones, so each
     /// takes half and the **total** is what was asked for. At least
     /// one either way: a budget of 1 halved is still a sample.
+    ///
+    /// **And each of those two is itself a square root.** `rdl2`'s
+    /// `light_samples` and `bsdf_samples` are not the count MoonRay
+    /// takes per shading point -- `PathIntegrator.cc` squares them:
+    /// `mLightSamples = ...LightSamplesSqrt * ...LightSamplesSqrt`, the
+    /// same stratified-grid convention `pixel_samples` uses for
+    /// antialiasing. Forwarding the halved budget unconverted, as a
+    /// linear count, asked MoonRay for its *square*: `shadingsamples =
+    /// 32` halved to `16` and stored as `light_samples = 16` renders
+    /// 256 light samples per shading point, not 16 -- a render that
+    /// looks like a hang and is actually doing sixteen times the
+    /// requested work. Found by reading `PathIntegrator.cc` after a
+    /// twenty-two-minute five-sphere render, not by inspection.
     Half,
 }
 
@@ -2390,9 +2418,14 @@ fn with_globals(mut variables: Object, scene: &Scene) -> Object {
         };
 
         let value = match kind {
-            // Half each, so the two together spend the budget the
-            // scene asked for rather than twice it.
-            GlobalKind::Half => (value / 2).max(1),
+            // Half each so the two together spend the budget the scene
+            // asked for rather than twice it, then the square root
+            // because `light_samples`/`bsdf_samples` store one -- see
+            // `GlobalKind::Half`'s doc comment for why skipping this
+            // asked MoonRay for the square of the intended count.
+            GlobalKind::Half => {
+                (((value / 2).max(1) as f32).sqrt().round() as i32).max(1)
+            }
             // One more than the interface asked for: ɴsɪ counts
             // bounces past local illumination, MoonRay counts them
             // from the first. See `GlobalKind::Depth`.
@@ -2410,6 +2443,32 @@ fn with_globals(mut variables: Object, scene: &Scene) -> Object {
 
     for (rdl2, value) in carried {
         variables = variables.set(rdl2, Value::Int(value));
+    }
+
+    // **`statistics.filename`, string-valued, so it does not fit
+    // `GLOBALS`.** MoonRay's `stats_file` is documented, field for
+    // field, as "the filename to write the rendering statistics to in
+    // CSV format" -- what `statistics.filename` asks for, including
+    // CPU time per phase rather than only wall clock, which a `ps` or
+    // `/usr/bin/time` reading from outside the process cannot
+    // separate from time spent waiting on I/O or another renderer
+    // sharing the machine.
+    //
+    // `statistics.progress` has no rdl2 counterpart: MoonRay's
+    // equivalent is `-progress` on the command line, a render option
+    // this backend already controls directly, not a scene attribute
+    // `.global` could carry.
+    let filename = match node
+        .and_then(|node| node.effective("statistics.filename"))
+        .map(|argument| &argument.data)
+    {
+        Some(OwnedData::String(values)) => values
+            .first()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+        _ => None,
+    };
+    if let Some(filename) = filename {
+        variables = variables.set("stats_file", Value::String(filename));
     }
 
     variables
@@ -6755,15 +6814,20 @@ mod tests {
         let rdla = flushed.to_rdla();
         let said = flushed.limitations.join("\n");
 
-        // **Halved, so the two together spend the budget.** The
-        // interface offers one shading-sample number and MoonRay has
-        // two counts to put it in; eight into both would spend
-        // sixteen. Four and four is still a guess about the *split*,
-        // which is MoonRay's control surface to fix
+        // **Halved, so the two together spend the budget, then square
+        // rooted, because that is what `light_samples` and
+        // `bsdf_samples` store.** The interface offers one
+        // shading-sample number and MoonRay has two *stratified-grid
+        // roots* to put it in: 8 halved is a budget of 4 samples per
+        // lobe, and a budget of 4 is stored as `2`, since
+        // `PathIntegrator.cc` squares it back before rendering. Storing
+        // the unconverted `4` would have rendered 16 per lobe -- four
+        // times the budget asked for. 2 and 2 is still a guess about
+        // the *split*, which is MoonRay's control surface to fix
         // (`upstream/moonray-sampling-has-no-total-budget.md`), but it
         // is the guess that gets the total right.
-        assert!(rdla.contains("[\"light_samples\"] = 4"), "{rdla}");
-        assert!(rdla.contains("[\"bsdf_samples\"] = 4"), "{rdla}");
+        assert!(rdla.contains("[\"light_samples\"] = 2"), "{rdla}");
+        assert!(rdla.contains("[\"bsdf_samples\"] = 2"), "{rdla}");
         // **One more than asked, on every depth.** ɴsɪ counts bounces
         // past local illumination and MoonRay counts them from the
         // first, so 3 becomes 4. Forwarding unchanged switched volumes
@@ -6781,6 +6845,34 @@ mod tests {
         assert!(
             !said.contains("shadingsamples"),
             "what is carried must not be reported\n{said}"
+        );
+    }
+
+    /// **`statistics.filename` reaches `stats_file`.**
+    ///
+    /// String-valued, so it does not fit [`GLOBALS`]'s `i32` table and
+    /// is carried separately in [`with_globals`]. MoonRay's own
+    /// documentation for `stats_file`: "the filename to write the
+    /// rendering statistics to in CSV format" -- the same file
+    /// `statistics.filename` names, field for field.
+    #[test]
+    fn statistics_filename_reaches_stats_file() {
+        let mut scene = triangle();
+        scene
+            .set_attribute(
+                ".global",
+                vec![arg(
+                    "statistics.filename",
+                    Type::String,
+                    OwnedData::String(vec![b"/tmp/stats.csv".to_vec()]),
+                )],
+            )
+            .unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+        assert!(
+            rdla.contains("[\"stats_file\"] = \"/tmp/stats.csv\""),
+            "{rdla}"
         );
     }
 
@@ -7640,6 +7732,40 @@ mod tests {
             !said.contains("no MoonRay mapping"),
             "a node type the flush consumes elsewhere must not be \
              reported as unmapped\n{said}"
+        );
+    }
+
+    /// **`.global` does not need `NSICreate`, and the flush must not
+    /// treat one that never got it as unmapped.**
+    ///
+    /// ɴsɪ says `.root` and `.global` "don't need to be created using
+    /// NSICreate" -- setting an attribute on either is the whole of
+    /// how a scene ordinarily uses them. Doing exactly that left
+    /// `.global` with an empty `node_type()`, which fell through the
+    /// dispatch's catch-all and reported itself skipped while
+    /// `with_globals` was reading it correctly a few lines below --
+    /// the same "opposite of the truth" failure
+    /// `a_consumed_node_type_is_not_reported_as_unmapped` exists for,
+    /// on the one node every renderer-comparing test sets.
+    #[test]
+    fn an_uncreated_global_is_not_reported_as_unmapped() {
+        let mut scene = triangle();
+        scene
+            .set_attribute(
+                ".global",
+                vec![arg(
+                    "quality.shadingsamples",
+                    Type::I32,
+                    OwnedData::I32(vec![8]),
+                )],
+            )
+            .unwrap();
+
+        let said = flush(&scene).limitations.join("\n");
+        assert!(
+            !said.contains("no MoonRay mapping"),
+            "an uncreated `.global` must not be reported as \
+             unmapped\n{said}"
         );
     }
 
