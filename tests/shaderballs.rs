@@ -28,10 +28,10 @@
 //! Needs `$DELIGHT` for the shaders and `$NSI_MOONRAY`/a linked backend
 //! for the second render; skipped without either.
 
-#![cfg(all(feature = "rdl2", moonray, feature = "linked-route"))]
+#![cfg(all(feature = "rdl2", moonray, feature = "backend-registry"))]
 
 use nsi_ffi_wrap as nsi;
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, sync::Arc};
 
 const PAIR: NonZeroUsize = match NonZeroUsize::new(2) {
     Some(two) => two,
@@ -105,24 +105,52 @@ fn look<'a>(
 }
 
 /// Build the row. Identical for both renderers, by construction.
+///
+/// `camera_height` and `camera_pitch_degrees` (positive tilts down)
+/// are parameters rather than the fixed `1.1` and `0.0` they replace,
+/// because **a level camera puts the horizon at the exact vertical
+/// centre of frame no matter how high it sits** -- height alone never
+/// hides the sky over an unbounded-looking floor; only pitch does, by
+/// moving the frustum's top edge below the horizon's fixed 0-degree
+/// elevation. The roughness sweep keeps the original framing, since
+/// its disc coordinates for measurement are pixel positions computed
+/// against it; the five-look row asks for a different one.
 fn stage<'a>(
     context: &nsi::Context<'a>,
     principled: &'a str,
     environment: &'a str,
     image: &str,
+    shading_samples: i32,
+    stats: &str,
+    camera_height: f64,
+    camera_pitch_degrees: f64,
 ) {
     let (width, height) = (960i32, 320i32);
 
+    let pitch = camera_pitch_degrees.to_radians();
+    let (sin, cos) = (pitch.sin(), pitch.cos());
     context.create("camxf", nsi::node::TRANSFORM, None);
     context.set_attribute(
         "camxf",
         &[nsi::matrix_f64!(
             "transformationmatrix",
             &[
-                1.0, 0.0, 0.0, 0.0, //
-                0.0, 1.0, 0.0, 0.0, //
-                0.0, 0.0, 1.0, 0.0, //
-                0.0, 1.1, 11.0, 1.0f64,
+                1.0,
+                0.0,
+                0.0,
+                0.0, //
+                0.0,
+                cos,
+                -sin,
+                0.0, //
+                0.0,
+                sin,
+                cos,
+                0.0, //
+                0.0,
+                camera_height,
+                11.0,
+                1.0f64,
             ]
         )],
     );
@@ -139,23 +167,79 @@ fn stage<'a>(
     );
     context.connect("screen", None, "cam", "screens", None);
 
-    // **Samples on `.global`, because both renderers read it.**
+    // **`oversampling` set explicitly, because leaving it unset is not
+    // neutral.** The comment this replaced claimed only 3Delight reads
+    // it -- wrong about this backend's own code: `pixel_samples()` in
+    // `flush.rs` reads `screen`'s `oversampling` and forwards its
+    // square root to MoonRay's `pixel_samples` for exactly this
+    // reason, ɴsɪ separating AA from shading quality on both sides.
     //
+    // Unlike `quality.shadingsamples`, the specification names no
+    // default for `oversampling` at all (nsi.readthedocs.io's `screen`
+    // page: an empty default column) -- so `flush.rs` forwarding
+    // nothing when it is unset is correct, not a gap to close the way
+    // the ray depths and shading samples were. There is no spec number
+    // to carry across.
+    //
+    // But a scene built to *compare* two renderers cannot leave either
+    // to a number the specification declines to pin down: absent it,
+    // each renderer reaches for its own house default, and those have
+    // no reason to agree. MoonRay's is `pixel_samples = 8`
+    // (`SceneVariables.cc`'s declared default), sixty-four actual
+    // camera rays per pixel -- most of why the earlier sweep took 22
+    // minutes and came out smoother than 3Delight's, whose own unset
+    // default is far lower, which is why *its* image is the noisy one.
+    // Two unrelated defaults were being compared and called a result.
+    // 16 gives 3Delight sixteen direct camera rays and MoonRay
+    // `round(sqrt(16)) = 4`, i.e. sixteen actual -- matched, and cheap
+    // enough for a confirmation render.
+    context.set_attribute("screen", &[nsi::i32!("oversampling", 16)]);
+
     // `quality.shadingsamples` is the interface's own control and
     // crosses to `SceneVariables` on the MoonRay side, so asking for a
-    // number here asks *both* for it. That is the opposite of
-    // `screen.oversampling`, which only 3Delight reads -- setting that
-    // would hand one renderer a larger budget than the other and call
-    // the result a comparison, so it is deliberately absent.
+    // number here asks *both* for it.
     //
     // The interface's default is 1, which is honest and unreadable: at
     // one sample the noise is louder than anything the image is trying
     // to show. Everything *else* on `.global` is left unset on purpose,
     // so the ray depths come from the defaults this backend forwards
     // rather than from a number written here.
+    //
+    // Taken as a parameter, not hardcoded: the roughness sweep and the
+    // five-look row want different budgets. The sweep is read as a
+    // measurement and stays cheap; the row is read as an image and can
+    // afford to sit at a render for a while.
     context.set_attribute(
         nsi::node::GLOBAL,
-        &[nsi::i32!("quality.shadingsamples", 32)],
+        &[nsi::i32!("quality.shadingsamples", shading_samples)],
+    );
+
+    // **`quality.causticsamples`, 3Delight-only.** MoonRay has no
+    // equivalent control surface for caustic photon density -- its own
+    // "caustic" is an eye-caustic BRDF and a path flag, not this
+    // mechanism -- so this is inert there and only 3Delight reads it.
+    // Set unconditionally rather than only for the looks scene: the
+    // roughness sweep has no glass to focus anything through, so it
+    // costs that render nothing either way.
+    context.set_attribute(
+        nsi::node::GLOBAL,
+        &[nsi::i32!("quality.causticsamples", 64)],
+    );
+
+    // **CPU time per phase, not wall clock.** 3Delight writes proper
+    // JSON when the name ends `.json` -- `render_options`,
+    // `profiling.timings` per task, `system_time`, `cpu_usage` --
+    // undocumented but confirmed by rendering and reading the file.
+    // MoonRay's own `stats_file` (`SceneVariables.cc`): "the filename
+    // to write the rendering statistics to in CSV format", forwarded
+    // by `with_globals` in `flush.rs`. Different formats because
+    // neither renderer was asked to match the other's, but both name
+    // real per-phase CPU time, which a wall-clock reading from outside
+    // the process cannot separate from time lost to another renderer
+    // sharing the machine -- the actual question after tonight.
+    context.set_attribute(
+        nsi::node::GLOBAL,
+        &[nsi::string!("statistics.filename", stats)],
     );
 
     // A dim sky, so the emitter is the brightest thing and the metal
@@ -180,6 +264,40 @@ fn stage<'a>(
         "surfaceshader",
         None,
     );
+
+    // **A key light, because the sky alone cannot show roughness.**
+    //
+    // A uniform environment is a furnace test: an energy-conserving
+    // BRDF integrates a constant radiance field to the same value no
+    // matter how it is distributed across the hemisphere, so a matte
+    // and a mirror sphere come out the same brightness and a roughness
+    // sweep against the sky alone has nothing to sweep. What varies
+    // with roughness is the *shape* of a bright, small, angularly
+    // compact source -- its reflection blurs from a point to a blob --
+    // and that needs a source smaller than the sky.
+    //
+    // Built the same way every emitter in ɴsɪ is: geometry wearing a
+    // shader that emits, so this is the same mechanism the "emissive"
+    // look below demonstrates, not a second one to explain.
+    sphere(context, "key", [3.4, 6.0, 1.5], 0.5);
+    look(
+        context,
+        "key",
+        principled,
+        &[
+            nsi::color!("i_color", &[0.0, 0.0, 0.0]),
+            nsi::color!("incandescence", &[1.0, 0.96, 0.9]),
+            // Bright enough to read as the key against the sky, not so
+            // bright that Russian roulette keeps every path alive near
+            // it: throughput near a source this hot survives roulette
+            // far more often, and with the deeper ray counts this
+            // backend now forwards to match ɴsɪ's own defaults, that
+            // turned a five-sphere test into a half-hour one. 8 matches
+            // what the "emissive" look below already uses.
+            nsi::f32!("incandescence_intensity", 8.0),
+        ],
+    );
+    caustics(context, "key", &["emit"]);
 
     // The floor.
     context.create("floor", nsi::node::MESH, None);
@@ -206,9 +324,10 @@ fn stage<'a>(
         principled,
         &[
             nsi::color!("i_color", &[0.22, 0.22, 0.24]),
-            nsi::f32!("roughness", 0.45),
+            nsi::f32!("roughness", 0.225),
         ],
     );
+    caustics(context, "floor", &["receive"]);
 
     context.create("beauty", nsi::node::OUTPUT_LAYER, None);
     context.set_attribute(
@@ -246,6 +365,39 @@ fn stage<'a>(
 /// the measured highlight tells which way.
 
 /// The five looks, left to right.
+/// **Caustics are three separate opt-ins, all off by default.**
+///
+/// `caustics.cast`, `caustics.receive` and `caustics.emit` live on the
+/// `attributes` node, not on the shader -- `dlPrincipled` exposes none
+/// of them (only `dlConstant` does, as a convenience passthrough), so
+/// setting them has to reach the attributes node directly rather than
+/// go through `look`'s shader parameters. Confirmed rather than
+/// guessed: `dlConstant.oso`'s own metadata names `caustics.emit` and
+/// defaults it to `0`, and 3Delight's Maya integration groups the same
+/// three names under a "Caustics" section nothing turns on by hand.
+/// Geometry with none of the three set casts, receives and emits
+/// nothing extra -- which is why the key light's caustic through the
+/// glass ball was invisible until all three were set: the light never
+/// emitted into caustic paths, the glass never cast them, and the
+/// floor never received them.
+fn caustics(context: &nsi::Context, geometry: &str, roles: &[&str]) {
+    let attributes = format!("{geometry}_attributes");
+    // `nsi::i32!` needs a string *literal* or a `const` path for the
+    // name, and `caustics.{role}` is neither -- so this builds the
+    // argument the macro would, by hand, off the owned `String`.
+    let names: Vec<String> = roles
+        .iter()
+        .map(|role| format!("caustics.{role}"))
+        .collect();
+    let args: Vec<_> = names
+        .iter()
+        .map(|name| {
+            nsi::Arg::new(name.as_str(), nsi::ArgData::from(nsi::I32::new(1)))
+        })
+        .collect();
+    context.set_attribute(&attributes, &args);
+}
+
 fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
     // Matte, plastic, glass, metal, emissive -- left to right.
     let spacing = 2.3f32;
@@ -263,6 +415,7 @@ fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
             nsi::f32!("specular_level", 0.0),
         ],
     );
+    caustics(context, "matte", &["receive"]);
 
     sphere(context, "plastic", place(1), 1.0);
     look(
@@ -275,6 +428,7 @@ fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
             nsi::f32!("specular_level", 0.6),
         ],
     );
+    caustics(context, "plastic", &["receive"]);
 
     sphere(context, "glass", place(2), 1.0);
     look(
@@ -288,6 +442,10 @@ fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
             nsi::f32!("roughness", 0.0),
         ],
     );
+    // The glass ball is the focusing element: it casts the caustic
+    // rather than receiving one, which is the same "one role per
+    // object" split every renderer with this feature makes.
+    caustics(context, "glass", &["cast"]);
 
     sphere(context, "metal", place(3), 1.0);
     look(
@@ -300,6 +458,7 @@ fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
             nsi::f32!("roughness", 0.06),
         ],
     );
+    caustics(context, "metal", &["receive"]);
 
     sphere(context, "emissive", place(4), 1.0);
     look(
@@ -312,6 +471,7 @@ fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
             nsi::f32!("incandescence_intensity", 8.0),
         ],
     );
+    caustics(context, "emissive", &["receive"]);
 }
 
 #[test]
@@ -326,10 +486,13 @@ fn a_roughness_sweep_through_both_renderers() {
         return;
     }
 
-    nsi::backend::register(
-        "moonray",
-        std::sync::Arc::new(nsi_moonray::MoonRay),
-    );
+    // **Not covered by the `#[ctor]` in `src/linked.rs`.** This test
+    // binary references nothing else from that module, so nothing
+    // forces the linker to pull its object file out of the `rlib`
+    // archive and the constructor never runs -- a real Rust/linker
+    // limitation, not an oversight; see that module's doc comment for
+    // why. Calling `register` here is the reliable path regardless.
+    nsi::backend::register("moonray", Arc::new(nsi_moonray::MoonRay));
 
     let environment = std::path::Path::new(env!("NSI_MOONRAY_SHADERS"))
         .join("moonrayEnvironment.oso")
@@ -340,9 +503,22 @@ fn a_roughness_sweep_through_both_renderers() {
 
     const SWEEP: [f32; 5] = [0.05, 0.15, 0.30, 0.50, 0.80];
 
+    // Cheap: this render is read as numbers, not a picture, and every
+    // extra minute is a minute spent waiting to know if a fix worked.
+    const SHADING_SAMPLES: i32 = 32;
+
     for renderer in ["3delight", "moonray"] {
         let image = directory.join(format!("{renderer}.exr"));
         let _ = std::fs::remove_file(&image);
+        // JSON for 3Delight, CSV for MoonRay -- each renderer's own
+        // native format, not a shared one; see `stage`'s doc comment.
+        let stats_extension = if renderer == "3delight" {
+            "json"
+        } else {
+            "csv"
+        };
+        let stats = directory.join(format!("{renderer}.{stats_extension}"));
+        let _ = std::fs::remove_file(&stats);
 
         {
             let context =
@@ -354,6 +530,10 @@ fn a_roughness_sweep_through_both_renderers() {
                 &principled,
                 &environment,
                 image.to_string_lossy().as_ref(),
+                SHADING_SAMPLES,
+                stats.to_string_lossy().as_ref(),
+                1.1,
+                0.0,
             );
 
             let spacing = 2.3f32;
@@ -392,6 +572,15 @@ fn a_roughness_sweep_through_both_renderers() {
                 "MISSING"
             }
         );
+        eprintln!(
+            "{renderer}: stats {} ({})",
+            stats.display(),
+            if stats.is_file() {
+                "written"
+            } else {
+                "MISSING"
+            }
+        );
     }
 }
 
@@ -406,6 +595,14 @@ fn a_row_of_looks_through_both_renderers() {
         eprintln!("skipped: {principled} is not there");
         return;
     }
+
+    // **Not covered by the `#[ctor]` in `src/linked.rs`.** This test
+    // binary references nothing else from that module, so nothing
+    // forces the linker to pull its object file out of the `rlib`
+    // archive and the constructor never runs -- a real Rust/linker
+    // limitation, not an oversight; see that module's doc comment for
+    // why. Calling `register` here is the reliable path regardless.
+    nsi::backend::register("moonray", Arc::new(nsi_moonray::MoonRay));
 
     // **MoonRay's own environment, asked for by name.**
     //
@@ -428,9 +625,22 @@ fn a_row_of_looks_through_both_renderers() {
     let directory = std::env::temp_dir().join("nsi-moonray-shaderballs");
     std::fs::create_dir_all(&directory).expect("a writable directory");
 
+    // This render is read as an image, not a measurement, and can
+    // afford to sit for it.
+    const SHADING_SAMPLES: i32 = 256;
+
     for renderer in ["3delight", "moonray"] {
         let image = directory.join(format!("{renderer}.exr"));
         let _ = std::fs::remove_file(&image);
+        // JSON for 3Delight, CSV for MoonRay -- each renderer's own
+        // native format; see `stage`'s doc comment.
+        let stats_extension = if renderer == "3delight" {
+            "json"
+        } else {
+            "csv"
+        };
+        let stats = directory.join(format!("{renderer}.{stats_extension}"));
+        let _ = std::fs::remove_file(&stats);
 
         {
             let context =
@@ -442,6 +652,15 @@ fn a_row_of_looks_through_both_renderers() {
                 &principled,
                 &environment,
                 image.to_string_lossy().as_ref(),
+                SHADING_SAMPLES,
+                stats.to_string_lossy().as_ref(),
+                // Raised and pitched down 25 degrees: the frustum's
+                // vertical half-angle is 20 (`fov` 40), so its top edge
+                // sits 5 degrees below the horizon's fixed 0-degree
+                // elevation -- the sky is out of frame with a small
+                // margin, not balanced exactly on the edge.
+                4.0,
+                25.0,
             );
             looks(&context, &principled);
             // **A batch render: start, wait, stop.** No
@@ -463,5 +682,86 @@ fn a_row_of_looks_through_both_renderers() {
                 "MISSING"
             }
         );
+        eprintln!(
+            "{renderer}: stats {} ({})",
+            stats.display(),
+            if stats.is_file() {
+                "written"
+            } else {
+                "MISSING"
+            }
+        );
     }
+}
+
+/// Dumps `examples/shaderballs.nsi`: the five-look scene, as ɴsɪ's own
+/// text, with no renderer in the loop.
+///
+/// **`type="apistream"` is not a substitute for a renderer -- it *is*
+/// one, in the sense the interface cares about.** `NSIBegin` takes it
+/// alongside `streamfilename` and `streamformat="nsi"` to open a
+/// context that writes every subsequent call as ɴsɪ's own ASCII
+/// syntax rather than rendering it -- documented at
+/// <https://nsi.readthedocs.io/en/latest/c-api.html>. So this calls
+/// exactly `stage`, `looks` and the same `render_control` sequence the
+/// 3Delight and MoonRay contexts get, through a context that happens
+/// to write rather than shade: the file is the same scene those two
+/// render, not a hand-abridged stand-in for it.
+///
+/// `#[ignore]`d: this writes into the source tree, which a `cargo
+/// test` run has no business doing on its own, and the file only
+/// needs regenerating when the scene changes. Run it explicitly:
+/// `cargo test --features rdl2,backend-registry --test shaderballs
+/// dump_shaderballs_nsi -- --ignored`.
+#[test]
+#[ignore]
+fn dump_shaderballs_nsi() {
+    let delight = std::env::var("DELIGHT").expect("$DELIGHT");
+    let principled = format!("{delight}/osl/dlPrincipled.oso");
+    assert!(
+        std::path::Path::new(&principled).is_file(),
+        "{principled} is not there"
+    );
+
+    let environment = std::path::Path::new(env!("NSI_MOONRAY_SHADERS"))
+        .join("moonrayEnvironment.oso")
+        .to_string_lossy()
+        .into_owned();
+
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("shaderballs.nsi");
+
+    let context = nsi::Context::new(Some(&[
+        nsi::string!("type", "apistream"),
+        nsi::string!("streamfilename", out.to_string_lossy().as_ref()),
+        nsi::string!("streamformat", "nsi"),
+    ]))
+    .expect("an apistream context");
+
+    stage(
+        &context,
+        &principled,
+        &environment,
+        // The stream records whatever `outputdriver` a real render
+        // would write to; naming the same `.exr` a batch run produces
+        // keeps the dump usable as-is rather than pointing at a file
+        // this run never creates.
+        "shaderballs.exr",
+        256,
+        "shaderballs.csv",
+        4.0,
+        25.0,
+    );
+    looks(&context, &principled);
+    context.render_control(nsi::Action::Start, None);
+    context.render_control(nsi::Action::Wait, None);
+    context.render_control(nsi::Action::Stop, None);
+    drop(context);
+
+    eprintln!(
+        "shaderballs.nsi: {} ({})",
+        out.display(),
+        if out.is_file() { "written" } else { "MISSING" }
+    );
 }
