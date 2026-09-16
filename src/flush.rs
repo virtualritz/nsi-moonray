@@ -2836,6 +2836,17 @@ fn report_unread(scene: &Scene, shading: Shading, flushed: &mut Flushed) {
             .map(|(name, _)| name)
             .filter(|name| !is_consumed(known, name))
             .filter(|name| !name.ends_with(".indices"))
+            // **`caustics.cast`/`.receive`/`.emit`, permanently.**
+            // MoonRay's own "caustic" is an eye-caustic BSDF flag, not
+            // a photon-density control surface -- there is nowhere to
+            // bind these, ever, on any scene. That is a fact about the
+            // renderer, documented once in README.md's "Limitations"
+            // table, not something worth re-telling on every one of a
+            // scene's `attributes` nodes that happens to set one.
+            // Everything else stays reported: an attribute genuinely
+            // absent by oversight, rather than by MoonRay's own
+            // design, is exactly what this function exists to catch.
+            .filter(|name| !name.starts_with("caustics."))
             // On a mesh, anything else is a primitive variable and
             // does cross.
             .filter(|name| !mesh || STRUCTURE.contains(name))
@@ -6884,6 +6895,50 @@ mod tests {
         // A matte has no MoonRay counterpart and says so in its own
         // words rather than through the sweep.
         assert!(said.contains("matte"), "{said}");
+    }
+
+    /// **`caustics.*` is permanent and documented once, in
+    /// README.md, not repeated on every `attributes` node that sets
+    /// it.**
+    ///
+    /// Unlike `matte` or `crop`, this is not a gap this crate could
+    /// close: MoonRay's own "caustic" is an eye-caustic BSDF flag, not
+    /// a photon-density control surface, so there is nowhere to bind
+    /// `caustics.cast`/`.receive`/`.emit` on any scene, ever. Still
+    /// genuinely unread -- the `.rdla` carries nothing of it -- so this
+    /// checks the file rather than the report.
+    #[test]
+    fn caustics_attributes_do_not_repeat_a_permanent_limitation() {
+        let mut scene = triangle();
+        scene
+            .create("attr", "attributes")
+            .expect("a recordable edit");
+        scene
+            .set_attribute(
+                "attr",
+                vec![
+                    arg("caustics.cast", Type::I32, OwnedData::I32(vec![1])),
+                    arg("caustics.receive", Type::I32, OwnedData::I32(vec![1])),
+                ],
+            )
+            .expect("a recordable edit");
+        scene
+            .connect("attr", None, "tri", "geometryattributes")
+            .unwrap();
+
+        let flushed = flush(&scene);
+        let said = flushed.limitations.join("\n");
+
+        assert!(
+            !said.contains("caustics"),
+            "a permanent limitation, documented once in README.md, \
+             need not repeat on every attributes node\n{said}"
+        );
+        assert!(
+            !flushed.to_rdla().contains("caustics"),
+            "{}",
+            flushed.to_rdla()
+        );
     }
 
     /// **An OSL shader's own parameters cross, so the sweep must not
