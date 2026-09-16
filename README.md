@@ -254,9 +254,9 @@ What follows actually is dropped:
 | --- | --- | --- |
 | Caustics | `caustics.cast`/`.receive`/`.emit`, `quality.causticsamples` | MoonRay's "caustic" is an eye-caustic BSDF flag, not a photon-density control. Reported as unread, ignored. |
 | Holdouts | `matte` | No counterpart. Renders as ordinary geometry. |
-| Mesh lights | A `MeshLight`'s geometry also carrying a material | MoonRay segfaults on `map_shader` there (`upstream/moonray-meshlight-map-shader-segfault.md`). |
+| Mesh lights | A `MeshLight`'s geometry also carrying a material | `RenderContext::createMeshLightLayer` warns and skips a light whose geometry is in the main render `Layer`, so it can't wear a material -- kept out of the `Layer`, forced visible in camera instead. (Also kept *in* the `GeometrySet`, defensively: geometry in neither, given a `map_shader`, segfaults at render prep -- `upstream/moonray-meshlight-map-shader-segfault.md`.) |
 | OSL execution mode | Any OSL shading | Needs `-exec_mode scalar`; MoonRay's vectorized default silently skips what it can't call. Forced when this backend runs MoonRay itself; a raw `.rdla` dump needs it set by hand. |
-| Environment shading | `environment`'s full OSL network | Only colour/intensity/exposure/texture cross; see above. |
+| Environment shading | `environment`'s full OSL network, and `angle` restricting it to a cone (ɴsɪ's way of spelling a sun) | Only colour/intensity/exposure/texture cross; see above. `angle` has no `EnvLight` equivalent at all -- a sun renders as a full sky. |
 | Emissive surfaces | A shader that emits and shades | Kept a surface; emission is hit-only. |
 | Render globals | `.global` attributes with no `GLOBALS` row | Reported, ignored; MoonRay's own defaults apply. |
 | Motion samples | More than two | `scene_rdl2` has exactly two timesteps; the rest are resampled onto the shutter's ends. |

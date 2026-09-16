@@ -467,9 +467,8 @@ pub fn flush_with(
                         // `Geometry` that must **not** be in the main
                         // `Layer`: `RenderContext::createMeshLightLayer`
                         // builds a layer of its own for it and warns
-                        // and skips the light otherwise. So the mesh is
-                        // emitted, and left out of both the layer and
-                        // the geometry set.
+                        // and skips the light otherwise. It must be in
+                        // the `GeometrySet`, though -- see below.
                         let (shape, data) = mesh(
                             scene,
                             handle,
