@@ -182,18 +182,14 @@ Rust on both sides, so **no ndspy marshalling is involved**.
       The trade is that the renderer becomes a build-time dependency,
       which is exactly what loading gives up. Both routes stay.
 
-      **Its test is behind the `backend-registry` feature**, and the reason
-      is worth knowing: `src/linked.rs` builds against the published
-      `nsi-ffi-wrap` and always has, but the test calls
-      `nsi::backend::register`, which arrived with runtime renderer
-      selection and is not in a release yet. It also needs the test
-      binary and this crate to resolve *one* `nsi-ffi-wrap`, which is
-      the whole point of the route, so a local override has to name the
-      wrapper rather than only `nsi`:
-      `[patch.crates-io] nsi-ffi-wrap = { path = "../nsi/crates/nsi-ffi-wrap" }`
-      in an uncommitted `.cargo/config.toml`, then
-      `cargo nextest run --features rdl2,backend-registry`. Delete the
-      feature and the gate when that release lands.
+      **Its test was behind a `backend-registry` feature** until
+      `nsi-ffi-wrap` 0.10.3 shipped `nsi_ffi_wrap::backend`: before
+      then `src/linked.rs` built against the published crate and
+      always had, but the test's `nsi::backend::register` did not
+      exist there yet, needing a local `[patch.crates-io]` override
+      naming both `nsi` and `nsi-ffi-wrap` to resolve one wrapper for
+      the test binary and this crate together. Both the feature and
+      the gate are gone now that the release landed.
 - [x] T5.3 **Progressive delivery.** `src/stream.rs`: a snapshot loop
       paced by `areCoarsePassesComplete` and `isFrameComplete`, giving
       each snapshot to `callback.write` and honouring a closure that

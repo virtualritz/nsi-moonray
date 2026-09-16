@@ -118,10 +118,9 @@ pub struct MoonRay;
 /// and measurement rather than the mechanism's own description is
 /// what found that out.
 ///
-/// Behind `backend-registry` because `nsi_ffi_wrap::backend` is not in
-/// the published `nsi-ffi-wrap` this crate otherwise builds against --
-/// see that feature's own comment in `Cargo.toml`. A host that does
-/// not want `MoonRay` to answer `"moonray"` can call
+/// Unconditional since `nsi-ffi-wrap` 0.10.3, which is where
+/// `nsi_ffi_wrap::backend` first shipped. A host that does not want
+/// `MoonRay` to answer `"moonray"` can call
 /// `nsi_ffi_wrap::backend::register` itself afterwards with something
 /// else; registering a name twice keeps the later one.
 ///
@@ -144,7 +143,6 @@ pub struct MoonRay;
 /// signal handlers, or any other runtime service `.init_array` runs
 /// before. No global state is read here, only written, so there is
 /// nothing for run order against another `ctor` to corrupt.
-#[cfg(feature = "backend-registry")]
 #[ctor::ctor(unsafe)]
 fn register_with_nsi() {
     nsi_ffi_wrap::backend::register("moonray", std::sync::Arc::new(MoonRay));
