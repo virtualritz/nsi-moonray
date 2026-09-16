@@ -129,27 +129,35 @@ const ICOSAHEDRON_RAW_LIMIT_RADIUS: f32 = 1.341_333_2;
 /// A subdivision surface needs no `N` of its own; its limit normals
 /// come from the subdivision itself.
 ///
-/// **Carries `st`.** A raw polyhedron has no intrinsic
-/// parameterisation, and `checker.oso`'s UV input has real coordinates
-/// to vary over only because something supplies them -- the same
-/// reason the old UV sphere carried its own.
+/// **Carries `st`, per face-vertex, not per vertex.** `checker.oso`
+/// has no frequency parameter -- its own bytecode reads `uvCoord`
+/// raw and floors it, one cell per whole unit -- so the pattern lives
+/// entirely in whatever `st` supplies. A single UV value shared at
+/// each of the 12 cage vertices is continuous everywhere, and
+/// rendered, MoonRay's own smooth face-varying subdivision of that
+/// continuous field collapsed it to one slow gradient across the
+/// whole ball -- a single checker transition, not a checkerboard.
+/// 3Delight's read of the identical data instead came out a dense
+/// per-face mosaic, closer to what was wanted but for a different,
+/// unstated reason -- and relying on either renderer's own
+/// face-varying smoothing default to agree was exactly the gap. So
+/// this hands over data with no smoothing left to disagree about:
+/// three fresh corners per face, `(0, 0)`, `(K, 0)`, `(0, K)`, shared
+/// with no other face -- a genuine discontinuity at every edge,
+/// which both renderers resolve the same way because there is
+/// nothing to interpolate *across*, only within a face's own
+/// unambiguous barycentric domain.
 fn icosahedron(context: &nsi::Context, handle: &str, radius: f32) {
     let scale = radius / ICOSAHEDRON_RAW_LIMIT_RADIUS;
     let positions: Vec<[f32; 3]> = ICOSAHEDRON_VERTICES
         .iter()
         .map(|v| [v[0] * scale, v[1] * scale, v[2] * scale])
         .collect();
-    let uvs: Vec<f32> = ICOSAHEDRON_VERTICES
+    // A few checker periods per face, not one flat cell of it.
+    const K: f32 = 4.0;
+    let uvs: Vec<f32> = ICOSAHEDRON_FACES
         .iter()
-        .flat_map(|v| {
-            let [x, y, z] = *v;
-            let theta = (y / (x * x + y * y + z * z).sqrt()).acos();
-            let phi = z.atan2(x);
-            [
-                phi / std::f32::consts::TAU + 0.5,
-                theta / std::f32::consts::PI,
-            ]
-        })
+        .flat_map(|_| [0.0f32, 0.0, K, 0.0, 0.0, K])
         .collect();
     let counts = vec![3i32; ICOSAHEDRON_FACES.len()];
     let indices: Vec<i32> = ICOSAHEDRON_FACES
