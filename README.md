@@ -39,9 +39,8 @@ Without it, materials are substituted rather than translated: every ɴsɪ
 shader becomes a `UsdPreviewSurface`, MoonRay's stock PBR surface,
 carrying whatever parameters that shader is known to have. The known
 shaders are a table read off 3Delight's own compiled `.oso` files
-rather than guessed at (i.e. not a list somebody typed from memory);
-anything else is reported by name. A displacement has no such
-substitute and is reported instead.
+rather than guessed at; anything else is reported by name. A
+displacement has no such substitute and is reported instead.
 
 ### Why OSL all the way, and not a table of names
 
@@ -51,15 +50,10 @@ section 4.5 says a light is geometry whose surface shader produces an
 it is what lets *one* surface emit and reflect at once. A screen, a
 glowing filament in a metal housing, an emissive decal on a shaded
 panel: all one object, and the shader decides which parts of it glow.
-This is not a subtle distinction and it is worth being precise about
-it, because getting it wrong is exactly how a backend ends up
-"supporting lights" while quietly throwing away what makes them
-interesting.
 
 A renderer that recognises lights by shader *name* cannot express any
 of that. It infers a light type from a name, throws the shader away,
-and the object becomes a light *or* a surface -- never both, which is
-the one thing ɴsɪ's model exists to allow.
+and the object becomes a light *or* a surface.
 
 **This backend executes the shader instead.** Every ɴsɪ emitter becomes
 a MoonRay `MeshLight` -- the one class that takes arbitrary geometry --
@@ -283,11 +277,10 @@ falling back to spawning the `moonray` binary.
 **Why the default location is not arbitrary.** `src/dso.rs` searches
 it, so an installed `mnry` finds an installed renderer with no flag;
 `build.rs` searches it too, so `--features rdl2` compiles without
-`$SCENE_RDL2_ROOT` set. Installing anywhere else works, and just means
-setting that variable yourself. `tests/bundle.rs` holds those defaults
+`$SCENE_RDL2_ROOT` set. Installing anywhere else works and means
+setting that variable. `tests/bundle.rs` holds those defaults
 together, since they are written in different files and drifting apart
-is exactly the kind of thing that renders a black frame in silence and
-costs someone an afternoon to track down.
+would render a black frame in silence.
 
 For distribution rather than a checkout:
 
