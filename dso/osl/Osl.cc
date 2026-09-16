@@ -172,9 +172,26 @@ add_microfacet(Walk& walk, const MicrofacetParams& params,
                const scene_rdl2::math::Color& weight)
 {
     const scene_rdl2::math::Vec3f normal = to_vec3(params.N);
-    // OSL's alpha is a roughness; MoonRay's `roughness` is the same
-    // quantity for its GGX and Beckmann lobes.
-    const float roughness = params.xalpha;
+    // **`params.xalpha` is GGX/Beckmann alpha, not the roughness MoonRay's
+    // constructors ask for.** `dlPrincipled.osl` -- and every other OSL
+    // shader following the standard `microfacet()` closure, whose float
+    // parameter the OSL specification names `alpha` -- computes
+    // `alpha = roughness * roughness` before calling the closure, the
+    // Disney/Burley convention. MoonRay's own `CookTorranceBsdfLobe`
+    // constructor re-squares its `roughness` argument by the same
+    // convention (`BsdfCookTorrance.cc`, "Apply roughness squaring to
+    // linearize roughness response"), because it wants perceptual
+    // roughness, not alpha.
+    //
+    // Passing `xalpha` straight through squares it twice: an OSL shader
+    // asking for `roughness = 0.45` reached MoonRay as alpha `0.45^4 =
+    // 0.041` instead of `0.45^2 = 0.2025` -- five times sharper than
+    // intended, and enough to pull the lowest end of any roughness
+    // range under MoonRay's own `0.001` floor, flattening whatever a
+    // shader swept it for. The square root undoes the shader's squaring
+    // so MoonRay's own squaring reconstructs the alpha the shader
+    // actually asked for.
+    const float roughness = std::sqrt(params.xalpha);
     const int label = labelled(walk, params.label);
 
     if (params.refract) {
