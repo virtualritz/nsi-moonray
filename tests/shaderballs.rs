@@ -38,9 +38,11 @@ const PAIR: NonZeroUsize = match NonZeroUsize::new(2) {
     None => unreachable!(),
 };
 
-/// The regular icosahedron's 12 cage vertices, unit circumradius,
-/// before scaling. Standard construction: cyclic permutations of
-/// `(0, +-1, +-phi)`.
+/// The regular icosahedron's 12 cage vertices, before scaling.
+/// Standard construction: cyclic permutations of `(0, +-1, +-phi)`.
+/// **Not unit circumradius** -- this raw list's own circumradius is
+/// `sqrt(1 + phi^2)` = `1.902113`. [`ICOSAHEDRON_RAW_LIMIT_RADIUS`]
+/// already accounts for it; nothing here needs normalising first.
 const ICOSAHEDRON_VERTICES: [[f32; 3]; 12] = [
     [-1.0, 1.618_034, 0.0],
     [1.0, 1.618_034, 0.0],
@@ -83,26 +85,34 @@ const ICOSAHEDRON_FACES: [[usize; 3]; 20] = [
     [9, 8, 1],
 ];
 
-/// **Catmull-Clark's own shrink of a regular icosahedron cage,
-/// toward its limit surface, as one number.** Every cage vertex here
-/// has valence 5, and the icosahedron's symmetry group carries one
-/// vertex to any other, so every limit point sits along its own cage
-/// vertex's radial direction, pulled in by the *same* factor -- one
-/// scalar, not twelve.
+/// **The limit-surface circumradius of [`ICOSAHEDRON_VERTICES`],
+/// exactly as listed -- unscaled.** Every cage vertex here has
+/// valence 5, and the icosahedron's symmetry group carries one vertex
+/// to any other, so every limit point sits along its own cage
+/// vertex's radial direction, pulled in by the *same* factor: one
+/// number describes the whole cage's shrink, not twelve.
 ///
 /// Computed from the Catmull-Clark limit-position formula for an
 /// ordinary valence-`n` vertex (Halstead, Kass and DeRose 1993):
 /// `L = (F + 2R + (n - 3) P) / n`, `F` the mean of adjacent face
-/// centroids, `R` the mean of edge-adjacent vertices, `n = 5`.
-/// Evaluated numerically against this exact cage rather than taken on
-/// faith: `0.7051805842666442`, to the precision this needs.
+/// centroids, `R` the mean of edge-adjacent vertices, `n = 5`, `P` a
+/// cage vertex -- then `|L|`. Evaluated numerically against this
+/// exact cage rather than taken on faith: `1.3413331796632313`, to
+/// the precision this needs. **Not** the shrink *ratio*
+/// (`|L| / |P|` = `0.70518`) -- dividing `radius` by the ratio alone
+/// silently drops the raw cage's own circumradius
+/// (`sqrt(1 + phi^2)` = `1.902113`, see [`ICOSAHEDRON_VERTICES`]),
+/// scaling every ball to about `1.9x` the radius asked for. Measured
+/// after exactly that mistake rendered every ball overlapping its
+/// neighbour.
 ///
 /// A cage subdivides *inward* -- projecting its vertices onto a
 /// sphere of the wanted radius still leaves the rendered limit
 /// surface short of it, floating the ball above the floor it was
-/// placed to touch. Building the cage at `radius / SHRINK` instead
-/// puts the limit surface, what actually renders, at `radius`.
-const ICOSAHEDRON_LIMIT_SHRINK: f32 = 0.705_180_6;
+/// placed to touch. Building the cage at `radius / RAW_LIMIT_RADIUS`
+/// instead puts the limit surface, what actually renders, at
+/// `radius`.
+const ICOSAHEDRON_RAW_LIMIT_RADIUS: f32 = 1.341_333_2;
 
 /// A subdivided icosahedron, one shared node -- not one mesh per
 /// placement. [`place`] connects it under as many transforms as it
@@ -124,7 +134,7 @@ const ICOSAHEDRON_LIMIT_SHRINK: f32 = 0.705_180_6;
 /// to vary over only because something supplies them -- the same
 /// reason the old UV sphere carried its own.
 fn icosahedron(context: &nsi::Context, handle: &str, radius: f32) {
-    let scale = radius / ICOSAHEDRON_LIMIT_SHRINK;
+    let scale = radius / ICOSAHEDRON_RAW_LIMIT_RADIUS;
     let positions: Vec<[f32; 3]> = ICOSAHEDRON_VERTICES
         .iter()
         .map(|v| [v[0] * scale, v[1] * scale, v[2] * scale])
