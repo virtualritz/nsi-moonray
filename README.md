@@ -39,8 +39,9 @@ Without it, materials are substituted rather than translated: every ɴsɪ
 shader becomes a `UsdPreviewSurface`, MoonRay's stock PBR surface,
 carrying whatever parameters that shader is known to have. The known
 shaders are a table read off 3Delight's own compiled `.oso` files
-rather than guessed at; anything else is reported by name. A
-displacement has no such substitute and is reported instead.
+rather than guessed at (i.e. not a list somebody typed from memory);
+anything else is reported by name. A displacement has no such
+substitute and is reported instead.
 
 ### Why OSL all the way, and not a table of names
 
@@ -50,10 +51,15 @@ section 4.5 says a light is geometry whose surface shader produces an
 it is what lets *one* surface emit and reflect at once. A screen, a
 glowing filament in a metal housing, an emissive decal on a shaded
 panel: all one object, and the shader decides which parts of it glow.
+This is not a subtle distinction and it is worth being precise about
+it, because getting it wrong is exactly how a backend ends up
+"supporting lights" while quietly throwing away what makes them
+interesting.
 
 A renderer that recognises lights by shader *name* cannot express any
 of that. It infers a light type from a name, throws the shader away,
-and the object becomes a light *or* a surface.
+and the object becomes a light *or* a surface -- never both, which is
+the one thing ɴsɪ's model exists to allow.
 
 **This backend executes the shader instead.** Every ɴsɪ emitter becomes
 a MoonRay `MeshLight` -- the one class that takes arbitrary geometry --
@@ -277,10 +283,11 @@ falling back to spawning the `moonray` binary.
 **Why the default location is not arbitrary.** `src/dso.rs` searches
 it, so an installed `mnry` finds an installed renderer with no flag;
 `build.rs` searches it too, so `--features rdl2` compiles without
-`$SCENE_RDL2_ROOT` set. Installing anywhere else works and means
-setting that variable. `tests/bundle.rs` holds those defaults
+`$SCENE_RDL2_ROOT` set. Installing anywhere else works, and just means
+setting that variable yourself. `tests/bundle.rs` holds those defaults
 together, since they are written in different files and drifting apart
-would render a black frame in silence.
+is exactly the kind of thing that renders a black frame in silence and
+costs someone an afternoon to track down.
 
 For distribution rather than a checkout:
 
@@ -407,6 +414,57 @@ And it does things the Mitsuba backend cannot:
 
 Findings were read from the source, not the documentation; each is cited
 in `specs/001-moonray-backend/research.md`.
+
+## Limitations
+
+Everything below is permanent, in the sense that no amount of code in
+this crate fixes it -- the gap is in MoonRay's own control surface, not
+in how much of it has been wired up yet. Attribute-by-attribute gaps
+(`quality.shadingsamples` splitting into two, ray-depth counting a
+bounce differently, and so on) are not repeated here; those are
+conversions, done once, with the reasoning next to the code
+(`src/flush.rs`, the `GLOBALS` table and its doc comments). This table
+is the other kind: ɴsɪ can say something and there is nowhere on the
+MoonRay side to put it, so the flush reports it and moves on. Every row
+is a live `flushed.limitations.push(...)` site or a documented gap in
+`upstream/`, not a guess at what might be missing.
+
+One entry does not belong in a table of losses and is called out
+separately: a geometry ɴsɪ connects under several transforms, each with
+its own material, is one shared object in the interface (§ "connecting
+a node to two transforms draws it twice"), and 3Delight renders it that
+way. `RdlMeshGeometry` has no equivalent -- one object, one transform,
+one material -- so this backend expands the shared node into one
+`RdlMeshGeometry` per placement at the translator boundary
+(`src/flush.rs`, around the `shared` placements branch). The render
+matches what the ɴsɪ scene describes; nothing is dropped, only
+duplicated internally. Tested, not a workaround-in-progress.
+
+What follows *is* dropped, one way or another:
+
+| Area | ɴsɪ can express | On this backend |
+| --- | --- | --- |
+| Caustics | `caustics.cast`, `caustics.receive`, `caustics.emit` on a shader, `quality.causticsamples` on `.global` | MoonRay's "caustic" is an eye-caustic BSDF flag, not a photon-density control surface. There is nothing to bind these to, so they are reported as unread attributes and otherwise ignored. |
+| Holdouts | `matte` on a shape | No MoonRay counterpart at all. The object renders as ordinary geometry; a hole in the render stays filled. |
+| Mesh lights | A `MeshLight`'s reference geometry also carrying a material | MoonRay segfaults during render prep the moment such geometry gets a `map_shader` (`upstream/moonray-meshlight-map-shader-segfault.md`). One mesh is a light or a surface, never both, at the `RdlMeshGeometry` level -- see "a shader that emits *and* shades" above for the shading-side consequence of the same limit. |
+| OSL execution mode | Any OSL shading at all | OSL has no vectorized path; it shades one point at a time. MoonRay's default execution mode is vectorized and silently skips every OSL shader and light map it cannot call. This backend forces `-exec_mode scalar` when it links or spawns MoonRay itself; a `.rdla` dump handed to the stock `moonray` binary needs the flag set by hand, which is why the flush says so. |
+| Environment shading | An `environment` node's full OSL network -- gradients, mappings, per-component contributions | `EnvLight` is a light class, not a shader; its attribute list is a texture and colour correction, with nothing an `OslMap` could bind to. Only colour, intensity, exposure and a texture path cross; the rest of what the shader does is lost. |
+| Emissive surfaces | A single shader that both emits and shades (ɴsɪ's whole point: one surface, one closure) | `RenderContext::createMeshLightLayer` skips a light whose geometry is also in the render layer, so the object is kept a surface and its self-emission becomes hit-only -- no next-event estimation toward it. No faithful mapping exists. |
+| Render globals | `.global` attributes with no `GLOBALS`-table row, e.g. `quality.denoise`, `quality.causticsamples`, most of the rest of the forty-three attributes on that node beyond sample counts, ray depths and thread count | Reported by name (`report_unread_global`) and otherwise not applied; MoonRay's own defaults are used. |
+| Motion samples | More than two motion samples on a transform or on `P` | `scene_rdl2` has exactly two timesteps. Extra samples are resampled onto the shutter's open and close and the intermediate shapes or transforms are lost. |
+| Instancer blur | Rotation and scale varying across the shutter on an instancer | `xform_list` cannot carry two timesteps' worth of a full transform per instance; only translation is blurred, and the flush says so per instancer. |
+| Cryptomatte | One identity output per kind (object, material, ...) | MoonRay has one Cryptomatte output, not one per kind; it carries object identity and nothing else. |
+| Subdivision scheme | Any scheme a shader names | MoonRay only has Catmull-Clark; anything else falls back to it. |
+| Curve basis | Non-linear curve bases, `extrapolate` | MoonRay's curve geometry interpolates linearly only; other bases render as linear, and extrapolation has no counterpart -- the curve ends where its vertices do. |
+| Cameras | `cylindricalcamera`, most fisheye mappings other than MoonRay's default | No MoonRay equivalent; the camera is skipped, or the mapping falls back to MoonRay's own. |
+| Particles | `N` on point particles, for orientation | MoonRay renders a point as a sphere, which nothing can orient. |
+| Volumes | A scalar emission grid in an OpenVDB volume | `VdbGeometry` reads only an RGB emission grid and refuses a scalar one outright, which stops the volume rendering at all. |
+
+A polygon mesh without an `N` primvar is not on this list: MoonRay used
+to invent smooth normals for it where ɴsɪ's own default is flat
+shading, and that was a bug in this backend, not a MoonRay limitation
+-- fixed in 09f6358, `smooth_normal` is now forced off in that case.
+Listed here only so nobody goes looking for it.
 
 ## Architecture
 
