@@ -28,7 +28,7 @@
 //! Needs `$DELIGHT` for the shaders and `$NSI_MOONRAY`/a linked backend
 //! for the second render; skipped without either.
 
-#![cfg(all(feature = "rdl2", moonray, feature = "backend-registry"))]
+#![cfg(all(feature = "rdl2", moonray))]
 
 use nsi_ffi_wrap as nsi;
 use std::{num::NonZeroUsize, sync::Arc};
@@ -38,60 +38,179 @@ const PAIR: NonZeroUsize = match NonZeroUsize::new(2) {
     None => unreachable!(),
 };
 
-/// A UV sphere, built through the interface.
-fn sphere(context: &nsi::Context, handle: &str, centre: [f32; 3], radius: f32) {
-    let (segments, rings) = (64usize, 32usize);
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    for ring in 0..=rings {
-        let theta = std::f32::consts::PI * ring as f32 / rings as f32;
-        for segment in 0..segments {
-            let phi = std::f32::consts::TAU * segment as f32 / segments as f32;
-            positions.push([
-                centre[0] + radius * theta.sin() * phi.cos(),
-                centre[1] + radius * theta.cos(),
-                centre[2] + radius * theta.sin() * phi.sin(),
-            ]);
-        }
-    }
+/// The regular icosahedron's 12 cage vertices, unit circumradius,
+/// before scaling. Standard construction: cyclic permutations of
+/// `(0, +-1, +-phi)`.
+const ICOSAHEDRON_VERTICES: [[f32; 3]; 12] = [
+    [-1.0, 1.618_034, 0.0],
+    [1.0, 1.618_034, 0.0],
+    [-1.0, -1.618_034, 0.0],
+    [1.0, -1.618_034, 0.0],
+    [0.0, -1.0, 1.618_034],
+    [0.0, 1.0, 1.618_034],
+    [0.0, -1.0, -1.618_034],
+    [0.0, 1.0, -1.618_034],
+    [1.618_034, 0.0, -1.0],
+    [1.618_034, 0.0, 1.0],
+    [-1.618_034, 0.0, -1.0],
+    [-1.618_034, 0.0, 1.0],
+];
 
-    let at = |ring: usize, segment: usize| -> i32 {
-        (ring * segments + segment % segments) as i32
-    };
-    let mut counts = Vec::new();
-    let mut indices = Vec::new();
-    for ring in 0..rings {
-        for segment in 0..segments {
-            counts.push(4);
-            indices.extend_from_slice(&[
-                at(ring, segment),
-                at(ring, segment + 1),
-                at(ring + 1, segment + 1),
-                at(ring + 1, segment),
-            ]);
-        }
-    }
+/// The same cage's 20 triangular faces, each wound so its cross
+/// product points away from the origin -- confirmed numerically, not
+/// eyeballed, since an inward normal on every face is the one mistake
+/// no amount of squinting at a render catches.
+const ICOSAHEDRON_FACES: [[usize; 3]; 20] = [
+    [0, 11, 5],
+    [0, 5, 1],
+    [0, 1, 7],
+    [0, 7, 10],
+    [0, 10, 11],
+    [1, 5, 9],
+    [5, 11, 4],
+    [11, 10, 2],
+    [10, 7, 6],
+    [7, 1, 8],
+    [3, 9, 4],
+    [3, 4, 2],
+    [3, 2, 6],
+    [3, 6, 8],
+    [3, 8, 9],
+    [4, 9, 5],
+    [2, 4, 11],
+    [6, 2, 10],
+    [8, 6, 7],
+    [9, 8, 1],
+];
+
+/// **Catmull-Clark's own shrink of a regular icosahedron cage,
+/// toward its limit surface, as one number.** Every cage vertex here
+/// has valence 5, and the icosahedron's symmetry group carries one
+/// vertex to any other, so every limit point sits along its own cage
+/// vertex's radial direction, pulled in by the *same* factor -- one
+/// scalar, not twelve.
+///
+/// Computed from the Catmull-Clark limit-position formula for an
+/// ordinary valence-`n` vertex (Halstead, Kass and DeRose 1993):
+/// `L = (F + 2R + (n - 3) P) / n`, `F` the mean of adjacent face
+/// centroids, `R` the mean of edge-adjacent vertices, `n = 5`.
+/// Evaluated numerically against this exact cage rather than taken on
+/// faith: `0.7051805842666442`, to the precision this needs.
+///
+/// A cage subdivides *inward* -- projecting its vertices onto a
+/// sphere of the wanted radius still leaves the rendered limit
+/// surface short of it, floating the ball above the floor it was
+/// placed to touch. Building the cage at `radius / SHRINK` instead
+/// puts the limit surface, what actually renders, at `radius`.
+const ICOSAHEDRON_LIMIT_SHRINK: f32 = 0.705_180_6;
+
+/// A subdivided icosahedron, one shared node -- not one mesh per
+/// placement. [`place`] connects it under as many transforms as it
+/// needs; MoonRay's inability to bind more than one material to a
+/// shared object is a backend limitation to expand at the translator
+/// boundary, not a reason to duplicate the geometry an ɴsɪ scene
+/// describes once. See `flush.rs`'s handling of
+/// `Scene::placements`.
+///
+/// `subdivision.scheme = "catmull-clark"` asks the renderer's own OSD
+/// to subdivide this, rather than shading the coarse 20-triangle cage
+/// flat -- which a polygon mesh with no `N` does on both sides now
+/// (ɴsɪ's own rule, and `flush.rs`'s `smooth_normal` fix matches it).
+/// A subdivision surface needs no `N` of its own; its limit normals
+/// come from the subdivision itself.
+///
+/// **Carries `st`.** A raw polyhedron has no intrinsic
+/// parameterisation, and `checker.oso`'s UV input has real coordinates
+/// to vary over only because something supplies them -- the same
+/// reason the old UV sphere carried its own.
+fn icosahedron(context: &nsi::Context, handle: &str, radius: f32) {
+    let scale = radius / ICOSAHEDRON_LIMIT_SHRINK;
+    let positions: Vec<[f32; 3]> = ICOSAHEDRON_VERTICES
+        .iter()
+        .map(|v| [v[0] * scale, v[1] * scale, v[2] * scale])
+        .collect();
+    let uvs: Vec<f32> = ICOSAHEDRON_VERTICES
+        .iter()
+        .flat_map(|v| {
+            let [x, y, z] = *v;
+            let theta = (y / (x * x + y * y + z * z).sqrt()).acos();
+            let phi = z.atan2(x);
+            [
+                phi / std::f32::consts::TAU + 0.5,
+                theta / std::f32::consts::PI,
+            ]
+        })
+        .collect();
+    let counts = vec![3i32; ICOSAHEDRON_FACES.len()];
+    let indices: Vec<i32> = ICOSAHEDRON_FACES
+        .iter()
+        .flat_map(|f| f.iter().map(|i| *i as i32))
+        .collect();
 
     context.create(handle, nsi::node::MESH, None);
     context.set_attribute(
         handle,
         &[
+            nsi::string!("subdivision.scheme", "catmull-clark"),
             nsi::i32_slice!("nvertices", &counts),
             nsi::i32_slice!("P.indices", &indices),
             nsi::point_slice!("P", &positions),
+            nsi::f32_slice!("st", &uvs).array_len(PAIR),
         ],
     );
-    context.connect(handle, None, nsi::ROOT, "objects", None);
 }
 
-/// Bind `dlPrincipled` with one look's parameters.
+/// One placement of a shared geometry: a transform, connected to
+/// `.root` and carrying `geometry` as its only object. `look` and
+/// `caustics` then bind to `handle`, the transform -- not to
+/// `geometry`, which every other placement shares -- so each
+/// placement gets its own material the way ɴsɪ's own lightweight
+/// instancing describes: "connecting a node to two transforms draws
+/// it twice," each with the attributes gathered along *its* path.
+fn place(context: &nsi::Context, geometry: &str, handle: &str, at: [f32; 3]) {
+    context.create(handle, nsi::node::TRANSFORM, None);
+    context.set_attribute(
+        handle,
+        &[nsi::matrix_f64!(
+            "transformationmatrix",
+            &[
+                1.0,
+                0.0,
+                0.0,
+                0.0, //
+                0.0,
+                1.0,
+                0.0,
+                0.0, //
+                0.0,
+                0.0,
+                1.0,
+                0.0, //
+                at[0] as f64,
+                at[1] as f64,
+                at[2] as f64,
+                1.0f64,
+            ]
+        )],
+    );
+    context.connect(handle, None, nsi::ROOT, "objects", None);
+    context.connect(geometry, None, handle, "objects", None);
+}
+
+/// Bind `dlPrincipled` with one look's parameters, to one *placement*
+/// -- a transform from [`place`], not the shared geometry it carries.
+/// A material bound to the geometry itself would sit on every
+/// placement's path alike, which is exactly the ambiguity `flush.rs`
+/// now expands rather than collapses; bound here, each placement gets
+/// its own.
 fn look<'a>(
     context: &nsi::Context<'a>,
-    geometry: &str,
+    placement: &str,
     shader_file: &str,
     parameters: &nsi::ArgSlice<'_, 'a>,
 ) {
-    let shader = format!("{geometry}_shader");
-    let attributes = format!("{geometry}_attributes");
+    let shader = format!("{placement}_shader");
+    let attributes = format!("{placement}_attributes");
 
     context.create(&shader, nsi::node::SHADER, None);
     let mut all: nsi::ArgVec<'_, 'a> =
@@ -100,7 +219,7 @@ fn look<'a>(
     context.set_attribute(&shader, &all);
 
     context.create(&attributes, nsi::node::ATTRIBUTES, None);
-    context.connect(&attributes, None, geometry, "geometryattributes", None);
+    context.connect(&attributes, None, placement, "geometryattributes", None);
     context.connect(&shader, None, &attributes, "surfaceshader", None);
 }
 
@@ -121,6 +240,7 @@ fn stage<'a>(
     environment: &'a str,
     image: &str,
     shading_samples: i32,
+    oversampling: i32,
     stats: &str,
     camera_height: f64,
     camera_pitch_degrees: f64,
@@ -193,7 +313,7 @@ fn stage<'a>(
     // 16 gives 3Delight sixteen direct camera rays and MoonRay
     // `round(sqrt(16)) = 4`, i.e. sixteen actual -- matched, and cheap
     // enough for a confirmation render.
-    context.set_attribute("screen", &[nsi::i32!("oversampling", 16)]);
+    context.set_attribute("screen", &[nsi::i32!("oversampling", oversampling)]);
 
     // `quality.shadingsamples` is the interface's own control and
     // crosses to `SceneVariables` on the MoonRay side, so asking for a
@@ -225,6 +345,19 @@ fn stage<'a>(
         nsi::node::GLOBAL,
         &[nsi::i32!("quality.causticsamples", 64)],
     );
+
+    // **`quality.denoise` defaults to `1` -- on -- and we never turned
+    // it off.** Denoisers are guided by albedo/normal buffers that
+    // correlate poorly with view-dependent content, and blocky,
+    // patchy artefacts on noisy specular/refractive surfaces are a
+    // well-known failure mode of exactly that mismatch -- a better
+    // match for "blocky reflections and refractions" than anything
+    // about progressive rendering, which this comparison never
+    // actually tested since disabling it changed nothing visible.
+    // Off, so what is compared is this backend's sampling, not an
+    // ML model's opinion of it.
+    context
+        .set_attribute(nsi::node::GLOBAL, &[nsi::i32!("quality.denoise", 0)]);
 
     // **CPU time per phase, not wall clock.** 3Delight writes proper
     // JSON when the name ends `.json` -- `render_options`,
@@ -279,7 +412,8 @@ fn stage<'a>(
     // Built the same way every emitter in ɴsɪ is: geometry wearing a
     // shader that emits, so this is the same mechanism the "emissive"
     // look below demonstrates, not a second one to explain.
-    sphere(context, "key", [3.4, 6.0, 1.5], 0.5);
+    icosahedron(context, "key_geo", 0.5);
+    place(context, "key_geo", "key", [3.4, 6.0, 1.5]);
     look(
         context,
         "key",
@@ -380,8 +514,8 @@ fn stage<'a>(
 /// glass ball was invisible until all three were set: the light never
 /// emitted into caustic paths, the glass never cast them, and the
 /// floor never received them.
-fn caustics(context: &nsi::Context, geometry: &str, roles: &[&str]) {
-    let attributes = format!("{geometry}_attributes");
+fn caustics(context: &nsi::Context, placement: &str, roles: &[&str]) {
+    let attributes = format!("{placement}_attributes");
     // `nsi::i32!` needs a string *literal* or a `const` path for the
     // name, and `caustics.{role}` is neither -- so this builds the
     // argument the macro would, by hand, off the owned `String`.
@@ -402,9 +536,17 @@ fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
     // Matte, plastic, glass, metal, emissive -- left to right.
     let spacing = 2.3f32;
     let first = -2.0 * spacing;
-    let place = |slot: usize| [first + slot as f32 * spacing, 0.0, 0.0];
+    let slot_position = |slot: usize| [first + slot as f32 * spacing, 0.0, 0.0];
 
-    sphere(context, "matte", place(0), 1.0);
+    // **One geometry, five placements.** Every ball below is the same
+    // node, `place`d under its own transform with its own material --
+    // ɴsɪ's own lightweight instancing, not five meshes that happen to
+    // look alike. `flush.rs` expands this into five `RdlMeshGeometry`
+    // objects on the MoonRay side, where one object cannot carry five
+    // materials; the scene itself stays as small as what it describes.
+    icosahedron(context, "ball", 1.0);
+
+    place(context, "ball", "matte", slot_position(0));
     look(
         context,
         "matte",
@@ -417,7 +559,7 @@ fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
     );
     caustics(context, "matte", &["receive"]);
 
-    sphere(context, "plastic", place(1), 1.0);
+    place(context, "ball", "plastic", slot_position(1));
     look(
         context,
         "plastic",
@@ -430,7 +572,7 @@ fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
     );
     caustics(context, "plastic", &["receive"]);
 
-    sphere(context, "glass", place(2), 1.0);
+    place(context, "ball", "glass", slot_position(2));
     look(
         context,
         "glass",
@@ -447,7 +589,7 @@ fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
     // object" split every renderer with this feature makes.
     caustics(context, "glass", &["cast"]);
 
-    sphere(context, "metal", place(3), 1.0);
+    place(context, "ball", "metal", slot_position(3));
     look(
         context,
         "metal",
@@ -460,16 +602,76 @@ fn looks<'a>(context: &nsi::Context<'a>, principled: &'a str) {
     );
     caustics(context, "metal", &["receive"]);
 
-    sphere(context, "emissive", place(4), 1.0);
+    place(context, "ball", "emissive", slot_position(4));
     look(
         context,
         "emissive",
         principled,
         &[
             nsi::color!("i_color", &[0.05, 0.05, 0.05]),
-            nsi::color!("incandescence", &[1.0, 0.72, 0.36]),
-            nsi::f32!("incandescence_intensity", 8.0),
+            // **Lower than the key light's `8`, and deliberately.** The
+            // checker's white cells are `color1 = [1, 1, 1]`; at `8`
+            // they clip to pure white in the display transform (a
+            // plain gamma curve, no highlight compression), and a
+            // clipped cell reads identically to its neighbour --
+            // exactly what made the pattern unreadable on 3Delight's
+            // render even though it was rendering correctly (confirmed
+            // by measuring green in its reflection). `1.5` keeps both
+            // cells inside the visible range.
+            nsi::f32!("incandescence_intensity", 1.5),
         ],
+    );
+    // **A green-and-white checker driving `incandescence`, not a flat
+    // colour.** A constant emitter renders identically whether it is
+    // this OSL network actually executing per shading point or
+    // MoonRay's own built-in `MeshLight` substituted underneath it --
+    // the one thing this backend must never do (`nsi-moonray must
+    // never execute built in shaders in moonray, it must only call
+    // built in closures via osl`). A spatially varying pattern is the
+    // difference made visible: a substitute has no shading network to
+    // consult and can only be uniform.
+    //
+    // 3Delight's own `checker.oso`, not a shader this crate wrote.
+    // Its "UV Coordinates" input names `"uvCoord"` as a
+    // `default_connection` -- a hint for a DCC's shader-graph editor
+    // to auto-insert 3Delight's own `uvCoord.oso` utility (confirmed
+    // by reading *its* bytecode: a plain `getattribute("st", ...)`,
+    // no inputs) when nothing is wired by hand. That auto-insertion is
+    // Maya-plugin behaviour, not something the raw ɴsɪ API does on its
+    // own -- measured, not assumed: left unconnected, `checker.oso`
+    // rendered as a flat, unpatterned white, its literal `[0, 0]`
+    // default rather than anything read from the mesh. Instantiating
+    // `uvCoord.oso` explicitly and wiring both connections by hand is
+    // what a host without that auto-completion has to do instead.
+    let checker = principled.replace("dlPrincipled.oso", "checker.oso");
+    let uv_coord = principled.replace("dlPrincipled.oso", "uvCoord.oso");
+    context.create("emissive_uv", nsi::node::SHADER, None);
+    context.set_attribute(
+        "emissive_uv",
+        &[nsi::string!("shaderfilename", uv_coord.as_str())],
+    );
+    context.create("emissive_checker", nsi::node::SHADER, None);
+    context.set_attribute(
+        "emissive_checker",
+        &[
+            nsi::string!("shaderfilename", checker.as_str()),
+            nsi::color!("color1", &[1.0, 1.0, 1.0]),
+            nsi::color!("color2", &[0.0, 1.0, 0.0]),
+        ],
+    );
+    context.connect(
+        "emissive_uv",
+        Some("o_outUV"),
+        "emissive_checker",
+        "uvCoord",
+        None,
+    );
+    context.connect(
+        "emissive_checker",
+        Some("outColor"),
+        "emissive_shader",
+        "incandescence",
+        None,
     );
     caustics(context, "emissive", &["receive"]);
 }
@@ -531,6 +733,7 @@ fn a_roughness_sweep_through_both_renderers() {
                 &environment,
                 image.to_string_lossy().as_ref(),
                 SHADING_SAMPLES,
+                16,
                 stats.to_string_lossy().as_ref(),
                 1.1,
                 0.0,
@@ -538,13 +741,16 @@ fn a_roughness_sweep_through_both_renderers() {
 
             let spacing = 2.3f32;
             let first = -2.0 * spacing;
+            // One geometry, five placements -- see `looks`'s own
+            // comment on the same pattern.
+            icosahedron(&context, "ball", 1.0);
             for (slot, roughness) in SWEEP.into_iter().enumerate() {
                 let handle = format!("ball{slot}");
-                sphere(
+                place(
                     &context,
+                    "ball",
                     &handle,
                     [first + slot as f32 * spacing, 0.0, 0.0],
-                    1.0,
                 );
                 look(
                     &context,
@@ -558,7 +764,21 @@ fn a_roughness_sweep_through_both_renderers() {
                 );
             }
 
-            context.render_control(nsi::Action::Start, None);
+            // **Batch means fully converged, not merely started.**
+            // Confirmed against 3Delight for Maya's own reference
+            // implementation (`NSIExport.cpp`, the offline-render branch):
+            // it sets `progressive = 0` explicitly, commented "Disable
+            // progressive in offline renders" -- meaning an unset
+            // `progressive` is not safely `0` on its own, the same way
+            // `interactive` unset does not make a render batch by
+            // accident, only by construction. Left unset, `"wait"` may
+            // return once *a* pass is done rather than the fully
+            // converged one -- a plausible source of the blocky,
+            // under-refined look on glossy/refractive surfaces.
+            context.render_control(
+                nsi::Action::Start,
+                Some(&[nsi::i32!("progressive", 0)]),
+            );
             context.render_control(nsi::Action::Wait, None);
             context.render_control(nsi::Action::Stop, None);
         }
@@ -627,6 +847,12 @@ fn a_row_of_looks_through_both_renderers() {
 
     // This render is read as an image, not a measurement, and can
     // afford to sit for it.
+    //
+    // Doubling this to 512 left the blocky patch on the metal ball's
+    // reflection of the emissive sphere completely unchanged -- ruling
+    // out ordinary shading-sample noise. Back to 256; the next test is
+    // `oversampling` (AA), a different parameter this scene has never
+    // varied.
     const SHADING_SAMPLES: i32 = 256;
 
     for renderer in ["3delight", "moonray"] {
@@ -653,6 +879,15 @@ fn a_row_of_looks_through_both_renderers() {
                 &environment,
                 image.to_string_lossy().as_ref(),
                 SHADING_SAMPLES,
+                // **Back to 16, matching the sweep.** Quadrupling this
+                // to 64 was a diagnostic for a blocky patch on the
+                // metal ball's reflection of the emissive sphere --
+                // ruled out, alongside doubled `shading_samples`,
+                // by measuring the patch's own colour: a genuine green
+                // tint, not noise. It was the checker's own hard cell
+                // edges, reflected in a mirror, converged correctly at
+                // 16 all along.
+                16,
                 stats.to_string_lossy().as_ref(),
                 // Raised and pitched down 25 degrees: the frustum's
                 // vertical half-angle is 20 (`fov` 40), so its top edge
@@ -668,7 +903,21 @@ fn a_row_of_looks_through_both_renderers() {
             // and a render driven through it is a different thing
             // being measured. `stop` after the wait so the frame is
             // finished rather than merely left.
-            context.render_control(nsi::Action::Start, None);
+            // **Batch means fully converged, not merely started.**
+            // Confirmed against 3Delight for Maya's own reference
+            // implementation (`NSIExport.cpp`, the offline-render branch):
+            // it sets `progressive = 0` explicitly, commented "Disable
+            // progressive in offline renders" -- meaning an unset
+            // `progressive` is not safely `0` on its own, the same way
+            // `interactive` unset does not make a render batch by
+            // accident, only by construction. Left unset, `"wait"` may
+            // return once *a* pass is done rather than the fully
+            // converged one -- a plausible source of the blocky,
+            // under-refined look on glossy/refractive surfaces.
+            context.render_control(
+                nsi::Action::Start,
+                Some(&[nsi::i32!("progressive", 0)]),
+            );
             context.render_control(nsi::Action::Wait, None);
             context.render_control(nsi::Action::Stop, None);
         }
@@ -711,7 +960,7 @@ fn a_row_of_looks_through_both_renderers() {
 /// `#[ignore]`d: this writes into the source tree, which a `cargo
 /// test` run has no business doing on its own, and the file only
 /// needs regenerating when the scene changes. Run it explicitly:
-/// `cargo test --features rdl2,backend-registry --test shaderballs
+/// `cargo test --features rdl2 --test shaderballs
 /// dump_shaderballs_nsi -- --ignored`.
 #[test]
 #[ignore]
@@ -749,12 +998,27 @@ fn dump_shaderballs_nsi() {
         // this run never creates.
         "shaderballs.exr",
         256,
+        16,
         "shaderballs.csv",
         4.0,
         25.0,
     );
     looks(&context, &principled);
-    context.render_control(nsi::Action::Start, None);
+    // **Batch means fully converged, not merely started.**
+    // Confirmed against 3Delight for Maya's own reference
+    // implementation (`NSIExport.cpp`, the offline-render branch):
+    // it sets `progressive = 0` explicitly, commented "Disable
+    // progressive in offline renders" -- meaning an unset
+    // `progressive` is not safely `0` on its own, the same way
+    // `interactive` unset does not make a render batch by
+    // accident, only by construction. Left unset, `"wait"` may
+    // return once *a* pass is done rather than the fully
+    // converged one -- a plausible source of the blocky,
+    // under-refined look on glossy/refractive surfaces.
+    context.render_control(
+        nsi::Action::Start,
+        Some(&[nsi::i32!("progressive", 0)]),
+    );
     context.render_control(nsi::Action::Wait, None);
     context.render_control(nsi::Action::Stop, None);
     drop(context);
