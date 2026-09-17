@@ -51,7 +51,7 @@ intensity come from the closure, sampled per point, not a name lookup.
 The name table above is only a fallback, for no-OSL builds or a shader
 with no compiled `.oso` behind it.
 
-Two gaps stay open:
+Two gaps remain:
 
 - **`environment` shaders don't run.** `EnvLight` is a light class,
   not a shader. Colour, intensity, exposure and a texture path cross;
@@ -62,12 +62,12 @@ Two gaps stay open:
   instead of rdl2's.)
 - **A shader that both emits and shades has no faithful mapping.**
   MoonRay won't put a `MeshLight`'s geometry in the render layer too,
-  so one mesh is shaded *or* a light, never both. The surface wins;
+  so one mesh is shaded *or* a light, never both. Kept as a surface;
   its emission goes hit-only.
 
 Everything else -- surfaces, displacement, volumes, emissive geometry
 -- crosses and runs as OSL. Nothing built-in ever substitutes for a
-shader the scene actually named.
+shader the scene named.
 
 ## One scene, two renderers
 
@@ -109,21 +109,20 @@ mnry watch /spool -r                  # render what lands there
 ```
 
 Modelled on [`rdl`](https://github.com/virtualritz/delight-helpers),
-the `renderdl` replacement -- same subcommands, same frame-sequence
-syntax, but parses ɴsɪ streams into `nsi-intermediate` and builds
-MoonRay's scene directly rather than going through 3Delight's C API.
+the `renderdl` replacement: same subcommands and frame-sequence syntax,
+but parses ɴsɪ streams into `nsi-intermediate` and builds MoonRay's
+scene directly instead of going through 3Delight's C API.
 
 Scene classes load from MoonRay's `rdl2dso` directory: beside the
 running binary first, then the platform default
 (`~/.local/share/moonray` on Linux, `~/Library/Application
 Support/MoonRay` on macOS, `%LOCALAPPDATA%\MoonRay` on Windows).
-`--dso-path` / `$NSI_MOONRAY_DSO` overrides, and isn't second-guessed
--- a path that isn't there fails rather than silently falling back to
-some other install.
+`--dso-path` / `$NSI_MOONRAY_DSO` overrides that: a path that isn't
+there fails, rather than falling back to some other install.
 
 Built without `rdl2` (the default), `mnry render` writes the scene and
-spawns the `moonray` binary instead. Same image, later; `-v` says
-which path it took.
+spawns the `moonray` binary instead, which renders the same image, just
+later. `-v` says which path it took.
 
 ## The demo
 
@@ -154,7 +153,7 @@ both would be ambiguous.
 Taking a `.rdla` dump to the stock `moonray` binary needs
 `-exec_mode scalar` -- OSL shades one point at a time, and MoonRay's
 default vectorized mode silently skips what it can't call. The linked
-and spawned paths here force it already.
+and spawned paths here force this flag themselves.
 
 ## Installing
 
@@ -246,9 +245,10 @@ One thing that isn't a loss: a geometry ɴsɪ connects under several
 transforms with different materials is one shared object in the
 interface, and `RdlMeshGeometry` can't do that natively -- so this
 backend expands it into one object per placement at the translator
-boundary. Nothing dropped, only duplicated internally. Tested.
+boundary, and it's tested: nothing is dropped, only duplicated
+internally.
 
-What follows actually is dropped:
+What follows is dropped:
 
 | Area | ɴsɪ can express | On this backend |
 | --- | --- | --- |
