@@ -4737,6 +4737,92 @@ fn with_parts(
     object
 }
 
+/// A phantom point continuing the line from `far` through `near`, one
+/// step past `near` -- ɴsɪ's own words for what `extrapolate` adds are
+/// "as with linear interpolation".
+fn extrapolated_point(far: [f32; 3], near: [f32; 3]) -> [f32; 3] {
+    [
+        2.0 * near[0] - far[0],
+        2.0 * near[1] - far[1],
+        2.0 * near[2] - far[2],
+    ]
+}
+
+fn extrapolated_scalar(far: f32, near: f32) -> f32 {
+    2.0 * near - far
+}
+
+/// One phantom point prepended and appended, linearly extrapolated
+/// from the two points nearest each end.
+///
+/// **Why a `b-spline` or `catmull-rom` cage needs this at all.** Each
+/// basis's control points are not points the curve passes through
+/// except in the middle of the cage -- the first and last two only
+/// *pull* the curve toward them. A phantom point past each end gives
+/// the basis one more pull to work with, at exactly the position a
+/// straight line through the two real end points would put it, so the
+/// curve reaches the real first and last vertex the way ɴsɪ's own
+/// wording promises. `points` must have at least two entries.
+fn with_extrapolated_ends(points: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let mut out = Vec::with_capacity(points.len() + 2);
+    out.push(extrapolated_point(points[1], points[0]));
+    out.extend_from_slice(points);
+    out.push(extrapolated_point(
+        points[points.len() - 2],
+        points[points.len() - 1],
+    ));
+    out
+}
+
+fn with_extrapolated_scalar_ends(values: &[f32]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(values.len() + 2);
+    out.push(extrapolated_scalar(values[1], values[0]));
+    out.extend_from_slice(values);
+    out.push(extrapolated_scalar(
+        values[values.len() - 2],
+        values[values.len() - 1],
+    ));
+    out
+}
+
+/// A `catmull-rom` knot vector, as MoonRay's own `bezier` -- the exact
+/// same cubic polynomial through a change of control points, not an
+/// approximation. [`uniform_cubic_splines::convert::convert_spline`]
+/// does the matrix work; this only reshapes 3-tuples into three
+/// parallel channels and back, since the conversion is defined over
+/// one scalar channel at a time.
+fn catmull_rom_points_to_bezier(points: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    use uniform_cubic_splines::{
+        basis::{Bezier, CatmullRom},
+        convert::convert_spline,
+    };
+    let (xs, ys, zs): (Vec<f32>, Vec<f32>, Vec<f32>) = points
+        .iter()
+        .map(|p| (p[0], p[1], p[2]))
+        .fold((vec![], vec![], vec![]), |(mut xs, mut ys, mut zs), p| {
+            xs.push(p.0);
+            ys.push(p.1);
+            zs.push(p.2);
+            (xs, ys, zs)
+        });
+    let xs = convert_spline::<CatmullRom, Bezier, f32>(&xs);
+    let ys = convert_spline::<CatmullRom, Bezier, f32>(&ys);
+    let zs = convert_spline::<CatmullRom, Bezier, f32>(&zs);
+    xs.into_iter()
+        .zip(ys)
+        .zip(zs)
+        .map(|((x, y), z)| [x, y, z])
+        .collect()
+}
+
+fn catmull_rom_scalars_to_bezier(values: &[f32]) -> Vec<f32> {
+    use uniform_cubic_splines::{
+        basis::{Bezier, CatmullRom},
+        convert::convert_spline,
+    };
+    convert_spline::<CatmullRom, Bezier, f32>(values)
+}
+
 /// One `curves` node, as a `RdlCurveGeometry`.
 ///
 /// The interface gives a vertex count per curve, a flat `P`, a `width`
@@ -4744,6 +4830,19 @@ fn with_parts(
 /// type. **`width` is a diameter and `radius_list` is a radius**, so
 /// the halving is the one arithmetic step and getting it wrong renders
 /// hair twice as thick with nothing to say so.
+///
+/// **`catmull-rom` and `extrapolate` are reshaped here, not reported.**
+/// Neither is a MoonRay feature; both are a change of control points
+/// this translator can compute itself before MoonRay ever sees the
+/// curve -- `catmull-rom` by an exact basis conversion to `bezier`,
+/// `extrapolate` by adding the one phantom point at each end that a
+/// `b-spline` or `catmull-rom` cage needs to actually reach its own
+/// first and last vertex. Bezier's own chained segments already meet
+/// their end vertices, so `extrapolate` on a `bezier` or `linear`
+/// curve changes nothing and asks for nothing here. `hobby` alone
+/// remains unmapped: it solves a global curvature-minimising system,
+/// not a fixed per-segment basis change, so there is no exact
+/// conversion to compute.
 fn curves(
     scene: &Scene,
     handle: &str,
@@ -4757,47 +4856,41 @@ fn curves(
         return object;
     };
 
-    if let Some(OwnedData::I32(counts)) =
-        node.effective("nvertices").map(|arg| &arg.data)
-    {
-        object = object.set(
-            "curves_vertex_count",
-            Value::Vector(
-                counts.iter().map(|count| Value::Int(*count)).collect(),
-            ),
-        );
-    }
+    let counts: Vec<i32> =
+        match node.effective("nvertices").map(|arg| &arg.data) {
+            Some(OwnedData::I32(counts)) => counts.clone(),
+            _ => Vec::new(),
+        };
 
-    if let Some(points) = positions(node, "P") {
-        object = object.set("vertex_list_0", Value::Vector(points));
-    }
+    let points: Vec<[f32; 3]> = match node.effective("P").map(|arg| &arg.data) {
+        Some(OwnedData::F32(values)) => values
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| [p[0], p[1], p[2]])
+            .collect(),
+        Some(OwnedData::F64(values)) => values
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32])
+            .collect(),
+        _ => Vec::new(),
+    };
 
-    // The interface's `width` is a diameter, constant or per vertex.
-    match node.effective("width").map(|arg| &arg.data) {
-        Some(OwnedData::F32(widths)) => {
-            object = object.set(
-                "radius_list",
-                Value::Vector(
-                    widths
-                        .iter()
-                        .map(|width| Value::Float(width * 0.5))
-                        .collect(),
-                ),
-            );
-        }
-        Some(OwnedData::F64(widths)) => {
-            object = object.set(
-                "radius_list",
-                Value::Vector(
-                    widths
-                        .iter()
-                        .map(|width| Value::Float((*width as f32) * 0.5))
-                        .collect(),
-                ),
-            );
-        }
-        _ => {}
-    }
+    // The interface's `width` is a diameter, constant or per vertex;
+    // only the per-vertex case (one width per point) needs reshaping
+    // alongside the points -- a constant or per-curve width describes
+    // no variation along the curve for extrapolation or a basis
+    // change to preserve.
+    let widths: Option<Vec<f32>> =
+        match node.effective("width").map(|arg| &arg.data) {
+            Some(OwnedData::F32(values)) => Some(values.clone()),
+            Some(OwnedData::F64(values)) => {
+                Some(values.iter().map(|w| *w as f32).collect())
+            }
+            _ => None,
+        };
 
     // `basis` is the interface's spelling of the interpolation.
     let basis = match node.effective("basis").map(|arg| &arg.data) {
@@ -4806,28 +4899,123 @@ fn curves(
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
         _ => None,
     };
-    let curve_type = match basis.as_deref() {
-        None | Some("linear") => Some(0),
-        Some("bezier") => Some(1),
-        Some("b-spline") | Some("bspline") => Some(2),
-        Some(other) => {
-            flushed.limitations.push(format!(
-                "curves {handle:?} use basis {other:?}, which MoonRay's \
-                 curve geometry has no interpolation for; it renders \
-                 linear"
-            ));
+
+    // A plain `int`, true when non-zero -- its mere presence is not
+    // the question, since a scene can and does set it to `0`
+    // explicitly.
+    let extrapolate = matches!(
+        node.effective("extrapolate").map(|arg| &arg.data),
+        Some(OwnedData::I32(values))
+            if values.first().copied().unwrap_or(0) != 0
+    );
+
+    // A phantom point at each end only means something for a basis
+    // whose control points do not already reach the curve's own ends
+    // -- `bezier`'s chained segments do, by construction.
+    let needs_endpoints = matches!(
+        basis.as_deref(),
+        Some("b-spline" | "bspline" | "catmull-rom")
+    );
+
+    let total: usize = counts.iter().map(|count| *count as usize).sum();
+    let per_vertex_widths =
+        widths.as_ref().is_some_and(|widths| widths.len() == total);
+
+    let reshape = !counts.is_empty() && points.len() == total;
+
+    let mut new_counts = Vec::with_capacity(counts.len());
+    let mut new_points = Vec::with_capacity(points.len());
+    let mut new_widths = per_vertex_widths.then(|| Vec::with_capacity(total));
+    let mut converted_to_bezier = false;
+
+    if reshape {
+        let mut offset = 0usize;
+        for &count in &counts {
+            let n = count as usize;
+            let mut curve_points = points[offset..offset + n].to_vec();
+            let mut curve_widths = per_vertex_widths.then(|| {
+                widths.as_ref().expect("checked above")[offset..offset + n]
+                    .to_vec()
+            });
+
+            if extrapolate && needs_endpoints && n >= 4 {
+                curve_points = with_extrapolated_ends(&curve_points);
+                curve_widths =
+                    curve_widths.map(|w| with_extrapolated_scalar_ends(&w));
+            }
+
+            if basis.as_deref() == Some("catmull-rom")
+                && curve_points.len() >= 4
+            {
+                curve_points = catmull_rom_points_to_bezier(&curve_points);
+                curve_widths =
+                    curve_widths.map(|w| catmull_rom_scalars_to_bezier(&w));
+                converted_to_bezier = true;
+            }
+
+            new_counts.push(curve_points.len() as i32);
+            new_points.extend(curve_points);
+            if let (Some(all), Some(one)) = (&mut new_widths, curve_widths) {
+                all.extend(one);
+            }
+            offset += n;
+        }
+    } else {
+        new_counts = counts;
+        new_points = points;
+        new_widths = if per_vertex_widths {
+            widths.clone()
+        } else {
             None
+        };
+    }
+
+    object = object.set(
+        "curves_vertex_count",
+        Value::Vector(new_counts.into_iter().map(Value::Int).collect()),
+    );
+    object = object.set(
+        "vertex_list_0",
+        Value::Vector(new_points.into_iter().map(Value::Vec3f).collect()),
+    );
+    if let Some(widths) = new_widths {
+        object = object.set(
+            "radius_list",
+            Value::Vector(
+                widths.into_iter().map(|w| Value::Float(w * 0.5)).collect(),
+            ),
+        );
+    } else if let Some(widths) = widths.filter(|_| !per_vertex_widths) {
+        // Constant or per-curve: passed through unreshaped, at its
+        // own original cardinality.
+        object = object.set(
+            "radius_list",
+            Value::Vector(
+                widths.into_iter().map(|w| Value::Float(w * 0.5)).collect(),
+            ),
+        );
+    }
+
+    let curve_type = if converted_to_bezier {
+        Some(1)
+    } else {
+        match basis.as_deref() {
+            None | Some("linear") => Some(0),
+            Some("bezier") => Some(1),
+            Some("b-spline") | Some("bspline") => Some(2),
+            Some("catmull-rom") => Some(1), // too short to convert above
+            Some(other) => {
+                flushed.limitations.push(format!(
+                    "curves {handle:?} use basis {other:?}, which MoonRay's \
+                     curve geometry has no interpolation for; it renders \
+                     linear"
+                ));
+                None
+            }
         }
     };
     if let Some(curve_type) = curve_type {
         object = object.set("curve_type", Value::Int(curve_type));
-    }
-
-    if node.effective("extrapolate").is_some() {
-        flushed.limitations.push(format!(
-            "curves {handle:?} ask for `extrapolate`, which MoonRay has \
-             no counterpart for; the curve ends where its vertices do"
-        ));
     }
 
     object
@@ -6718,6 +6906,221 @@ mod tests {
         );
         // `bspline` is 2 in MoonRay's own enum.
         assert!(rdla.contains("[\"curve_type\"] = 2"), "{rdla}");
+    }
+
+    /// **`catmull-rom` crosses as MoonRay's `bezier`, exactly.**
+    ///
+    /// Six collinear, evenly spaced points make three overlapping
+    /// Catmull-Rom segments (windows `[0,1,2,3]`, `[1,2,3,4]`,
+    /// `[2,3,4,5]`); a Catmull-Rom spline through evenly spaced
+    /// collinear points *is* that line, so the converted Bezier
+    /// control points must land on it too, evenly spaced along it --
+    /// a real numeric check, not just a row/column-count one.
+    ///
+    /// **The curve itself only reaches points 1 through 4, not 0 and
+    /// 5.** Catmull-Rom's own sliding window uses each segment's outer
+    /// two points -- `P0` and `P3` of `[P0, P1, P2, P3]` -- only to aim
+    /// the tangent at `P1` and `P2`, the points the curve actually
+    /// passes through; `P0` and `P5` here are exactly that role and
+    /// never interpolated. That gap is what `extrapolate` exists to
+    /// close, tested separately.
+    #[test]
+    fn catmull_rom_basis_crosses_as_bezier() {
+        let mut scene = triangle();
+        scene.create("hair", "curves").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "hair",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![6])),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, //
+                            1.0, 0.0, 0.0, //
+                            2.0, 0.0, 0.0, //
+                            3.0, 0.0, 0.0, //
+                            4.0, 0.0, 0.0, //
+                            5.0, 0.0, 0.0,
+                        ]),
+                    ),
+                    arg(
+                        "basis",
+                        Type::String,
+                        OwnedData::String(vec![b"catmull-rom".to_vec()]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("hair", None, ".root", "objects").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        // `bezier` is 1 in MoonRay's own enum: 3 segments, chained,
+        // is `3*3 + 1 = 10` control points.
+        assert!(rdla.contains("[\"curve_type\"] = 1"), "{rdla}");
+        assert!(rdla.contains("[\"curves_vertex_count\"] = { 10}"), "{rdla}");
+        // Scoped to `hair`'s own block: `triangle()` carries a
+        // `vertex_list_0` of its own, at `Vec3(0, 0, 0)`,
+        // `Vec3(1, 0, 0)`, `Vec3(0, 1, 0)` -- close enough to this
+        // curve's own collinear points to be mistaken for them by an
+        // unscoped search.
+        let hair = rdla
+            .split("RdlCurveGeometry(\"hair\") {")
+            .nth(1)
+            .unwrap_or_default();
+        let points = hair
+            .split("[\"vertex_list_0\"] = ")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or_default();
+        // rdl2's own float formatting, not this test's -- computed
+        // once and pinned rather than reformatted here, so a
+        // formatting difference cannot silently pass this off as a
+        // numeric one.
+        for expected in [
+            "Vec3(1, 0, 0)",
+            "Vec3(1.33333325, 0, 0)",
+            "Vec3(1.66666651, 0, 0)",
+            "Vec3(2, 0, 0)",
+            "Vec3(2.33333325, 0, 0)",
+            "Vec3(2.66666651, 0, 0)",
+            "Vec3(3, 0, 0)",
+            "Vec3(3.33333349, 0, 0)",
+            "Vec3(3.66666675, 0, 0)",
+            "Vec3(4, 0, 0)",
+        ] {
+            assert!(points.contains(expected), "{expected} in {points}");
+        }
+    }
+
+    /// **`extrapolate` adds one phantom point at each end.**
+    ///
+    /// A `b-spline` cage's own control points do not reach the curve's
+    /// first and last vertex; `extrapolate` asks for the one point at
+    /// each end that makes it -- computed here, not reported as a
+    /// limitation.
+    #[test]
+    fn extrapolate_adds_a_phantom_point_at_each_end() {
+        let mut scene = triangle();
+        scene.create("hair", "curves").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "hair",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, //
+                            0.0, 1.0, 0.0, //
+                            0.0, 2.0, 0.0, //
+                            0.0, 3.0, 0.0,
+                        ]),
+                    ),
+                    arg(
+                        "basis",
+                        Type::String,
+                        OwnedData::String(vec![b"b-spline".to_vec()]),
+                    ),
+                    arg("extrapolate", Type::I32, OwnedData::I32(vec![1])),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("hair", None, ".root", "objects").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("[\"curves_vertex_count\"] = { 6}"), "{rdla}");
+        // Collinear, evenly spaced points extrapolate to more of the
+        // same line: one step before (0,-1,0) and one step past
+        // (0,4,0).
+        assert!(rdla.contains("Vec3(0, -1, 0)"), "{rdla}");
+        assert!(rdla.contains("Vec3(0, 4, 0)"), "{rdla}");
+        assert!(rdla.contains("[\"curve_type\"] = 2"), "{rdla}");
+    }
+
+    /// **`extrapolate 0` is not `extrapolate` asked for at all.**
+    ///
+    /// A plain `int`'s mere presence on the node is not the question
+    /// -- a scene can and does set it to `0` explicitly, and that
+    /// must not extrapolate anything.
+    #[test]
+    fn extrapolate_explicitly_off_adds_nothing() {
+        let mut scene = triangle();
+        scene.create("hair", "curves").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "hair",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, //
+                            0.0, 1.0, 0.0, //
+                            0.0, 2.0, 0.0, //
+                            0.0, 3.0, 0.0,
+                        ]),
+                    ),
+                    arg(
+                        "basis",
+                        Type::String,
+                        OwnedData::String(vec![b"b-spline".to_vec()]),
+                    ),
+                    arg("extrapolate", Type::I32, OwnedData::I32(vec![0])),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("hair", None, ".root", "objects").unwrap();
+
+        let rdla = flush(&scene).to_rdla();
+
+        assert!(rdla.contains("[\"curves_vertex_count\"] = { 4}"), "{rdla}");
+    }
+
+    /// `hobby` solves a global curvature-minimising system, not a
+    /// fixed per-segment basis -- no exact conversion exists, so it
+    /// stays a reported limitation rather than an approximation.
+    #[test]
+    fn hobby_basis_is_still_reported() {
+        let mut scene = triangle();
+        scene.create("hair", "curves").expect("a recordable edit");
+        scene
+            .set_attribute(
+                "hair",
+                vec![
+                    arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+                    arg(
+                        "P",
+                        Type::Point,
+                        OwnedData::F32(vec![
+                            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0,
+                            3.0, 0.0,
+                        ]),
+                    ),
+                    arg(
+                        "basis",
+                        Type::String,
+                        OwnedData::String(vec![b"hobby".to_vec()]),
+                    ),
+                ],
+            )
+            .expect("a recordable edit");
+        scene.connect("hair", None, ".root", "objects").unwrap();
+
+        let flushed = flush(&scene);
+        assert!(
+            flushed
+                .limitations
+                .iter()
+                .any(|line| line.contains("\"hobby\"")),
+            "{:?}",
+            flushed.limitations
+        );
     }
 
     /// **A `particles` node becomes MoonRay's point geometry.**

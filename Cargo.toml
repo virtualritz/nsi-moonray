@@ -246,6 +246,11 @@ oslquery-petite = "0.1.2"
 # streams and a caller who took a file from a pipeline should not have
 # to know that.
 nsi-parse = { version = "0.1", features = ["gzip"] }
+# Catmull-Rom crosses as chained Bezier segments (`curves()` in
+# `flush.rs`): MoonRay's curve geometry has no Catmull-Rom basis of
+# its own, but the two describe the same cubic polynomial through a
+# change of control points, exactly, not an approximation.
+uniform-cubic-splines = "0.5"
 
 [dev-dependencies]
 # The application side of the callback test: it writes the closure the
