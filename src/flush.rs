@@ -482,13 +482,18 @@ pub fn flush_with(
                         objects.push(shape);
 
                         // **In a `GeometrySet`, out of the `Layer`.**
-                        // Two different exclusions and only one is
-                        // MoonRay's rule about mesh lights: a light
-                        // whose geometry belongs to no set *segfaults*
-                        // in render prep the moment it is given a
-                        // `map_shader`, inside `QuadMesh::getQuadST`,
-                        // before a pixel. Written up in
-                        // `upstream/moonray-meshlight-map-shader-segfault.md`.
+                        // Two different exclusions, and the
+                        // `GeometrySet` one is not this backend's
+                        // choice to get wrong: a real MoonRay bug,
+                        // not this crate's, segfaults in render prep
+                        // the moment a light whose geometry belongs
+                        // to no set is given a `map_shader`, inside
+                        // `QuadMesh::getQuadST`, before a pixel.
+                        // Written up for MoonRay's own issue tracker
+                        // in
+                        // `upstream/moonray-meshlight-map-shader-segfault.md`;
+                        // this crate simply never produces the
+                        // configuration that triggers it.
                         geometries.push(Reference::new(MESH, handle));
 
                         flushed.limitations.push(format!(
