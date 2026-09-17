@@ -252,7 +252,7 @@ What follows is dropped:
 
 | Area | ɴsɪ can express | On this backend |
 | --- | --- | --- |
-| Caustics | `caustics.cast`/`.receive`/`.emit`, `quality.causticsamples` | MoonRay's "caustic" is an eye-caustic BSDF flag, not a photon-density control. Reported as unread, ignored. |
+| Caustics | `caustics.cast`/`.receive`/`.emit`, `quality.causticsamples` | MoonRay's "caustic" is an eye-caustic BSDF lobe, not a photon-density control. Reported as unread, ignored. |
 | Holdouts | `matte` | No counterpart. Renders as ordinary geometry. |
 | Mesh lights | A `MeshLight`'s geometry also carrying a material | `RenderContext::createMeshLightLayer` warns and skips a light whose geometry is in the main render `Layer`, so it can't wear a material -- kept out of the `Layer`, forced visible in camera instead. (Also kept *in* the `GeometrySet`, defensively: geometry in neither, given a `map_shader`, segfaults at render prep -- `upstream/moonray-meshlight-map-shader-segfault.md`.) |
 | OSL execution mode | Any OSL shading | Needs `-exec_mode scalar`; MoonRay's vectorized default silently skips what it can't call. Forced when this backend runs MoonRay itself; a raw `.rdla` dump needs it set by hand. |
@@ -261,10 +261,9 @@ What follows is dropped:
 | Render globals | `.global` attributes with no `GLOBALS` row | Reported, ignored; MoonRay's own defaults apply. |
 | Motion samples | More than two | `scene_rdl2` has exactly two timesteps; the rest are resampled onto the shutter's ends. |
 | Instancer blur | Rotation/scale across the shutter | Only translation blurs. |
-| Cryptomatte | One output per kind | MoonRay has one output total, object identity only. |
-| Subdivision scheme | Any scheme named in a mesh's `subdivision.scheme` | Catmull-Clark only -- MoonRay's own subdivision implementation has no other scheme, and this is a geometry attribute, not something OSL touches. |
-| Curve basis | Non-linear bases, `extrapolate` | Linear only; no extrapolation. |
-| Cameras | `cylindricalcamera`, most fisheye mappings | No equivalent; skipped or falls back. |
+| Cryptomatte | `id.geometry`, `id.scenepath`, `id.surfaceshader` as distinct outputs | One MoonRay output for all three, and it isn't even an intrinsic object id: it reads whatever float primitive attribute is named in `SceneVariables.deep_id_attribute_names`, defaulting to `0.0` for everything if that's unset. |
+| Curve basis | `catmull-rom`, `hobby`, `extrapolate` | `linear` and `b-spline` cross and render correctly; `catmull-rom`/`hobby` have no MoonRay counterpart and fall back to linear; `extrapolate` has none either. |
+| Cameras | `cylindricalcamera` | No equivalent; camera is skipped. (Every ɴsɪ fisheye `mapping` -- `equidistant`, `equisolidangle`, `orthographic`, `stereographic` -- has a MoonRay counterpart and crosses correctly.) |
 | Particles | `N` for orientation | Renders as spheres regardless. |
 | Volumes | Scalar OpenVDB emission grid | `VdbGeometry` reads RGB emission only. |
 

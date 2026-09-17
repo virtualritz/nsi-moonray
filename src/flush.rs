@@ -5136,17 +5136,21 @@ fn result(
         // and Cryptomatte was unreachable.
         //
         // MoonRay's answer is one result, `cryptomatte`, whose label
-        // string is read off `RenderOutput.cc` rather than guessed. It
-        // carries the object identity for the whole layer, so the
-        // three interface spellings are one MoonRay output and the
-        // difference between them -- geometry, scene path, shader --
-        // is not one MoonRay makes.
+        // string is read off `RenderOutput.cc` rather than guessed --
+        // and it is not even an intrinsic object id: `Cryptomatte.cc`
+        // reads whichever float primitive attribute
+        // `SceneVariables.deep_id_attribute_names` names, defaulting
+        // to `0.0` for every object when that is unset. The three
+        // interface spellings -- geometry, scene path, shader -- are
+        // one MoonRay output regardless, and a difference MoonRay has
+        // no way to make on its own.
         ("builtin", Some(name)) if name.starts_with("id.") => {
             flushed.limitations.push(format!(
                 "output layer {layer:?} asks for {name:?}; MoonRay has \
                  one Cryptomatte output rather than an identity per \
-                 kind, so it carries object identity and not \
-                 specifically {:?}",
+                 kind, reading whichever primitive attribute \
+                 `deep_id_attribute_names` names rather than {:?} \
+                 specifically",
                 name.trim_start_matches("id.")
             ));
             object.set("result", Value::String("cryptomatte".into()))
