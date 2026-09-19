@@ -4836,23 +4836,23 @@ fn catmull_rom_scalars_to_bezier(values: &[f32]) -> Vec<f32> {
 /// the halving is the one arithmetic step and getting it wrong renders
 /// hair twice as thick with nothing to say so.
 ///
+/// **ɴsɪ's own `basis` values, per the spec (`nsi.pdf`, the `curves`
+/// node): `"b-spline"`, `"catmull-rom"` and `"linear"`, defaulting to
+/// `"catmull-rom"` when unset.** Nothing else -- no `"bezier"`, no
+/// `"hobby"`. Both appeared in earlier code (one carried over
+/// unchecked, one from a web fetch that turned out to have
+/// fabricated an entry on a documentation page); neither is real, and
+/// both are gone. An unrecognised string, including either of those,
+/// falls to the same reported-and-linear path as any other.
+///
 /// **`catmull-rom` and `extrapolate` are reshaped here, not reported.**
 /// Neither is a MoonRay feature; both are a change of control points
 /// this translator can compute itself before MoonRay ever sees the
-/// curve -- `catmull-rom` by an exact basis conversion to `bezier`,
-/// `extrapolate` by adding the one phantom point at each end that a
-/// `b-spline` or `catmull-rom` cage needs to actually reach its own
-/// first and last vertex. Bezier's own chained segments already meet
-/// their end vertices, so `extrapolate` on a `bezier` or `linear`
-/// curve changes nothing and asks for nothing here.
-///
-/// **`hobby` has no exact conversion, so it is approximated instead of
-/// dropped to `linear`.** It solves a global curvature-minimising
-/// system, not a fixed per-segment basis change like the other three,
-/// so there is no matrix that reproduces it exactly. Treated as
-/// `catmull-rom` -- the same points, run through the same exact
-/// conversion to `bezier` -- rather than discarding its curvature
-/// altogether; reported as an approximation, since it is one.
+/// curve -- `catmull-rom` (the default, so this is the common case,
+/// not a special one) by an exact basis conversion to MoonRay's own
+/// `bezier`, `extrapolate` by adding the one phantom point at each
+/// end that a `b-spline` or `catmull-rom` cage needs to actually
+/// reach its own first and last vertex.
 fn curves(
     scene: &Scene,
     handle: &str,
@@ -4920,33 +4920,19 @@ fn curves(
     );
 
     // A phantom point at each end only means something for a basis
-    // whose control points do not already reach the curve's own ends
-    // -- `bezier`'s chained segments do, by construction. `hobby` is
-    // treated as `catmull-rom` below, for the same reason it needs the
-    // same phantom points here.
+    // whose control points do not already reach the curve's own ends.
+    // `catmull-rom` here includes the unset case: it is ɴsɪ's own
+    // default, per the spec, not this backend's.
     let needs_endpoints = matches!(
         basis.as_deref(),
-        Some("b-spline" | "bspline" | "catmull-rom" | "hobby")
+        None | Some("b-spline" | "bspline" | "catmull-rom")
     );
 
-    // **`hobby` is approximated as `catmull-rom`, not converted
-    // exactly.** Both are smooth interpolating splines through the
-    // same points, and Catmull-Rom is the closer stand-in this crate
-    // can compute exactly -- unlike falling back to `linear`, which
-    // throws every bit of curvature away. Still not what a scene
-    // asking for Hobby's own curvature-minimising fit actually wanted,
-    // so it is reported as an approximation rather than passed off as
-    // the genuine article.
+    // `catmull-rom` is ɴsɪ's own default `basis`, so an unset one goes
+    // through the exact same conversion, not a separate "no basis set"
+    // path that would leave the common case unhandled.
     let treated_as_catmull_rom =
-        matches!(basis.as_deref(), Some("catmull-rom" | "hobby"));
-    if basis.as_deref() == Some("hobby") {
-        flushed.limitations.push(format!(
-            "curves {handle:?} use basis \"hobby\", which MoonRay's curve \
-             geometry has no interpolation for; approximated as \
-             catmull-rom (converted exactly to bezier from there), not \
-             Hobby's own curvature-minimising fit"
-        ));
-    }
+        matches!(basis.as_deref(), None | Some("catmull-rom"));
 
     let total: usize = counts.iter().map(|count| *count as usize).sum();
     let per_vertex_widths =
@@ -5029,18 +5015,19 @@ fn curves(
         Some(1)
     } else {
         match basis.as_deref() {
-            None | Some("linear") => Some(0),
-            Some("bezier") => Some(1),
+            Some("linear") => Some(0),
             Some("b-spline") | Some("bspline") => Some(2),
-            // Too short to convert above (fewer than 4 points), so
-            // there was no bezier conversion to fall back on -- linear
-            // it is.
-            Some("catmull-rom") | Some("hobby") => Some(0),
+            // Either genuinely `None` (ɴsɪ's own default is
+            // `catmull-rom`, handled above) or `catmull-rom` itself,
+            // too short to convert (fewer than 4 points) -- no bezier
+            // conversion to fall back on, so linear it is.
+            None | Some("catmull-rom") => Some(0),
             Some(other) => {
                 flushed.limitations.push(format!(
-                    "curves {handle:?} use basis {other:?}, which MoonRay's \
-                     curve geometry has no interpolation for; it renders \
-                     linear"
+                    "curves {handle:?} use basis {other:?}, which is not \
+                     one of ɴsɪ's own (\"b-spline\", \"catmull-rom\", \
+                     \"linear\") and which MoonRay's curve geometry has \
+                     no interpolation for either way; it renders linear"
                 ));
                 None
             }
@@ -7114,14 +7101,13 @@ mod tests {
         assert!(rdla.contains("[\"curves_vertex_count\"] = { 4}"), "{rdla}");
     }
 
-    /// `hobby` solves a global curvature-minimising system, not a
-    /// fixed per-segment basis, so there is no exact conversion to
-    /// compute -- but it is treated as `catmull-rom` (a smooth
-    /// interpolating spline through the same points) rather than
-    /// discarded to `linear`, and the approximation is reported rather
-    /// than passed off as the genuine article.
+    /// **An unset `basis` is ɴsɪ's own `catmull-rom` default, not
+    /// `linear`.** `nsi.pdf`'s own words: `basis` is `string
+    /// (catmull-rom)`. A curve that never sets it still gets the exact
+    /// conversion to `bezier`, the same as one that spells the name
+    /// out.
     #[test]
-    fn hobby_basis_is_approximated_as_catmull_rom_not_dropped_to_linear() {
+    fn an_unset_basis_defaults_to_catmull_rom() {
         let mut scene = triangle();
         scene.create("hair", "curves").expect("a recordable edit");
         scene
@@ -7137,31 +7123,67 @@ mod tests {
                             3.0, 0.0,
                         ]),
                     ),
-                    arg(
-                        "basis",
-                        Type::String,
-                        OwnedData::String(vec![b"hobby".to_vec()]),
-                    ),
                 ],
             )
             .expect("a recordable edit");
         scene.connect("hair", None, ".root", "objects").unwrap();
 
-        let flushed = flush(&scene);
-        assert!(
-            flushed
-                .limitations
-                .iter()
-                .any(|line| line.contains("\"hobby\"")
-                    && line.contains("catmull-rom")),
-            "{:?}",
-            flushed.limitations
-        );
+        let rdla = flush(&scene).to_rdla();
 
-        let rdla = flushed.to_rdla();
-        // `bezier` is 1 in MoonRay's own enum: the approximation was
-        // actually converted, not silently rendered linear.
+        // `bezier` is 1 in MoonRay's own enum: converted, not left
+        // linear.
         assert!(rdla.contains("[\"curve_type\"] = 1"), "{rdla}");
+    }
+
+    /// **`bezier` and `hobby` are not ɴsɪ basis names.** `nsi.pdf`
+    /// lists exactly three: `b-spline`, `catmull-rom`, `linear`.
+    /// Neither belongs in the recognised set -- both did at one point,
+    /// one carried over unchecked and one from a fabricated
+    /// documentation claim -- so both now take the same reported,
+    /// rendered-linear path as any other unrecognised string.
+    #[test]
+    fn bezier_and_hobby_are_not_real_basis_names() {
+        for basis in ["bezier", "hobby"] {
+            let mut scene = triangle();
+            scene.create("hair", "curves").expect("a recordable edit");
+            scene
+                .set_attribute(
+                    "hair",
+                    vec![
+                        arg("nvertices", Type::I32, OwnedData::I32(vec![4])),
+                        arg(
+                            "P",
+                            Type::Point,
+                            OwnedData::F32(vec![
+                                0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0,
+                                0.0, 3.0, 0.0,
+                            ]),
+                        ),
+                        arg(
+                            "basis",
+                            Type::String,
+                            OwnedData::String(vec![basis.as_bytes().to_vec()]),
+                        ),
+                    ],
+                )
+                .expect("a recordable edit");
+            scene.connect("hair", None, ".root", "objects").unwrap();
+
+            let flushed = flush(&scene);
+            assert!(
+                flushed
+                    .limitations
+                    .iter()
+                    .any(|line| line.contains(&format!("{basis:?}"))),
+                "{basis}: {:?}",
+                flushed.limitations
+            );
+            assert!(
+                !flushed.to_rdla().contains("[\"curve_type\"]"),
+                "{basis}: {}",
+                flushed.to_rdla()
+            );
+        }
     }
 
     /// **A `particles` node becomes MoonRay's point geometry.**

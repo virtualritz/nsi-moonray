@@ -262,7 +262,6 @@ What follows is dropped:
 | Motion samples | More than two | `scene_rdl2` has exactly two timesteps; the rest are resampled onto the shutter's ends. |
 | Instancer blur | Rotation/scale across the shutter | Only translation blurs. |
 | Cryptomatte | `id.geometry`, `id.scenepath`, `id.surfaceshader` as distinct outputs | One MoonRay output for all three, and it isn't even an intrinsic object id: it reads whatever float primitive attribute is named in `SceneVariables.deep_id_attribute_names`, defaulting to `0.0` for everything if that's unset. |
-| Curve basis | `hobby` | `linear`, `b-spline` and `catmull-rom` all cross exactly -- `catmull-rom` by a basis conversion to `bezier` ([`uniform-cubic-splines`](https://crates.io/crates/uniform-cubic-splines)), and `extrapolate` by adding the phantom end point a `b-spline`/`catmull-rom` cage needs to reach its own end vertices. `hobby` solves a global curvature-minimising system, not a fixed per-segment basis, so there is no exact conversion -- approximated as `catmull-rom` (a smooth interpolating spline through the same points) rather than dropped to `linear`, which would discard its curvature entirely. |
 | Cameras | `cylindricalcamera` | No equivalent; camera is skipped. (Every ɴsɪ fisheye `mapping` -- `equidistant`, `equisolidangle`, `orthographic`, `stereographic` -- has a MoonRay counterpart and crosses correctly.) |
 | Particles | `N` for orientation | Renders as spheres regardless. |
 | Volumes | Scalar OpenVDB emission grid | `VdbGeometry` reads RGB emission only. |
