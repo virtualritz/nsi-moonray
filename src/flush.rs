@@ -4838,20 +4838,23 @@ fn catmull_rom_scalars_to_bezier(values: &[f32]) -> Vec<f32> {
 ///
 /// **ɴsɪ's own `basis` values, per the spec (`nsi.pdf`, the `curves`
 /// node): `"b-spline"`, `"catmull-rom"` and `"linear"`, defaulting to
-/// `"catmull-rom"` when unset.** Nothing else -- no `"bezier"`, no
-/// `"hobby"`. Both appeared in earlier code (one carried over
-/// unchecked, one from a web fetch that turned out to have
-/// fabricated an entry on a documentation page); neither is real, and
-/// both are gone. An unrecognised string, including either of those,
-/// falls to the same reported-and-linear path as any other.
+/// `"catmull-rom"` when unset.** `"bezier"` and `"hobby"` are not
+/// among them, but they are not nothing either -- `renderdl` itself
+/// recognises neither, warning `E6036 unsupported value` for both,
+/// identically to a nonsense string, and falling back to its own
+/// default. This backend matches that fallback (see
+/// `treated_as_catmull_rom` below) rather than inventing a different
+/// one: 3Delight's own behaviour for a basis it does not implement is
+/// the one thing here that is not this backend's to decide.
 ///
 /// **`catmull-rom` and `extrapolate` are reshaped here, not reported.**
 /// Neither is a MoonRay feature; both are a change of control points
 /// this translator can compute itself before MoonRay ever sees the
-/// curve -- `catmull-rom` (the default, so this is the common case,
-/// not a special one) by an exact basis conversion to MoonRay's own
-/// `bezier`, `extrapolate` by adding the one phantom point at each
-/// end that a `b-spline` or `catmull-rom` cage needs to actually
+/// curve -- `catmull-rom` (ɴsɪ's own default, and 3Delight's own
+/// fallback for anything it does not implement, so this is the common
+/// case, not a special one) by an exact basis conversion to MoonRay's
+/// own `bezier`, `extrapolate` by adding the one phantom point at
+/// each end that a `b-spline` or `catmull-rom` cage needs to actually
 /// reach its own first and last vertex.
 fn curves(
     scene: &Scene,
@@ -4920,19 +4923,24 @@ fn curves(
     );
 
     // A phantom point at each end only means something for a basis
-    // whose control points do not already reach the curve's own ends.
-    // `catmull-rom` here includes the unset case: it is ɴsɪ's own
-    // default, per the spec, not this backend's.
-    let needs_endpoints = matches!(
-        basis.as_deref(),
-        None | Some("b-spline" | "bspline" | "catmull-rom")
-    );
+    // whose control points do not already reach the curve's own ends
+    // -- true of everything except `linear`, which has none of its
+    // own to add a phantom to, and `b-spline`, treated further down.
+    let needs_endpoints = basis.as_deref() != Some("linear");
 
-    // `catmull-rom` is ɴsɪ's own default `basis`, so an unset one goes
-    // through the exact same conversion, not a separate "no basis set"
-    // path that would leave the common case unhandled.
+    // **Any basis 3Delight itself does not implement falls back to
+    // its own default, `catmull-rom` -- not to `linear`.** Confirmed
+    // by rendering, not assumed: `renderdl` on a `curves` node with
+    // `basis "hobby"`, `basis "bezier"`, or a nonsense string all
+    // produce the identical `E6036 unsupported value ... for
+    // attribute 'basis'` warning, with no special case for any
+    // particular name -- 3Delight does not distinguish a name someone
+    // once tried from one nobody ever will. So this backend matches
+    // 3Delight's own fallback rather than picking a different one:
+    // an unset `basis`, `"catmull-rom"` itself, or anything this
+    // backend does not recognise all take the same path.
     let treated_as_catmull_rom =
-        matches!(basis.as_deref(), None | Some("catmull-rom"));
+        !matches!(basis.as_deref(), Some("linear" | "b-spline" | "bspline"));
 
     let total: usize = counts.iter().map(|count| *count as usize).sum();
     let per_vertex_widths =
@@ -5011,31 +5019,39 @@ fn curves(
         );
     }
 
+    // A name that is neither ɴsɪ's three real bases nor left unset --
+    // reported once, regardless of whether this curve had enough
+    // points to actually convert, since the fact worth saying is
+    // "3Delight does not implement this either", not "this particular
+    // curve was too short".
+    if !matches!(
+        basis.as_deref(),
+        None | Some("linear" | "b-spline" | "bspline" | "catmull-rom")
+    ) {
+        flushed.limitations.push(format!(
+            "curves {handle:?} use basis {:?}, which is not one of ɴsɪ's \
+             own (\"b-spline\", \"catmull-rom\", \"linear\") -- 3Delight \
+             itself does not implement it either (`renderdl` warns \
+             E6036 and falls back to its own default), so this backend \
+             matches that fallback: treated as catmull-rom, converted to \
+             bezier the same way",
+            basis.as_deref().unwrap_or("")
+        ));
+    }
+
     let curve_type = if converted_to_bezier {
-        Some(1)
+        1
     } else {
         match basis.as_deref() {
-            Some("linear") => Some(0),
-            Some("b-spline") | Some("bspline") => Some(2),
-            // Either genuinely `None` (ɴsɪ's own default is
-            // `catmull-rom`, handled above) or `catmull-rom` itself,
-            // too short to convert (fewer than 4 points) -- no bezier
-            // conversion to fall back on, so linear it is.
-            None | Some("catmull-rom") => Some(0),
-            Some(other) => {
-                flushed.limitations.push(format!(
-                    "curves {handle:?} use basis {other:?}, which is not \
-                     one of ɴsɪ's own (\"b-spline\", \"catmull-rom\", \
-                     \"linear\") and which MoonRay's curve geometry has \
-                     no interpolation for either way; it renders linear"
-                ));
-                None
-            }
+            Some("b-spline") | Some("bspline") => 2,
+            // `linear`, or too short to convert (fewer than 4 points)
+            // -- no bezier conversion to fall back on, so linear it
+            // is, the same way 3Delight's own fallback would look on
+            // a curve this short.
+            _ => 0,
         }
     };
-    if let Some(curve_type) = curve_type {
-        object = object.set("curve_type", Value::Int(curve_type));
-    }
+    object = object.set("curve_type", Value::Int(curve_type));
 
     object
 }
@@ -7135,15 +7151,18 @@ mod tests {
         assert!(rdla.contains("[\"curve_type\"] = 1"), "{rdla}");
     }
 
-    /// **`bezier` and `hobby` are not ɴsɪ basis names.** `nsi.pdf`
-    /// lists exactly three: `b-spline`, `catmull-rom`, `linear`.
-    /// Neither belongs in the recognised set -- both did at one point,
-    /// one carried over unchecked and one from a fabricated
-    /// documentation claim -- so both now take the same reported,
-    /// rendered-linear path as any other unrecognised string.
+    /// **`bezier` and `hobby` are not ɴsɪ basis names, but 3Delight
+    /// itself does not treat them as errors either -- it falls back to
+    /// its own default, `catmull-rom`, and this backend matches that
+    /// fallback rather than picking `linear` on its own initiative.**
+    /// Confirmed by rendering: `renderdl` on either warns `E6036
+    /// unsupported value`, identically to a nonsense string, and
+    /// proceeds -- not a special case for either name, just its
+    /// generic answer to any basis it does not implement.
     #[test]
-    fn bezier_and_hobby_are_not_real_basis_names() {
-        for basis in ["bezier", "hobby"] {
+    fn bezier_and_hobby_are_treated_as_catmull_rom_like_3delights_own_fallback()
+    {
+        for basis in ["bezier", "hobby", "nonsense-xyz"] {
             let mut scene = triangle();
             scene.create("hair", "curves").expect("a recordable edit");
             scene
@@ -7178,8 +7197,10 @@ mod tests {
                 "{basis}: {:?}",
                 flushed.limitations
             );
+            // `bezier` is 1 in MoonRay's own enum: converted, not left
+            // linear, matching 3Delight's own catmull-rom fallback.
             assert!(
-                !flushed.to_rdla().contains("[\"curve_type\"]"),
+                flushed.to_rdla().contains("[\"curve_type\"] = 1"),
                 "{basis}: {}",
                 flushed.to_rdla()
             );
