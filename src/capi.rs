@@ -288,7 +288,12 @@ unsafe fn argument(param: &FfiParam) -> Option<OwnedArgument> {
             | Type::Point
             | Type::Vector
             | Type::Normal
-            | Type::MatrixF32 => OwnedData::F32(
+            | Type::MatrixF32
+            // A homogeneous point of four `f32`s (`Pw`, new in 3Delight
+            // 2.9.210). `components()` already reports 4 scalars per
+            // element for it, so it packs into `OwnedData::F32` exactly
+            // like the three-component point/vector/normal types above.
+            | Type::Point4F32 => OwnedData::F32(
                 std::slice::from_raw_parts(param.data as *const f32, scalars)
                     .to_vec(),
             ),
@@ -363,6 +368,7 @@ fn tag(value: c_int) -> Option<Type> {
         8 => Type::MatrixF32,
         0x18 => Type::MatrixF64,
         9 => Type::Reference,
+        10 => Type::Point4F32,
         _ => return None,
     })
 }
@@ -371,6 +377,7 @@ fn tag(value: c_int) -> Option<Type> {
 const fn components(type_tag: Type) -> usize {
     match type_tag {
         Type::Color | Type::Point | Type::Vector | Type::Normal => 3,
+        Type::Point4F32 => 4,
         Type::MatrixF32 | Type::MatrixF64 => 16,
         _ => 1,
     }
