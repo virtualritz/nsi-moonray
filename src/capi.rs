@@ -581,7 +581,7 @@ pub unsafe extern "C" fn NSISetAttributeAtTime(
 
     with(ctx, |context| {
         context
-            .scene
+            .scene_mut()
             .set_attribute_at_time(&handle, time, arguments)
     });
 }
